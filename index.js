@@ -3,9 +3,13 @@
  *
  * Rotas:
  *  GET /files
- *      Lista os arquivos da pasta configurada (metadados apenas —
- *      não baixa o conteúdo, só o essencial pra montar a listagem
- *      no portal: id, nome, mimeType, tamanho, data de modificação).
+ *      Lista os DOCUMENTOS (arquivos reais, nunca pastas) que existem
+ *      dentro da pasta oficial — navegando recursivamente por dentro de
+ *      QUALQUER subpasta que exista lá (a pasta oficial hoje só contém
+ *      subpastas — os documentos ficam dentro delas, possivelmente em
+ *      vários níveis). Cada item já vem com o caminho da subpasta onde
+ *      foi encontrado (campo `pasta`), útil para o portal organizar a
+ *      exibição. Só metadados — não baixa o conteúdo aqui.
  *
  *  GET /api/documents/:id/file
  *      Devolve o arquivo original (binário) de um arquivo específico,
@@ -13,15 +17,17 @@
  *      hoje em fetchDocumentFile().
  *
  * Segurança:
- *  - Ambas as rotas só servem arquivos que estão DENTRO da pasta
- *    configurada em DRIVE_FOLDER_ID (verificado via drive.files.get
- *    checando o campo "parents"). Isso evita que alguém troque o
- *    fileId na URL e acesse outro arquivo qualquer que a conta de
- *    serviço enxergue no Drive.
+ *  - Ambas as rotas só servem arquivos que estão DENTRO da árvore de
+ *    pastas que começa em DRIVE_FOLDER_ID — verificado subindo a cadeia
+ *    de pastas-mãe (campo "parents") a partir do arquivo pedido, até
+ *    encontrar a pasta oficial ou esgotar os níveis. Isso evita que
+ *    alguém troque o fileId na URL e acesse outro arquivo qualquer que a
+ *    conta de serviço enxergue no Drive, mesmo com a estrutura em
+ *    subpastas.
  *  - Este serviço é somente leitura (scope drive.readonly) — não
  *    envia nada para o Drive, só lê.
- *  - NOVO: chave de acesso (BACKEND_ACCESS_KEY) + CORS restrito
- *    (ALLOWED_ORIGIN). Antes, as duas rotas ficavam abertas para
+ *  - Chave de acesso (BACKEND_ACCESS_KEY) + CORS restrito
+ *    (ALLOWED_ORIGIN). Sem elas, as duas rotas ficam abertas para
  *    QUALQUER pessoa na internet que descobrisse a URL — mesmo sem
  *    saber a senha do portal, dava para listar e baixar todos os
  *    documentos reais. Ver notas de deploy no final do arquivo.
@@ -109,37 +115,70 @@ const auth = new google.auth.GoogleAuth({
 
 const drive = google.drive({ version: "v3", auth });
 
-/** Confere se o arquivo pertence à pasta autorizada antes de servir. */
+const FOLDER_MIME_TYPE = "application/vnd.google-apps.folder";
+
+/** Confere se o arquivo pertence à árvore da pasta autorizada, subindo a
+ *  cadeia de pastas-mãe a partir dele (a pasta oficial hoje só tem
+ *  subpastas, então o arquivo nunca está direto nela — pode estar vários
+ *  níveis abaixo). Limite de 8 níveis é só uma proteção contra loop; a
+ *  estrutura real do Drive não chega nem perto disso. */
 async function pertenceAPastaAutorizada(fileId) {
-  const meta = await drive.files.get({
-    fileId,
-    fields: "id, parents",
+  let idAtual = fileId;
+  for (let nivel = 0; nivel < 8; nivel++) {
+    const meta = await drive.files.get({
+      fileId: idAtual,
+      fields: "id, parents",
+    });
+    const pais = meta.data.parents || [];
+    if (pais.includes(DRIVE_FOLDER_ID)) return true;
+    if (pais.length === 0) return false;
+    idAtual = pais[0]; // pasta-mãe direta (sem múltiplos pais nesta estrutura)
+  }
+  return false;
+}
+
+/** Percorre recursivamente a árvore de pastas a partir de `pastaId`,
+ *  coletando todos os ARQUIVOS reais (nunca pastas) encontrados em
+ *  qualquer nível, junto com o caminho de subpastas onde cada um está
+ *  (`pasta`, ex.: "ALVARÁS" ou "MATRIZ / CNPJ"). Usada por GET /files. */
+async function listarArquivosRecursivo(pastaId, caminho = []) {
+  const result = await drive.files.list({
+    q: `'${pastaId}' in parents and trashed = false`,
+    fields: "files(id, name, mimeType, size, modifiedTime)",
+    pageSize: 200,
+    orderBy: "name",
   });
-  return (meta.data.parents || []).includes(DRIVE_FOLDER_ID);
+
+  const itens = result.data.files || [];
+  const arquivos = [];
+
+  for (const item of itens) {
+    if (item.mimeType === FOLDER_MIME_TYPE) {
+      const doSubnivel = await listarArquivosRecursivo(item.id, [...caminho, item.name]);
+      arquivos.push(...doSubnivel);
+    } else {
+      arquivos.push({
+        driveFileId: item.id,
+        nomeOriginal: item.name,
+        mimeType: item.mimeType,
+        tamanho: item.size ? Number(item.size) : null,
+        modificadoEm: item.modifiedTime,
+        pasta: caminho.length > 0 ? caminho.join(" / ") : null,
+      });
+    }
+  }
+
+  return arquivos;
 }
 
 /**
  * GET /files
- * Lista os documentos da pasta (só metadados — sem baixar o binário).
+ * Lista todos os documentos (arquivos reais) dentro da pasta oficial,
+ * navegando por dentro de qualquer subpasta que exista lá.
  */
 app.get("/files", exigirChaveDeAcesso, async (req, res) => {
   try {
-    const result = await drive.files.list({
-      q: `'${DRIVE_FOLDER_ID}' in parents and trashed = false`,
-      fields:
-        "files(id, name, mimeType, size, modifiedTime, md5Checksum)",
-      pageSize: 200,
-      orderBy: "name",
-    });
-
-    const arquivos = (result.data.files || []).map((f) => ({
-      driveFileId: f.id,
-      nomeOriginal: f.name,
-      mimeType: f.mimeType,
-      tamanho: f.size ? Number(f.size) : null,
-      modificadoEm: f.modifiedTime,
-    }));
-
+    const arquivos = await listarArquivosRecursivo(DRIVE_FOLDER_ID);
     res.json({ pasta: DRIVE_FOLDER_ID, total: arquivos.length, arquivos });
   } catch (err) {
     console.error("Erro ao listar arquivos da pasta:", err.message);
