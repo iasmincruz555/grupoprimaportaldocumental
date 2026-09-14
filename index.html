@@ -7810,60 +7810,95 @@ function isoDateToBR(iso) {
   const finalizada = status === "concluida" || status === "cancelada";
   return { atrasada: !finalizada && diasRestantes < 0, diasRestantes };
 }
+/** fetchHomologAnexoFile: busca o binário REAL de um anexo de homologação —
+ *  mesma prioridade já usada em fetchDocumentFile, reaproveitando a própria
+ *  função (nenhuma lógica de rede duplicada): (1) `driveFileId` — o anexo
+ *  foi salvo de verdade na pasta oficial do Drive (via backend próprio, na
+ *  hora do upload) e funciona para QUALQUER pessoa, em QUALQUER sessão,
+ *  depois de recarregar a página; (2) `_localFile` — o upload real falhou
+ *  ou o backend não estava configurado no momento do envio, e o arquivo só
+ *  existe em memória, nesta mesma aba, desta mesma sessão (ainda assim
+ *  funciona ENQUANTO a aba não for fechada/recarregada — nunca inventa nem
+ *  finge um arquivo que não tem mais). */ async function fetchHomologAnexoFile(
+  anexo,
+) {
+  if (anexo.driveFileId || anexo.assetId) {
+    try {
+      return await fetchDocumentFile({
+        id: anexo.id,
+        arquivo: {
+          driveFileId: anexo.driveFileId || null,
+          assetId: anexo.assetId || null,
+          mimeType: anexo.tipo,
+          nomeOriginal: anexo.nome,
+        },
+      });
+    } catch (e) {
+      // Repositório real falhou agora (rede, backend fora do ar) — cai
+      // para o arquivo em memória desta sessão, se ainda existir, em vez
+      // de recusar de cara. Nunca finge que o repositório real funcionou
+      // quando não funcionou (por isso o catch aqui não silencia nada
+      // além disso — se também não houver `_localFile`, o erro real
+      // aparece na mensagem final abaixo).
+    }
+  }
+  if (anexo._localFile) {
+    const bytes = await anexo._localFile.arrayBuffer();
+    return {
+      blob: anexo._localFile,
+      filename: anexo.nome,
+      mimeType: anexo.tipo,
+      bytes,
+    };
+  }
+  throw new DocumentFileError(
+    "Este anexo não está mais disponível: o upload real não chegou a ser salvo de forma permanente (backend fora do ar no momento do envio) e o arquivo não está mais em memória nesta aba — peça para reenviar o anexo.",
+  );
+}
 /** viewHomologAnexo / downloadHomologAnexo: equivalentes a viewDocument/
- *  downloadDocument, mas para anexos do formulário de homologação — que
- *  podem ter bytes reais só nesta sessão (arquivo recém-escolhido, com
- *  `_localFile`) ou nenhum arquivo real ainda vinculado (após reload, ou
- *  quando cadastrado em outra sessão). Nunca inventa um substitutivo. */ async function viewHomologAnexo(
+ *  downloadDocument, mas para anexos do formulário de homologação. */ async function viewHomologAnexo(
   anexo,
   { onView, onNotify } = {},
 ) {
-  if (anexo._localFile) {
-    if (!isViewableMime(anexo.tipo)) {
-      onNotify?.(
-        "A visualização deste formato não está disponível. Utilize Baixar para acessar o arquivo.",
-        "info",
-      );
-      return;
-    }
-    try {
-      const bytes = await anexo._localFile.arrayBuffer();
-      onView?.({
-        url: anexo._localUrl,
-        doc: { tipo: anexo.nome, arquivo: { mimeType: anexo.tipo } },
-        company: null,
-        mimeType: anexo.tipo,
-        bytes,
-        onDownload: () => downloadHomologAnexo(anexo, { onNotify }),
-      });
-    } catch {
-      onNotify?.("Não foi possível abrir este anexo.", "error");
-    }
+  if (!isViewableMime(anexo.tipo)) {
+    onNotify?.(
+      "A visualização deste formato não está disponível. Utilize Baixar para acessar o arquivo.",
+      "info",
+    );
     return;
   }
-  onNotify?.(
-    "Este anexo ainda não está conectado a um repositório real — o upload real depende de um backend que ainda não existe neste ambiente. Estrutura pronta para conectar a uma pasta do Google Drive quando ele existir.",
-    "info",
-  );
+  try {
+    const { blob, mimeType, bytes } = await fetchHomologAnexoFile(anexo);
+    const url = URL.createObjectURL(blob);
+    onView?.({
+      url,
+      doc: { tipo: anexo.nome, arquivo: { mimeType: mimeType || anexo.tipo } },
+      company: null,
+      mimeType: mimeType || anexo.tipo,
+      bytes,
+      onDownload: () => downloadHomologAnexo(anexo, { onNotify }),
+    });
+  } catch (e) {
+    onNotify?.(
+      e instanceof DocumentFileError
+        ? e.message
+        : "Não foi possível abrir este anexo.",
+      "error",
+    );
+  }
 }
 async function downloadHomologAnexo(anexo, { onNotify } = {}) {
-  if (anexo._localFile) {
-    try {
-      await entregaArquivo(anexo._localFile, anexo.nome);
-    } catch (e) {
-      onNotify?.(
-        e instanceof DocumentFileError
-          ? e.message
-          : "Não foi possível baixar o anexo.",
-        "error",
-      );
-    }
-    return;
+  try {
+    const { blob, filename } = await fetchHomologAnexoFile(anexo);
+    await entregaArquivo(blob, filename || anexo.nome);
+  } catch (e) {
+    onNotify?.(
+      e instanceof DocumentFileError
+        ? e.message
+        : "Não foi possível baixar o anexo.",
+      "error",
+    );
   }
-  onNotify?.(
-    "Este anexo ainda não está conectado a um repositório real — o upload real depende de um backend que ainda não existe neste ambiente. Estrutura pronta para conectar a uma pasta do Google Drive quando ele existir.",
-    "info",
-  );
 }
 function HomologacaoStatusBadge({ status, atrasada }) {
   const meta = HOMOLOGACAO_STATUS_META[status] || {
@@ -7886,10 +7921,14 @@ function HomologacaoStatusBadge({ status, atrasada }) {
       ),
   );
 }
-/** HomologacaoAnexosPicker: seleção de arquivos com drag-and-drop, sem
- *  barra de progresso — não existe upload real por rede acontecendo
- *  (nenhum backend ainda recebe esses arquivos), então uma barra de
- *  progresso aqui seria só encenação. */ function HomologacaoAnexosPicker({
+/** HomologacaoAnexosPicker: seleção de arquivos com drag-and-drop. Cada
+ *  anexo aparece na lista imediatamente (nunca trava a seleção esperando a
+ *  rede) e sobe de verdade em paralelo via tryPersistUploadedFile — MESMA
+ *  função já usada em "Adicionar documentação" (backend próprio primeiro,
+ *  capability "assets" do Artifact só como alternativa) — nenhuma lógica
+ *  de upload duplicada. `enviando` controla o selo visual enquanto isso
+ *  acontece; `armazenamentoPendente` só vira false quando o repositório
+ *  real (driveFileId ou assetId) de fato confirmar. */ function HomologacaoAnexosPicker({
   anexos,
   setAnexos,
   onNotify,
@@ -7899,36 +7938,63 @@ function HomologacaoStatusBadge({ status, atrasada }) {
   function handleFiles(fileList) {
     const incoming = Array.from(fileList || []);
     if (incoming.length === 0) return;
-    const proxima = [...anexos];
+    const aceitos = [];
+    let totalProjetado = anexos.reduce((s, a) => s + (a.tamanho || 0), 0);
+    let vagas = HOMOLOGACAO_MAX_ANEXOS - anexos.length;
     for (const file of incoming) {
-      if (proxima.length >= HOMOLOGACAO_MAX_ANEXOS) {
+      if (vagas <= 0) {
         onNotify?.(
           `Máximo de ${HOMOLOGACAO_MAX_ANEXOS} anexos por homologação.`,
           "info",
         );
         break;
       }
-      const novoTotal =
-        proxima.reduce((s, a) => s + (a.tamanho || 0), 0) + file.size;
-      if (novoTotal > HOMOLOGACAO_MAX_ANEXOS_BYTES) {
+      totalProjetado += file.size;
+      if (totalProjetado > HOMOLOGACAO_MAX_ANEXOS_BYTES) {
         onNotify?.(
           `O total de anexos não pode passar de ${formatBytes(HOMOLOGACAO_MAX_ANEXOS_BYTES)}.`,
           "info",
         );
         break;
       }
-      proxima.push({
-        id: `anexo-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
-        nome: file.name,
-        tamanho: file.size,
-        tipo: file.type || "application/octet-stream",
-        driveFileId: null,
-        armazenamentoPendente: true,
-        _localFile: file,
-        _localUrl: URL.createObjectURL(file),
-      });
+      vagas--;
+      aceitos.push(file);
     }
-    setAnexos(proxima);
+    if (aceitos.length === 0) return;
+    const novosItens = aceitos.map((file) => ({
+      id: `anexo-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
+      nome: file.name,
+      tamanho: file.size,
+      tipo: file.type || "application/octet-stream",
+      driveFileId: null,
+      assetId: null,
+      armazenamentoPendente: true,
+      enviando: true,
+      _localFile: file,
+      _localUrl: URL.createObjectURL(file),
+    }));
+    setAnexos((prev) => [...prev, ...novosItens]);
+    novosItens.forEach((item) => {
+      tryPersistUploadedFile(item._localFile).then((res) => {
+        setAnexos((prev) =>
+          prev.map((a) =>
+            a.id !== item.id
+              ? a
+              : {
+                  ...a,
+                  enviando: false,
+                  driveFileId: res.ok ? res.driveFileId || null : null,
+                  assetId: res.ok ? res.assetId || null : null,
+                  armazenamentoPendente: !(
+                    res.ok &&
+                    (res.driveFileId || res.assetId)
+                  ),
+                  assetIssue: res.ok ? null : res.reason,
+                },
+          ),
+        );
+      });
+    });
   }
   function handleRemove(id) {
     setAnexos(
@@ -8004,6 +8070,25 @@ function HomologacaoStatusBadge({ status, atrasada }) {
               { className: "homolog-anexo-tamanho" },
               formatBytes(a.tamanho),
             ),
+            a.enviando &&
+              /*#__PURE__*/ React.createElement(
+                "span",
+                { className: "homolog-anexo-tamanho", title: "Enviando para o repositório real..." },
+                /*#__PURE__*/ React.createElement(Loader2, { size: 12 }),
+                " enviando...",
+              ),
+            !a.enviando &&
+              a.armazenamentoPendente &&
+              /*#__PURE__*/ React.createElement(
+                "span",
+                {
+                  className: "homolog-anexo-tamanho",
+                  style: { color: "#b45309" },
+                  title: assetIssueMessage(a.assetIssue),
+                },
+                /*#__PURE__*/ React.createElement(AlertTriangle, { size: 12 }),
+                " não salvo",
+              ),
             /*#__PURE__*/ React.createElement(
               "button",
               {
@@ -8064,6 +8149,12 @@ function HomologacaoStatusBadge({ status, atrasada }) {
       setErro("Informe o login de acesso à plataforma do cliente.");
       return;
     }
+    if (anexos.some((a) => a.enviando)) {
+      setErro(
+        "Aguarde o envio dos anexos terminar antes de salvar (evita gravar a homologação antes do arquivo real ser confirmado).",
+      );
+      return;
+    }
     setErro(null);
     const id = generateHomologacaoId();
     const agora = new Date();
@@ -8084,7 +8175,7 @@ function HomologacaoStatusBadge({ status, atrasada }) {
           ? { login: login.trim(), temSenha: !!senha }
           : null,
       observacoes: observacoes.trim(),
-      anexos: anexos.map(({ _localFile, _localUrl, ...meta }) => meta), // nunca persiste o File/blob URL
+      anexos: anexos.map(({ _localFile, _localUrl, enviando, ...meta }) => meta), // nunca persiste o File/blob URL, nem o selo transitório "enviando"
       status: "nova",
       linkHomologacao: "",
       dataConclusao: null,
@@ -8357,8 +8448,14 @@ function HomologacaoStatusBadge({ status, atrasada }) {
           ),
           /*#__PURE__*/ React.createElement(
             "button",
-            { type: "submit", className: "doc-download-btn" },
-            "Registrar homologação",
+            {
+              type: "submit",
+              className: "doc-download-btn",
+              disabled: anexos.some((a) => a.enviando),
+            },
+            anexos.some((a) => a.enviando)
+              ? "Enviando anexos..."
+              : "Registrar homologação",
           ),
         ),
       ),
@@ -8788,7 +8885,7 @@ function HomologacaoStatusBadge({ status, atrasada }) {
         /*#__PURE__*/ React.createElement(
           "p",
           { className: "empty-note" },
-          "Anexos escolhidos nesta sessão ficam disponíveis para Ver/Baixar enquanto a página não recarrega — ainda não há um repositório real (backend) conectado para guardá-los de forma permanente.",
+          "Um ou mais anexos não foram salvos de forma permanente agora (backend indisponível no momento do envio) — continuam disponíveis para Ver/Baixar só enquanto esta página não recarrega. Reenvie o anexo para tentar salvar de verdade.",
         ),
     ),
     /*#__PURE__*/ React.createElement(
@@ -8900,7 +8997,7 @@ function HomologacaoStatusBadge({ status, atrasada }) {
         if (!db) return;
         const { ...toSave } = item; // remove qualquer campo local não serializável dos anexos antes de gravar
         toSave.anexos = (item.anexos || []).map(
-          ({ _localFile, _localUrl, ...meta }) => meta,
+          ({ _localFile, _localUrl, enviando, ...meta }) => meta,
         );
         return db
           .collection("homologacoes")
