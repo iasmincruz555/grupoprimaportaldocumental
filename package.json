@@ -1,13 +1,15 @@
 {
   "name": "grupoprima-drive-proxy",
-  "version": "1.0.0",
-  "description": "Backend que conecta o Portal Grupoprima ao Google Drive",
+  "version": "2.0.0",
+  "description": "Backend que conecta o Portal Grupoprima ao Google Drive e ao Firestore (banco de documentos confirmados, fila de conferência, homologações e auditoria) — torna o portal publicado fora do claude.ai independente das capabilities do Artifact.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
     "express": "^4.19.2",
-    "googleapis": "^140.0.0"
+    "googleapis": "^140.0.0",
+    "@google-cloud/firestore": "^7.9.0",
+    "multer": "^2.0.1"
   }
 }
