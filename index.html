@@ -17,6 +17,15 @@
      ambiente), o restante do portal funciona normalmente — o OCR só fica
      indisponível, nunca trava nada. -->
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
+<!-- Bibliotecas de pré-visualização de Excel/Word/PowerPoint dentro do
+     portal (ver renderKindForMime/buildOfficePreview mais abaixo) — cada
+     uma só é USADA quando alguém abre um arquivo desse formato; se o
+     script não carregar (rede bloqueada), a pré-visualização desse
+     formato específico fica indisponível, mas "Baixar" continua
+     funcionando normalmente, nunca trava o portal. -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.12.2/mammoth.browser.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.2/jszip.min.js"></script>
 <div id="root"></div>
 <script>const { useState, useMemo, useRef, useEffect } = React;
 /* =========================================================================
@@ -2030,23 +2039,52 @@ const AUDIT_ACTION_LABELS = {
   function authHeaders(extra) {
     return { ...(DRIVE_PROXY_KEY ? { "X-Portal-Key": DRIVE_PROXY_KEY } : {}), ...extra };
   }
-  function collection(nome) {
+  function collection(nome, queryOpts = {}) {
+    async function fetchDocsOrdenados() {
+      const resp = await fetch(
+        `${DRIVE_PROXY_URL}/api/db/${encodeURIComponent(nome)}?t=${Date.now()}`,
+        { headers: authHeaders(), cache: "no-store" },
+      );
+      if (!resp.ok) throw new Error(`falha ao ler "${nome}" (${resp.status})`);
+      const data = await resp.json();
+      let docs = (data.docs || []).map((d) => ({ id: d.id, data: () => d.data }));
+      // orderBy/limit: o backend (GET /api/db/:collection) sempre devolve TODOS
+      // os documentos sem ordenação — a ordenação/corte pedidos via
+      // .orderBy()/.limit() (equivalentes ao que a capability "db" do Artifact
+      // já suportava nativamente) são replicados aqui no cliente, depois de
+      // buscar tudo, para manter o mesmo contrato em qualquer hospedagem.
+      if (queryOpts.orderByField) {
+        const dir = queryOpts.orderByDir === "desc" ? -1 : 1;
+        docs = docs.slice().sort((a, b) => {
+          const av = a.data()[queryOpts.orderByField];
+          const bv = b.data()[queryOpts.orderByField];
+          if (av == null && bv == null) return 0;
+          if (av == null) return 1;
+          if (bv == null) return -1;
+          if (av < bv) return -1 * dir;
+          if (av > bv) return 1 * dir;
+          return 0;
+        });
+      }
+      if (queryOpts.limitN != null) docs = docs.slice(0, queryOpts.limitN);
+      return docs;
+    }
     return {
+      orderBy(field, dir) {
+        return collection(nome, { ...queryOpts, orderByField: field, orderByDir: dir || "asc" });
+      },
+      limit(n) {
+        return collection(nome, { ...queryOpts, limitN: n });
+      },
+      async get() {
+        return { docs: await fetchDocsOrdenados() };
+      },
       onSnapshot(onNext, onError) {
         let cancelled = false;
         async function poll() {
           try {
-            const resp = await fetch(
-              `${DRIVE_PROXY_URL}/api/db/${encodeURIComponent(nome)}?t=${Date.now()}`,
-              { headers: authHeaders(), cache: "no-store" },
-            );
-            if (!resp.ok) throw new Error(`falha ao ler "${nome}" (${resp.status})`);
-            const data = await resp.json();
+            const docs = await fetchDocsOrdenados();
             if (cancelled) return;
-            const docs = (data.docs || []).map((d) => ({
-              id: d.id,
-              data: () => d.data,
-            }));
             onNext({ docs });
           } catch (e) {
             if (!cancelled && onError) onError(e);
@@ -2215,20 +2253,175 @@ async function excluirDocumentoConfirmado(doc, company, { onNotify } = {}) {
     return false;
   }
 }
-function isViewableMime(mime) {
-  return mime === "application/pdf" || (mime || "").startsWith("image/");
+const OFFICE_MIME_BY_EXT = {
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  xls: "application/vnd.ms-excel",
+  csv: "text/csv",
+  txt: "text/plain",
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+};
+/** renderKindForMime: identifica o "tipo de pré-visualização" a partir do
+ *  mimeType (com o nome do arquivo como reforço, já que alguns caminhos —
+ *  ex. um upload antigo — podem trazer um mimeType genérico
+ *  "application/octet-stream"). Retorna null quando não há nenhuma
+ *  pré-visualização disponível para esse formato (aí só "Baixar" serve). */ function renderKindForMime(
+  mime,
+  filename,
+) {
+  const m = mime || "";
+  if (m === "application/pdf") return "pdf";
+  if (m.startsWith("image/")) return "image";
+  const ext = (filename || "").toLowerCase().split(".").pop();
+  if (
+    m === OFFICE_MIME_BY_EXT.xlsx ||
+    m === OFFICE_MIME_BY_EXT.xls ||
+    m === "application/vnd.ms-excel.sheet.macroEnabled.12" ||
+    ["xlsx", "xls"].includes(ext)
+  )
+    return "xlsx";
+  if (m === OFFICE_MIME_BY_EXT.docx || ext === "docx") return "docx";
+  if (m === OFFICE_MIME_BY_EXT.pptx || ext === "pptx") return "pptx";
+  if (m === "text/csv" || ext === "csv") return "csv";
+  if (m === "text/plain" || ext === "txt") return "txt";
+  return null;
+}
+function isViewableMime(mime, filename) {
+  return renderKindForMime(mime, filename) !== null;
+}
+/** parseCsvText: parser simples de CSV que respeita aspas ("campo, com
+ *  vírgula") e quebras de linha dentro de campos entre aspas — suficiente
+ *  para os arquivos reais do portal, sem precisar de mais uma dependência
+ *  externa só para isso. */ function parseCsvText(text) {
+  const rows = [];
+  let row = [];
+  let field = "";
+  let inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c === '"') {
+        if (text[i + 1] === '"') {
+          field += '"';
+          i++;
+        } else {
+          inQuotes = false;
+        }
+      } else {
+        field += c;
+      }
+    } else if (c === '"') {
+      inQuotes = true;
+    } else if (c === ",") {
+      row.push(field);
+      field = "";
+    } else if (c === "\n" || c === "\r") {
+      if (c === "\r" && text[i + 1] === "\n") i++;
+      row.push(field);
+      rows.push(row);
+      row = [];
+      field = "";
+    } else {
+      field += c;
+    }
+  }
+  if (field.length > 0 || row.length > 0) {
+    row.push(field);
+    rows.push(row);
+  }
+  return rows.filter((r) => !(r.length === 1 && r[0] === ""));
+}
+const OFFICE_PREVIEW_MAX_ROWS = 500;
+const OFFICE_PREVIEW_MAX_COLS = 40;
+/** buildOfficePreview: converte os bytes reais do arquivo (nunca inventa
+ *  conteúdo) para uma forma pronta de renderizar em ViewerModal, de
+ *  acordo com `kind` (ver renderKindForMime). Cada formato usa uma
+ *  biblioteca carregada via CDN (ver <head>) — se ela não tiver carregado
+ *  (rede bloqueada), lança um erro claro em vez de fingir uma
+ *  pré-visualização que não existe; quem chama trata isso caindo em
+ *  "Baixar". PDF e imagem não passam por aqui (já têm caminho próprio,
+ *  nativo do navegador). */ async function buildOfficePreview(kind, bytes, filename) {
+  if (kind === "xlsx") {
+    if (!window.XLSX) throw new Error("Biblioteca de planilhas indisponível agora.");
+    const wb = window.XLSX.read(bytes, { type: "array" });
+    const sheets = wb.SheetNames.map((nome) => {
+      const rowsFull = window.XLSX.utils.sheet_to_json(wb.Sheets[nome], {
+        header: 1,
+        raw: false,
+        defval: "",
+      });
+      const truncatedRows = rowsFull.length > OFFICE_PREVIEW_MAX_ROWS;
+      const rows = rowsFull
+        .slice(0, OFFICE_PREVIEW_MAX_ROWS)
+        .map((r) => r.slice(0, OFFICE_PREVIEW_MAX_COLS));
+      const truncatedCols = rowsFull.some((r) => r.length > OFFICE_PREVIEW_MAX_COLS);
+      return { nome, rows, truncated: truncatedRows || truncatedCols };
+    });
+    return { kind, sheets };
+  }
+  if (kind === "csv") {
+    const text = new TextDecoder("utf-8").decode(bytes);
+    const rowsFull = parseCsvText(text);
+    const truncated = rowsFull.length > OFFICE_PREVIEW_MAX_ROWS;
+    const rows = rowsFull
+      .slice(0, OFFICE_PREVIEW_MAX_ROWS)
+      .map((r) => r.slice(0, OFFICE_PREVIEW_MAX_COLS));
+    return { kind, sheets: [{ nome: filename || "CSV", rows, truncated }] };
+  }
+  if (kind === "txt") {
+    const text = new TextDecoder("utf-8").decode(bytes);
+    return { kind, text };
+  }
+  if (kind === "docx") {
+    if (!window.mammoth) throw new Error("Biblioteca de documentos Word indisponível agora.");
+    const arrayBuffer = bytes.slice().buffer;
+    const result = await window.mammoth.convertToHtml({ arrayBuffer });
+    return { kind, html: result.value };
+  }
+  if (kind === "pptx") {
+    if (!window.JSZip) throw new Error("Biblioteca de arquivos ZIP indisponível agora.");
+    const zip = await window.JSZip.loadAsync(bytes);
+    const slidePaths = Object.keys(zip.files)
+      .filter((p) => /^ppt\/slides\/slide\d+\.xml$/.test(p))
+      .sort((a, b) => {
+        const na = parseInt(a.match(/slide(\d+)\.xml$/)[1], 10);
+        const nb = parseInt(b.match(/slide(\d+)\.xml$/)[1], 10);
+        return na - nb;
+      });
+    const slides = [];
+    for (const path of slidePaths) {
+      const xml = await zip.files[path].async("text");
+      const textos = [...xml.matchAll(/<a:t>([^<]*)<\/a:t>/g)].map((m) => m[1]);
+      slides.push(
+        textos
+          .join(" ")
+          .replace(/&amp;/g, "&")
+          .replace(/&lt;/g, "<")
+          .replace(/&gt;/g, ">")
+          .replace(/&quot;/g, '"')
+          .replace(/&apos;/g, "'")
+          .trim(),
+      );
+    }
+    return { kind, slides };
+  }
+  throw new Error("Formato sem pré-visualização.");
 }
 /** viewDocument: abre o arquivo original DENTRO do portal (modal com o
- *  visualizador nativo do navegador para PDF/imagem — nunca a pasta do
- *  Google Drive) quando o formato permite. `onView`, passado pelas telas,
- *  recebe { url, doc, company, mimeType } e é quem efetivamente abre o
- *  modal (`ViewerModal`, no componente raiz) — esta função só resolve o
- *  arquivo real e decide se ele é visualizável. */ async function viewDocument(
+ *  visualizador nativo do navegador para PDF/imagem, ou uma
+ *  pré-visualização convertida para Excel/Word/PowerPoint/CSV/texto — nunca
+ *  a pasta do Google Drive) quando o formato permite. `onView`, passado
+ *  pelas telas, recebe { url?, doc, company, mimeType, bytes, kind,
+ *  sheets?/html?/text?/slides? } e é quem efetivamente abre o modal
+ *  (`ViewerModal`, no componente raiz) — esta função só resolve o arquivo
+ *  real e decide se ele é visualizável. */ async function viewDocument(
   doc,
   { onNotify, company, onView } = {},
 ) {
   const mime = doc.arquivo?.mimeType || "";
-  if (!isViewableMime(mime)) {
+  const filename = doc.arquivo?.nomeOriginal || doc.tipo;
+  const kind = renderKindForMime(mime, filename);
+  if (!kind) {
     onNotify?.(
       "A visualização deste formato não está disponível. Utilize Baixar para acessar o arquivo original.",
       "info",
@@ -2237,12 +2430,26 @@ function isViewableMime(mime) {
   }
   try {
     const { blob, mimeType, bytes } = await fetchDocumentFile(doc);
-    const url = URL.createObjectURL(blob);
-    if (onView) {
-      onView({ url, doc, company, mimeType, bytes });
+    if (kind === "image" || kind === "pdf") {
+      const url = URL.createObjectURL(blob);
+      if (onView) {
+        onView({ url, doc, company, mimeType, bytes, kind });
+      } else {
+        window.open(url, "_blank");
+        setTimeout(() => URL.revokeObjectURL(url), 60000);
+      }
     } else {
-      window.open(url, "_blank");
-      setTimeout(() => URL.revokeObjectURL(url), 60000);
+      let preview;
+      try {
+        preview = await buildOfficePreview(kind, bytes, filename);
+      } catch (e) {
+        onNotify?.(
+          "Não foi possível gerar a pré-visualização deste arquivo agora. Utilize Baixar para acessar o original.",
+          "info",
+        );
+        return;
+      }
+      onView?.({ doc, company, mimeType, bytes, kind, ...preview, onDownload: () => downloadDocument(company, doc, {}) });
     }
     logDocumentAction("visualizou_documento", {
       empresa: companyLabelFor(company),
@@ -7625,14 +7832,108 @@ function ChatDrawer({
       ),
   );
 }
+/** OfficeSheetPreview: tabela de leitura para Excel/CSV convertidos por
+ *  buildOfficePreview — nunca edita nada, é só leitura, com abas quando a
+ *  planilha tem mais de uma aba real. */ function OfficeSheetPreview({ sheets }) {
+  const [activeIdx, setActiveIdx] = useState(0);
+  const sheet = sheets[activeIdx] || sheets[0] || { rows: [], truncated: false };
+  return /*#__PURE__*/ React.createElement(
+    "div",
+    { className: "office-sheet-preview" },
+    sheets.length > 1 &&
+      /*#__PURE__*/ React.createElement(
+        "div",
+        { className: "office-sheet-tabs" },
+        sheets.map((s, i) =>
+          /*#__PURE__*/ React.createElement(
+            "button",
+            {
+              key: s.nome + i,
+              type: "button",
+              className: "office-sheet-tab" + (i === activeIdx ? " active" : ""),
+              onClick: () => setActiveIdx(i),
+            },
+            s.nome,
+          ),
+        ),
+      ),
+    sheet.truncated &&
+      /*#__PURE__*/ React.createElement(
+        "p",
+        { className: "office-preview-note" },
+        `Planilha grande — mostrando só uma parte (até ${OFFICE_PREVIEW_MAX_ROWS} linhas / ${OFFICE_PREVIEW_MAX_COLS} colunas). Baixe o arquivo para ver tudo.`,
+      ),
+    /*#__PURE__*/ React.createElement(
+      "div",
+      { className: "office-sheet-table-wrap" },
+      /*#__PURE__*/ React.createElement(
+        "table",
+        { className: "office-sheet-table" },
+        /*#__PURE__*/ React.createElement(
+          "tbody",
+          null,
+          sheet.rows.map((row, ri) =>
+            /*#__PURE__*/ React.createElement(
+              "tr",
+              { key: ri },
+              row.map((cell, ci) =>
+                /*#__PURE__*/ React.createElement("td", { key: ci }, String(cell ?? "")),
+              ),
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+}
+/** OfficeSlidesPreview: só o TEXTO extraído de cada slide de um .pptx
+ *  (nenhuma biblioteca client-side renderiza layout/imagens de slide de
+ *  verdade sem depender de um serviço externo) — deixa isso explícito na
+ *  interface em vez de fingir uma prévia visual completa. */ function OfficeSlidesPreview({
+  slides,
+}) {
+  if (!slides || slides.length === 0) {
+    return /*#__PURE__*/ React.createElement(
+      "p",
+      { className: "office-preview-note" },
+      "Não foi possível extrair texto dos slides deste arquivo.",
+    );
+  }
+  return /*#__PURE__*/ React.createElement(
+    "div",
+    { className: "office-slides-preview" },
+    /*#__PURE__*/ React.createElement(
+      "p",
+      { className: "office-preview-note" },
+      "Pré-visualização mostra só o texto de cada slide — layout, imagens e formas não aparecem aqui. Baixe o arquivo para ver o slide completo.",
+    ),
+    slides.map((texto, i) =>
+      /*#__PURE__*/ React.createElement(
+        "div",
+        { className: "office-slide-block", key: i },
+        /*#__PURE__*/ React.createElement("h4", null, "Slide ", i + 1),
+        /*#__PURE__*/ React.createElement(
+          "p",
+          null,
+          texto || "(slide sem texto extraível)",
+        ),
+      ),
+    ),
+  );
+}
 function ViewerModal({ viewer, onClose }) {
   useEffect(() => {
-    if (!viewer) return;
+    if (!viewer || !viewer.url) return;
     return () => URL.revokeObjectURL(viewer.url); // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [viewer?.url]);
   if (!viewer) return null;
-  const isImage = (viewer.mimeType || "").startsWith("image/");
-  const isPdf = viewer.mimeType === "application/pdf";
+  const kind =
+    viewer.kind ||
+    ((viewer.mimeType || "").startsWith("image/")
+      ? "image"
+      : viewer.mimeType === "application/pdf"
+        ? "pdf"
+        : null);
   return /*#__PURE__*/ React.createElement(
     "div",
     { className: "viewer-overlay", onClick: onClose },
@@ -7677,22 +7978,39 @@ function ViewerModal({ viewer, onClose }) {
       ),
       /*#__PURE__*/ React.createElement(
         "div",
-        { className: "viewer-body" },
-        isImage
+        { className: "viewer-body" + (kind === "image" || kind === "pdf" ? "" : " viewer-body-doc") },
+        kind === "image"
           ? /*#__PURE__*/ React.createElement("img", {
               src: viewer.url,
               alt: viewer.doc.tipo,
               className: "viewer-image",
             })
-          : isPdf
+          : kind === "pdf"
             ? /*#__PURE__*/ React.createElement(PdfCanvasViewer, {
                 bytes: viewer.bytes,
               })
-            : /*#__PURE__*/ React.createElement("iframe", {
-                src: viewer.url,
-                title: viewer.doc.tipo,
-                className: "viewer-iframe",
-              }),
+            : kind === "xlsx" || kind === "csv"
+              ? /*#__PURE__*/ React.createElement(OfficeSheetPreview, { sheets: viewer.sheets || [] })
+              : kind === "docx"
+                ? /*#__PURE__*/ React.createElement("div", {
+                    className: "office-docx-preview",
+                    dangerouslySetInnerHTML: { __html: viewer.html || "" },
+                  })
+                : kind === "txt"
+                  ? /*#__PURE__*/ React.createElement("pre", { className: "office-txt-preview" }, viewer.text || "")
+                  : kind === "pptx"
+                    ? /*#__PURE__*/ React.createElement(OfficeSlidesPreview, { slides: viewer.slides || [] })
+                    : viewer.url
+                      ? /*#__PURE__*/ React.createElement("iframe", {
+                          src: viewer.url,
+                          title: viewer.doc.tipo,
+                          className: "viewer-iframe",
+                        })
+                      : /*#__PURE__*/ React.createElement(
+                          "p",
+                          { className: "office-preview-note" },
+                          "Pré-visualização indisponível. Utilize Baixar para acessar o arquivo.",
+                        ),
       ),
     ),
   );
@@ -7860,7 +8178,8 @@ function isoDateToBR(iso) {
   anexo,
   { onView, onNotify } = {},
 ) {
-  if (!isViewableMime(anexo.tipo)) {
+  const kind = renderKindForMime(anexo.tipo, anexo.nome);
+  if (!kind) {
     onNotify?.(
       "A visualização deste formato não está disponível. Utilize Baixar para acessar o arquivo.",
       "info",
@@ -7869,15 +8188,39 @@ function isoDateToBR(iso) {
   }
   try {
     const { blob, mimeType, bytes } = await fetchHomologAnexoFile(anexo);
-    const url = URL.createObjectURL(blob);
-    onView?.({
-      url,
-      doc: { tipo: anexo.nome, arquivo: { mimeType: mimeType || anexo.tipo } },
-      company: null,
-      mimeType: mimeType || anexo.tipo,
-      bytes,
-      onDownload: () => downloadHomologAnexo(anexo, { onNotify }),
-    });
+    const baseDoc = { tipo: anexo.nome, arquivo: { mimeType: mimeType || anexo.tipo } };
+    if (kind === "image" || kind === "pdf") {
+      const url = URL.createObjectURL(blob);
+      onView?.({
+        url,
+        doc: baseDoc,
+        company: null,
+        mimeType: mimeType || anexo.tipo,
+        bytes,
+        kind,
+        onDownload: () => downloadHomologAnexo(anexo, { onNotify }),
+      });
+    } else {
+      let preview;
+      try {
+        preview = await buildOfficePreview(kind, bytes, anexo.nome);
+      } catch (e) {
+        onNotify?.(
+          "Não foi possível gerar a pré-visualização deste anexo agora. Utilize Baixar para acessar o original.",
+          "info",
+        );
+        return;
+      }
+      onView?.({
+        doc: baseDoc,
+        company: null,
+        mimeType: mimeType || anexo.tipo,
+        bytes,
+        kind,
+        ...preview,
+        onDownload: () => downloadHomologAnexo(anexo, { onNotify }),
+      });
+    }
   } catch (e) {
     onNotify?.(
       e instanceof DocumentFileError
@@ -14113,10 +14456,31 @@ function GrupoprimaPortal() {
         .viewer-head-title { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 13px; }
         .viewer-head-actions { display: flex; align-items: center; gap: 8px; }
         .viewer-body { flex: 1; background: var(--branco-frio); display: flex; align-items: center; justify-content: center; overflow: auto; }
+        .viewer-body-doc { display: block; align-items: initial; justify-content: initial; }
         .viewer-iframe { width: 100%; height: 100%; border: none; background: #fff; }
         .viewer-image { max-width: 100%; max-height: 100%; object-fit: contain; }
         .viewer-pdf-fallback { padding: 24px; color: var(--cinza-texto); font-size: 13px; text-align: center; max-width: 360px; }
         .viewer-pdf-wrap { width: 100%; height: 100%; display: flex; flex-direction: column; align-items: center; overflow: auto; padding: 16px; box-sizing: border-box; }
+
+        /* ---- Pré-visualização de Excel/CSV/Word/PowerPoint/texto ---- */
+        .office-preview-note { margin: 0; padding: 10px 16px; font-size: 12px; color: var(--carvao); background: #fbf9f2; border-bottom: 1px solid var(--cinza-frio); }
+        .office-sheet-preview { display: flex; flex-direction: column; height: 100%; }
+        .office-sheet-tabs { display: flex; gap: 4px; flex-wrap: wrap; padding: 8px 12px; background: #f4f2ea; border-bottom: 1px solid var(--cinza-frio); flex-shrink: 0; }
+        .office-sheet-tab { border: 1px solid var(--cinza-frio); background: #fff; border-radius: 6px; padding: 5px 10px; font-size: 12px; font-weight: 600; color: var(--carvao); cursor: pointer; }
+        .office-sheet-tab.active { background: var(--azul); border-color: var(--azul); color: #fff; }
+        .office-sheet-table-wrap { flex: 1; overflow: auto; padding: 0; }
+        .office-sheet-table { border-collapse: collapse; font-size: 12.5px; white-space: nowrap; }
+        .office-sheet-table td { border: 1px solid var(--cinza-frio); padding: 5px 9px; background: #fff; color: var(--carvao); }
+        .office-sheet-table tr:first-child td { background: #f4f2ea; font-weight: 700; color: var(--azul); }
+        .office-docx-preview { padding: 24px 28px; max-width: 760px; margin: 0 auto; font-size: 13.5px; line-height: 1.6; color: var(--carvao); }
+        .office-docx-preview img { max-width: 100%; }
+        .office-docx-preview table { border-collapse: collapse; margin: 10px 0; }
+        .office-docx-preview table td, .office-docx-preview table th { border: 1px solid var(--cinza-frio); padding: 4px 8px; }
+        .office-txt-preview { padding: 20px 24px; margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; color: var(--carvao); }
+        .office-slides-preview { padding: 16px 20px; }
+        .office-slide-block { border: 1px solid var(--cinza-frio); border-radius: 8px; padding: 12px 14px; margin-bottom: 12px; background: #fff; }
+        .office-slide-block h4 { margin: 0 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--azul); }
+        .office-slide-block p { margin: 0; font-size: 13px; line-height: 1.5; color: var(--carvao); }
         .viewer-pdf-canvas { max-width: 100%; box-shadow: 0 2px 10px rgba(0,0,0,0.15); }
         .viewer-pdf-pager { position: sticky; bottom: 0; display: flex; align-items: center; gap: 10px; margin-top: 12px; padding: 6px 14px; background: rgba(0,55,83,0.92); color: #fff; border-radius: 20px; font-size: 12px; }
         .viewer-pdf-pager button { background: transparent; border: none; color: #fff; cursor: pointer; display: flex; align-items: center; padding: 2px; }
