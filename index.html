@@ -9864,7 +9864,7 @@ function formatCnpjDigits(digits) {
           bytes = null;
         if (localFile) {
           filenameEv = analyzeFilename(item.nomeOriginal, companies || []);
-          folderEv = analyzeFolderPath([]);
+          folderEv = analyzeFolderPath([], companies || []);
           contentEv = {
             fonte: "conteudo_do_arquivo",
             lido: false,
@@ -9880,7 +9880,7 @@ function formatCnpjDigits(digits) {
           // permite reanalisar/confirmar o item mesmo quando quem está revendo
           // não é quem enviou, ou o arquivo não está mais em memória nesta aba.
           filenameEv = analyzeFilename(item.nomeOriginal, companies || []);
-          folderEv = analyzeFolderPath([]);
+          folderEv = analyzeFolderPath([], companies || []);
           contentEv = {
             fonte: "conteudo_do_arquivo",
             lido: false,
@@ -9917,7 +9917,7 @@ function formatCnpjDigits(digits) {
           };
           const folderPath = item.folderPathArr || [];
           filenameEv = analyzeFilename(file.title, companies || []);
-          folderEv = analyzeFolderPath(folderPath);
+          folderEv = analyzeFolderPath(folderPath, companies || []);
           contentEv = {
             fonte: "conteudo_do_arquivo",
             lido: false,
@@ -11074,16 +11074,39 @@ function categoriaKeywordMatches(normText) {
 }
 /** ETAPA 2 — análise da estrutura de pastas (nomes das pastas até o arquivo,
  *  sem incluir a raiz "PORTAL DOCUMENTAL | GRUPOPRIMA"). Contexto adicional
- *  — nunca decide sozinha contra uma evidência explícita do conteúdo. */ const FOLDER_NAME_CATEGORY_HINTS =
+ *  — nunca decide sozinha contra uma evidência explícita do conteúdo. Além
+ *  da categoria, também reconhece CNPJ ou menção de filial/matriz no nome
+ *  de alguma pasta do caminho — usado só como ÚLTIMO recurso para a
+ *  empresa/filial (sempre depois de CNPJ no conteúdo, CNPJ no nome do
+ *  arquivo e menção de filial no nome do arquivo — nunca sobrepõe nenhuma
+ *  dessas evidências, só preenche quando elas faltam). */ const FOLDER_NAME_CATEGORY_HINTS =
   { alvaras: "licencas_autorizacoes", cnpj: "cadastral" };
-function analyzeFolderPath(folderPath) {
+function analyzeFolderPath(folderPath, companies) {
   const path = folderPath || [];
   const categorias = new Set();
+  const folderCnpjs = [];
+  let empresaPorPasta = null;
+  let empresaPastaFonte = null;
   path.forEach((name) => {
     const norm = normalize(name);
     categoriaKeywordMatches(norm).forEach((k) => categorias.add(k));
     if (FOLDER_NAME_CATEGORY_HINTS[norm])
       categorias.add(FOLDER_NAME_CATEGORY_HINTS[norm]);
+    const cnpjsNaPasta = extractCnpjs(name);
+    cnpjsNaPasta.forEach((c) => folderCnpjs.push(c));
+    if (!empresaPorPasta) {
+      const porCnpj = companyByCnpjDigits(cnpjsNaPasta, companies || []);
+      if (porCnpj) {
+        empresaPorPasta = porCnpj;
+        empresaPastaFonte = "cnpj_na_estrutura_de_pastas";
+      } else {
+        const porFilial = companyByFilialMention(norm, companies || []);
+        if (porFilial) {
+          empresaPorPasta = porFilial;
+          empresaPastaFonte = "filial_mencionada_na_estrutura_de_pastas";
+        }
+      }
+    }
   });
   const list = [...categorias];
   return {
@@ -11092,6 +11115,9 @@ function analyzeFolderPath(folderPath) {
     categorias: list,
     categoria: list.length === 1 ? list[0] : null,
     categoriaAmbigua: list.length > 1,
+    cnpjs: folderCnpjs,
+    empresa: empresaPorPasta,
+    empresaFonte: empresaPastaFonte,
   };
 }
 /** extractPdfText: texto REAL já embutido no PDF, via pdf.js (mesma
@@ -11338,6 +11364,18 @@ async function analyzeContent(bytes, mimeType, companies) {
     empresaFonte = filenameEv.empresaFonte;
     evidenciaUsada.push(
       "Filial/empresa mencionada explicitamente no nome do arquivo",
+    );
+  } else if (folderEv.empresa) {
+    // Último recurso: nenhuma evidência de CNPJ (conteúdo ou nome do
+    // arquivo) nem menção de filial no nome do arquivo — usa a estrutura de
+    // pastas (CNPJ ou "Filial NNNN"/"Matriz" no nome de alguma pasta do
+    // caminho) só para não deixar a base vazia quando a própria organização
+    // das pastas já indica a empresa. Nunca chega aqui se qualquer uma das
+    // evidências acima existir.
+    empresa = folderEv.empresa;
+    empresaFonte = folderEv.empresaFonte;
+    evidenciaUsada.push(
+      `Empresa/filial identificada pela estrutura de pastas (${folderEv.caminho.join(" → ") || "raiz"}) — sinal mais fraco, usado só na ausência de CNPJ ou menção de filial no arquivo`,
     );
   } // Histórico de razão social (Cortez & Andrade → Rodoprima → Gprima): não
   // resolve por si só QUAL filial/matriz é (isso continua exigindo CNPJ ou
@@ -11699,7 +11737,7 @@ async function analyzeContent(bytes, mimeType, companies) {
   companies,
 ) {
   const filenameEv = analyzeFilename(file.title, companies);
-  const folderEv = analyzeFolderPath(folderPath);
+  const folderEv = analyzeFolderPath(folderPath, companies);
   let contentEv = {
     fonte: "conteudo_do_arquivo",
     lido: false,
@@ -11753,7 +11791,7 @@ async function analyzeContent(bytes, mimeType, companies) {
   companies,
 ) {
   const filenameEv = analyzeFilename(file.name, companies);
-  const folderEv = analyzeFolderPath([]);
+  const folderEv = analyzeFolderPath([], companies);
   let contentEv = {
     fonte: "conteudo_do_arquivo",
     lido: false,
