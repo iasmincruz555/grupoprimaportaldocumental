@@ -1245,8 +1245,47 @@ async function tryPersistUploadedFile(file) {
   const MAX_BYTES = 20 * 1024 * 1024;
   if (file.size > MAX_BYTES)
     return { ok: false, reason: "arquivo_grande_demais" };
+  // Backend próprio (Cloud Run): tentado PRIMEIRO — sobe o binário de
+  // verdade para a pasta oficial do Drive via POST /api/documents/upload-file
+  // e devolve um driveFileId real, que passa a ser o identificador
+  // definitivo do arquivo (fetchDocumentFile já sabe buscar por
+  // driveFileId, via este mesmo backend, para QUALQUER pessoa). Funciona
+  // em qualquer hospedagem, inclusive fora do claude.ai — é o caminho real
+  // hoje. `backendTentado` só ajusta a mensagem de erro final quando não
+  // há nenhum caminho disponível (ver abaixo). */ let backendTentado = false;
+  if (DRIVE_PROXY_URL) {
+    backendTentado = true;
+    try {
+      const formData = new FormData();
+      formData.append("arquivo", file, file.name);
+      const resp = await fetch(`${DRIVE_PROXY_URL}/api/documents/upload-file`, {
+        method: "POST",
+        headers: DRIVE_PROXY_KEY ? { "X-Portal-Key": DRIVE_PROXY_KEY } : {},
+        body: formData,
+      });
+      if (resp.ok) {
+        const data = await resp.json();
+        return {
+          ok: true,
+          driveFileId: data.driveFileId,
+          mimeType: data.mimeType,
+          sizeBytes: data.tamanho,
+        };
+      }
+      if (resp.status === 400) return { ok: false, reason: "formato_nao_suportado" };
+      return { ok: false, reason: "falha_upload" };
+    } catch (e) {
+      // Backend indisponível agora (rede, serviço fora do ar) — cai para a
+      // capability "assets" abaixo, quando existir (prévia dentro do
+      // Artifact). Nunca finge sucesso.
+    }
+  }
+  // Capability "assets" do Artifact: só como alternativa, quando este
+  // arquivo é reaberto como prévia dentro do claude.ai (ou o backend
+  // próprio falhou agora e não há outro caminho).
   const assets = await getAssetsCapability();
-  if (!assets) return { ok: false, reason: "sem_permissao" };
+  if (!assets)
+    return { ok: false, reason: backendTentado ? "falha_upload" : "sem_permissao" };
   const mimeType = guessAssetMimeType(file);
   if (!mimeType) return { ok: false, reason: "formato_nao_suportado" };
   try {
@@ -1786,18 +1825,32 @@ function safeFileSlug(s) {
   const filename = doc.arquivo.nomeOriginal || payload.title || doc.tipo;
   return { blob, filename, mimeType, bytes };
 }
-/** entregaArquivo: entrega o Blob ao usuário pela capability "downloads" —
- *  o mecanismo real de download neste ambiente (um link <a download> com
- *  URL de blob é ignorado silenciosamente pelo navegador do
- *  visualizador). Mostra a confirmação nativa do Claude antes de salvar;
- *  nunca redimensiona/recomprime/converte o conteúdo. */ async function entregaArquivo(
+/** entregaArquivo: entrega o Blob ao usuário. Dois caminhos reais, nunca
+ *  simulados: (1) FORA do Artifact (o site publicado de verdade, ex.
+ *  GitHub Pages) — download nativo do navegador (URL de blob + <a
+ *  download>), que funciona normalmente fora do sandbox e não depende de
+ *  nenhuma permissão do Claude; (2) DENTRO do Artifact (prévia em
+ *  claude.ai) — o link nativo é ignorado silenciosamente pelo navegador do
+ *  visualizador, então usa a capability "downloads" (mostra a confirmação
+ *  nativa do Claude antes de salvar). Nunca redimensiona/recomprime/
+ *  converte o conteúdo em nenhum dos dois caminhos. */ async function entregaArquivo(
   blob,
   filename,
 ) {
   if (!window.claude || typeof window.claude.use !== "function") {
-    throw new DocumentFileError(
-      "O download não está disponível neste ambiente.",
-    );
+    try {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename || "documento";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 30000);
+      return;
+    } catch (e) {
+      throw new DocumentFileError("Não foi possível salvar o arquivo.");
+    }
   }
   const downloadsCap = await window.claude.use("downloads").catch(() => null);
   if (!downloadsCap) {
@@ -1961,13 +2014,101 @@ const AUDIT_ACTION_LABELS = {
   alterou_status_homologacao: "Alterou status de homologação",
   revelou_credenciais_homologacao: "Revelou credenciais (homologação)",
 };
-/* dbPromise: resolve a capability "db" uma única vez (memoizado) — nunca
-   bloqueia a UI: qualquer chamador usa `.catch(() => null)` e segue sem
-   persistência quando ela não estiver disponível. */ let dbPromise = null;
+/** RESTDB_POLL_INTERVAL_MS: fora do Artifact não existe um canal de tempo
+ *  real (onSnapshot de verdade) sem adicionar uma dependência nova
+ *  (WebSocket/Firestore SDK no navegador) — então createRestDb() reconsulta
+ *  a coleção neste intervalo. É uma simplificação deliberada e honesta:
+ *  atualizações de outra aba/pessoa aparecem em até este tempo, nunca
+ *  instantaneamente como dentro do Artifact. Curto o bastante para parecer
+ *  vivo, longo o bastante para não sobrecarregar o backend. */ const RESTDB_POLL_INTERVAL_MS = 8000;
+/** createRestDb: implementa a MESMA interface que o resto do portal já
+ *  espera da capability "db" do Artifact (collection(nome).onSnapshot/
+ *  doc(id).set/delete, collection(nome).add) — só que falando com as rotas
+ *  novas do backend próprio (/api/db/:collection) em vez do sandbox do
+ *  Claude. Nenhuma tela ou função além de getDb() precisa saber disso —
+ *  mesma ideia já usada em DocumentRepository/fetchDocumentFile. */ function createRestDb() {
+  function authHeaders(extra) {
+    return { ...(DRIVE_PROXY_KEY ? { "X-Portal-Key": DRIVE_PROXY_KEY } : {}), ...extra };
+  }
+  function collection(nome) {
+    return {
+      onSnapshot(onNext, onError) {
+        let cancelled = false;
+        async function poll() {
+          try {
+            const resp = await fetch(
+              `${DRIVE_PROXY_URL}/api/db/${encodeURIComponent(nome)}?t=${Date.now()}`,
+              { headers: authHeaders(), cache: "no-store" },
+            );
+            if (!resp.ok) throw new Error(`falha ao ler "${nome}" (${resp.status})`);
+            const data = await resp.json();
+            if (cancelled) return;
+            const docs = (data.docs || []).map((d) => ({
+              id: d.id,
+              data: () => d.data,
+            }));
+            onNext({ docs });
+          } catch (e) {
+            if (!cancelled && onError) onError(e);
+          }
+        }
+        poll();
+        const intervalId = setInterval(poll, RESTDB_POLL_INTERVAL_MS);
+        return () => {
+          cancelled = true;
+          clearInterval(intervalId);
+        };
+      },
+      doc(id) {
+        return {
+          async set(dataObj) {
+            const resp = await fetch(
+              `${DRIVE_PROXY_URL}/api/db/${encodeURIComponent(nome)}/${encodeURIComponent(id)}`,
+              {
+                method: "PUT",
+                headers: authHeaders({ "Content-Type": "application/json" }),
+                body: JSON.stringify(dataObj),
+              },
+            );
+            if (!resp.ok) throw new Error(`falha ao salvar em "${nome}" (${resp.status})`);
+            return resp.json();
+          },
+          async delete() {
+            const resp = await fetch(
+              `${DRIVE_PROXY_URL}/api/db/${encodeURIComponent(nome)}/${encodeURIComponent(id)}`,
+              { method: "DELETE", headers: authHeaders() },
+            );
+            if (!resp.ok) throw new Error(`falha ao excluir em "${nome}" (${resp.status})`);
+            return resp.json();
+          },
+        };
+      },
+      async add(dataObj) {
+        const resp = await fetch(`${DRIVE_PROXY_URL}/api/db/${encodeURIComponent(nome)}`, {
+          method: "POST",
+          headers: authHeaders({ "Content-Type": "application/json" }),
+          body: JSON.stringify(dataObj),
+        });
+        if (!resp.ok) throw new Error(`falha ao criar em "${nome}" (${resp.status})`);
+        return resp.json();
+      },
+    };
+  }
+  return { collection };
+}
+/* dbPromise: resolve o armazenamento persistente uma única vez (memoizado)
+   — nunca bloqueia a UI: qualquer chamador usa `.catch(() => null)` e segue
+   sem persistência quando ele não estiver disponível. Prioridade: (1) o
+   backend próprio (createRestDb, via DRIVE_PROXY_URL) — funciona em
+   qualquer hospedagem, inclusive fora do claude.ai, é o caminho real hoje;
+   (2) capability "db" do Artifact — só como alternativa, quando este
+   arquivo é reaberto como prévia dentro do claude.ai sem o backend
+   configurado. */ let dbPromise = null;
 function getDb() {
   if (!dbPromise) {
-    dbPromise =
-      window.claude && typeof window.claude.use === "function"
+    dbPromise = DRIVE_PROXY_URL
+      ? Promise.resolve(createRestDb())
+      : window.claude && typeof window.claude.use === "function"
         ? window.claude.use("db").catch(() => null)
         : Promise.resolve(null);
   }
@@ -9319,10 +9460,16 @@ function formatCnpjDigits(digits) {
           // tem mais; usa os dados já salvos como ponto de partida.
           throw new Error("arquivo_upload_indisponivel");
         } else {
-          if (!window.claude || typeof window.claude.use !== "function")
-            throw new Error("claude_indisponivel");
-          const mcp = await window.claude.use("mcp").catch(() => null);
-          if (!mcp) throw new Error("mcp_indisponivel");
+          // Backend próprio (Cloud Run) tentado PRIMEIRO — mesmo padrão já
+          // usado em fetchDocumentFile/handleSync; window.claude/"mcp" só
+          // como alternativa (prévia dentro do Artifact).
+          let mcp = DRIVE_PROXY_URL ? createProxyMcpAdapter() : null;
+          if (!mcp) {
+            if (!window.claude || typeof window.claude.use !== "function")
+              throw new Error("claude_indisponivel");
+            mcp = await window.claude.use("mcp").catch(() => null);
+            if (!mcp) throw new Error("mcp_indisponivel");
+          }
           const file = {
             id: item.driveFileId,
             title: item.nomeOriginal,
@@ -11571,17 +11718,38 @@ function SyncView({ companies, onNotify }) {
   async function handleSync() {
     setState("working");
     setProgresso(null);
-    if (!window.claude || typeof window.claude.use !== "function") {
-      setState("unavailable");
-      return;
+    // Backend próprio (Cloud Run): tentado PRIMEIRO — createProxyMcpAdapter
+    // e listDriveFilesViaProxy já existiam prontos para isso (mesmo formato
+    // que crawlDriveFolder/mcp produzem), mas handleSync nunca chegava a
+    // usá-los e exigia window.claude direto — por isso a sincronização
+    // nunca funcionava fora do Artifact. Corrigido aqui: funciona em
+    // qualquer hospedagem, inclusive fora do claude.ai; o conector "mcp" do
+    // claude.ai continua como alternativa, só quando o backend não estiver
+    // configurado/disponível agora.
+    let mcp = null;
+    let files = null;
+    if (DRIVE_PROXY_URL) {
+      try {
+        files = await listDriveFilesViaProxy();
+        mcp = createProxyMcpAdapter();
+      } catch (e) {
+        files = null;
+        mcp = null;
+      }
     }
-    const mcp = await window.claude.use("mcp").catch(() => null);
-    if (!mcp) {
-      setState("unavailable");
-      return;
+    if (!files) {
+      if (!window.claude || typeof window.claude.use !== "function") {
+        setState("unavailable");
+        return;
+      }
+      mcp = await window.claude.use("mcp").catch(() => null);
+      if (!mcp) {
+        setState("unavailable");
+        return;
+      }
     }
     try {
-      const files = await crawlDriveFolder(mcp, DRIVE_ROOT_FOLDER_ID);
+      if (!files) files = await crawlDriveFolder(mcp, DRIVE_ROOT_FOLDER_ID);
       const novos = files.filter((f) => !knownDriveIds.has(f.id)); // atualizados: arquivo já indexado antes, mas cujo `modifiedTime` real no
       // Drive é diferente do salvo na última sincronização — sinal real de
       // conteúdo alterado (nunca presumido só pela passagem do tempo).
@@ -12568,7 +12736,10 @@ function AddDocumentView({ companies, onNotify }) {
                   status: "analisado",
                   hash,
                   analise,
-                  assetId: assetResult.ok ? assetResult.assetId : null,
+                  assetId: assetResult.ok ? assetResult.assetId || null : null,
+                  driveFileId: assetResult.ok
+                    ? assetResult.driveFileId || null
+                    : null,
                   assetIssue: assetResult.ok ? null : assetResult.reason,
                 }
               : p,
@@ -12598,7 +12769,7 @@ function AddDocumentView({ companies, onNotify }) {
       : "Grupoprima Logística (corporativo)";
     const record = buildConfirmedDocRecord({
       id: item.id,
-      driveFileId: null,
+      driveFileId: item.driveFileId || null,
       assetId: item.assetId || null,
       nomeOriginal: file.name,
       mimeType: file.type,
@@ -12653,7 +12824,7 @@ function AddDocumentView({ companies, onNotify }) {
     const decisao = analise?.decisao || {};
     const queueItem = {
       id: item.id,
-      driveFileId: null,
+      driveFileId: item.driveFileId || null,
       assetId: item.assetId || null,
       nomeOriginal: file.name,
       mimeType: file.type,
