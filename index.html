@@ -2304,7 +2304,22 @@ async function excluirDocumentoConfirmado(doc, company, { onNotify } = {}) {
  *  portal (mesma garantia de `excluirDocumentoConfirmado`), e registra
  *  auditoria de cada remoção (2026-09-15, pedido explícito da usuária depois
  *  de encontrar documentos "Arquivo original não encontrado" após uma
- *  reorganização de pastas no Drive). */
+ *  reorganização de pastas no Drive).
+ *  PROTEÇÃO CONTRA FALHA SISTÊMICA (adicionada ainda em 2026-09-15, depois
+ *  de um incidente real): o backend/Drive já teve, neste mesmo projeto, um
+ *  bug intermitente em que a listagem (`/files`) volta a responder
+ *  `total:0` sem nenhum arquivo ter sido apagado de verdade — só uma falha
+ *  passageira de conexão/indexação. Na primeira versão desta função, uma
+ *  falha assim faria TODO documento revalidado parecer "não encontrado" ao
+ *  mesmo tempo, e a ferramenta removia o índice inteiro — foi exatamente o
+ *  que aconteceu (~80 documentos reais removidos numa janela em que o
+ *  backend estava com esse problema). Por isso agora a verificação sempre
+ *  roda em duas fases: primeiro só CONFERE (nunca apaga nada ainda); depois,
+ *  só se a fração de "não encontrados" for pequena o bastante pra ser
+ *  plausível como limpeza pontual (nunca a maioria/todos de uma vez só),
+ *  os removidos de fato são apagados. Caso contrário, aborta sem apagar
+ *  nada e devolve `abortadoPorSeguranca: true`, para a interface avisar
+ *  claramente em vez de silenciosamente destruir o índice de novo. */
 async function limparDocumentosOrfaos({ onProgresso } = {}) {
   const db = await getDb();
   if (!db) return { ok: false, motivo: "armazenamento_indisponivel" };
@@ -2349,35 +2364,55 @@ async function limparDocumentosOrfaos({ onProgresso } = {}) {
       });
     }
   });
-  const removidos = [];
+  // FASE 1 — só verifica, nunca apaga nada ainda.
+  const candidatosRemocao = [];
   const mantidos = [];
   const inconclusivos = [];
   for (let i = 0; i < alvos.length; i++) {
     const alvo = alvos[i];
-    onProgresso?.({ atual: i + 1, total: alvos.length });
+    onProgresso?.({ atual: i + 1, total: alvos.length, fase: "verificando" });
     const existe = await arquivoExisteNoDrive(alvo.driveFileId);
-    if (existe === false) {
-      try {
-        await db.collection(alvo.colecao).doc(alvo.id).delete();
-        removidos.push(alvo);
-        logDocumentAction("removeu_documento_orfao", {
-          documento: alvo.titulo || "(sem título)",
-          categoria:
-            CATEGORIES.find((c) => c.key === alvo.categoria)?.label ||
-            alvo.categoria ||
-            "categoria não identificada",
-          driveFileIdRemovido: alvo.driveFileId,
-          colecao: alvo.colecao,
-          motivo:
-            "Arquivo não encontrado no Google Drive ao revalidar (verificação/limpeza de documentos órfãos) — provavelmente substituído/reenviado em vez de movido durante uma reorganização de pastas.",
-        });
-      } catch (e) {
-        mantidos.push(alvo); // falhou ao excluir (não ao verificar) — mantém como estava
-      }
-    } else if (existe === true) {
-      mantidos.push(alvo);
-    } else {
-      inconclusivos.push(alvo);
+    if (existe === false) candidatosRemocao.push(alvo);
+    else if (existe === true) mantidos.push(alvo);
+    else inconclusivos.push(alvo);
+  }
+  // FASE 2 — proteção contra falha sistêmica: uma fração grande demais de
+  // "não encontrados" de uma só vez é sinal muito mais forte de backend/
+  // Drive instável do que de dezenas de arquivos terem sumido ao mesmo
+  // tempo. Limite: com pelo menos 5 documentos verificados, mais de 30%
+  // vindo como órfão já é motivo pra abortar sem apagar nada.
+  const fracaoOrfaos = alvos.length > 0 ? candidatosRemocao.length / alvos.length : 0;
+  const abortadoPorSeguranca = alvos.length >= 5 && fracaoOrfaos > 0.3;
+  if (abortadoPorSeguranca) {
+    return {
+      ok: true,
+      abortadoPorSeguranca: true,
+      total: alvos.length,
+      removidos: [],
+      candidatosNaoRemovidos: candidatosRemocao,
+      mantidos,
+      inconclusivos,
+    };
+  }
+  // FASE 3 — remoção real, só depois de passar pela proteção acima.
+  const removidos = [];
+  for (const alvo of candidatosRemocao) {
+    try {
+      await db.collection(alvo.colecao).doc(alvo.id).delete();
+      removidos.push(alvo);
+      logDocumentAction("removeu_documento_orfao", {
+        documento: alvo.titulo || "(sem título)",
+        categoria:
+          CATEGORIES.find((c) => c.key === alvo.categoria)?.label ||
+          alvo.categoria ||
+          "categoria não identificada",
+        driveFileIdRemovido: alvo.driveFileId,
+        colecao: alvo.colecao,
+        motivo:
+          "Arquivo não encontrado no Google Drive ao revalidar (verificação/limpeza de documentos órfãos) — provavelmente substituído/reenviado em vez de movido durante uma reorganização de pastas.",
+      });
+    } catch (e) {
+      mantidos.push(alvo); // falhou ao excluir (não ao verificar) — mantém como estava
     }
   }
   return { ok: true, total: alvos.length, removidos, mantidos, inconclusivos };
@@ -13192,10 +13227,12 @@ function SyncView({ companies, onNotify }) {
       setOrphanResult(resultado);
       setOrphanState("done");
       onNotify?.(
-        resultado.removidos.length > 0
-          ? `${resultado.removidos.length} documento(s) órfão(s) removido(s) do índice (o arquivo original não foi encontrado no Drive). O arquivo físico, quando ainda existir em algum lugar, nunca foi tocado.`
-          : "Nenhum documento órfão encontrado — todos os arquivos indexados ainda existem no Drive.",
-        "info",
+        resultado.abortadoPorSeguranca
+          ? `Nada foi removido: ${resultado.candidatosNaoRemovidos.length} de ${resultado.total} documentos pareciam "não encontrados" ao mesmo tempo — sinal de falha temporária no Drive/backend, não de arquivos apagados. Tente de novo mais tarde.`
+          : resultado.removidos.length > 0
+            ? `${resultado.removidos.length} documento(s) órfão(s) removido(s) do índice (o arquivo original não foi encontrado no Drive). O arquivo físico, quando ainda existir em algum lugar, nunca foi tocado.`
+            : "Nenhum documento órfão encontrado — todos os arquivos indexados ainda existem no Drive.",
+        resultado.abortadoPorSeguranca ? "error" : "info",
       );
     } catch (e) {
       setOrphanState("error");
@@ -13740,6 +13777,24 @@ function SyncView({ companies, onNotify }) {
         ),
       orphanState === "done" &&
         orphanResult &&
+        orphanResult.abortadoPorSeguranca &&
+        /*#__PURE__*/ React.createElement(
+          React.Fragment,
+          null,
+          /*#__PURE__*/ React.createElement(
+            "div",
+            { className: "alert-row alert-amber", style: { marginTop: 10 } },
+            /*#__PURE__*/ React.createElement(AlertTriangle, { size: 16 }),
+            /*#__PURE__*/ React.createElement(
+              "span",
+              null,
+              `Nada foi removido: ${orphanResult.candidatosNaoRemovidos.length} de ${orphanResult.total} documentos verificados pareciam "não encontrados" ao mesmo tempo — isso é sinal muito mais forte de uma falha temporária de conexão com o Google Drive do que de arquivos realmente apagados. Aguarde alguns minutos e tente de novo; se continuar assim, o backend/Drive provavelmente precisa ser verificado antes de confiar nesta limpeza.`,
+            ),
+          ),
+        ),
+      orphanState === "done" &&
+        orphanResult &&
+        !orphanResult.abortadoPorSeguranca &&
         /*#__PURE__*/ React.createElement(
           React.Fragment,
           null,
