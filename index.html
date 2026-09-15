@@ -3000,9 +3000,17 @@ async function downloadZip(blob, filename) {
  * (nunca inventada além das 11 pedidas). */ const CATEGORY_ALIASES =
   [
     {
+      // 2026-09-15: removida a alternativa solta "\bcnpj\b" — ela casava
+      // qualquer menção incidental da palavra (ex.: "inscrita no CNPJ sob o
+      // número..." em rodapés/boilerplate de QUALQUER documento), fazendo
+      // documentos de outras categorias (ex.: Declaração de Faturamento)
+      // serem classificados como "CNPJ" só por citar o próprio CNPJ da
+      // empresa. As frases abaixo continuam cobrindo os documentos que são,
+      // de fato, sobre o CNPJ (Cartão CNPJ, comprovante de inscrição e
+      // situação cadastral).
       key: "cnpj",
       match:
-        /cart[aã]o cnpj|\bcnpj\b|comprovante de inscri[cç][aã]o e (de )?situa[cç][aã]o cadastral|situa[cç][aã]o cadastral/,
+        /cart[aã]o cnpj|comprovante de inscri[cç][aã]o e (de )?situa[cç][aã]o cadastral|situa[cç][aã]o cadastral/,
     },
     {
       key: "inscricoes",
@@ -3038,7 +3046,7 @@ async function downloadZip(blob, filename) {
     {
       key: "contabilidade",
       match:
-        /contab[i]|balan[cç]o patrimonial|\bdre\b|demonstra[cç][aã]o (do resultado|cont[aá]bel)|relat[oó]rio cont[aá]bil/,
+        /contab[i]|balan[cç]o patrimonial|\bdre\b|demonstra[cç][aã]o (do resultado|cont[aá]bel)|relat[oó]rio cont[aá]bil|declara[cç][aã]o de faturamento/,
     },
     {
       key: "seguros",
@@ -12216,19 +12224,52 @@ async function analyzeContent(bytes, mimeType, companies) {
     evidenciaUsada.push(
       `Data de validade identificada no documento: ${dataValidade}`,
     );
-  if (contentLegivel && contentEv.categoria) {
+  // categoria — reestruturado em 2026-09-15 a pedido da usuária: o Drive
+  // agora está organizado exatamente segundo a mesma taxonomia de
+  // categorias do portal (uma subpasta por categoria dentro de cada Base),
+  // então a estrutura de pastas passa a ser usada como REFERÊNCIA INICIAL
+  // da classificação — sem nunca dispensar a leitura do conteúdo, que
+  // continua sendo feita sempre e é o que confirma/valida a categoria (ou,
+  // quando diverge de verdade da pasta, é o que manda o caso para
+  // conferência manual em vez de decidir sozinho por um termo incidental
+  // do conteúdo, como uma menção de rotina ao próprio CNPJ da empresa).
+  const contentCategoriaDivergeDaPasta =
+    !!folderEv.categoria &&
+    contentLegivel &&
+    !!contentEv.categoria &&
+    contentEv.categoria !== folderEv.categoria;
+  if (folderEv.categoria && contentLegivel && contentEv.categoria === folderEv.categoria) {
+    categoria = folderEv.categoria;
+    categoriaFonte = "pasta_e_conteudo";
+    evidenciaUsada.push(
+      `Categoria confirmada tanto pela estrutura de pastas (${folderEv.caminho.join(" → ") || "raiz"}) quanto pela leitura do conteúdo do documento — maior grau de confiança.`,
+    );
+  } else if (folderEv.categoria && !contentCategoriaDivergeDaPasta) {
+    categoria = folderEv.categoria;
+    categoriaFonte = "estrutura_de_pastas";
+    evidenciaUsada.push(
+      contentLegivel
+        ? `Categoria identificada pela pasta (${folderEv.caminho.join(" → ") || "raiz"}), já organizada segundo a mesma estrutura de categorias do portal — usada como referência inicial; a leitura do conteúdo do documento não encontrou nenhum termo que contrariasse essa categoria.`
+        : `Categoria identificada pela pasta (${folderEv.caminho.join(" → ") || "raiz"}), já organizada segundo a mesma estrutura de categorias do portal — usada como referência inicial (não foi possível ler o conteúdo do documento para confirmar).`,
+    );
+  } else if (folderEv.categoria && contentCategoriaDivergeDaPasta) {
+    // Divergência real entre pasta e conteúdo (não apenas silêncio do
+    // conteúdo): aqui a análise documental é o que evita confiar cegamente
+    // na pasta — o caso segue para conferência manual (ver
+    // decidirClassificacao) em vez de decidir sozinho por qualquer um dos
+    // dois lados.
+    categoria = folderEv.categoria;
+    categoriaFonte = "estrutura_de_pastas";
+    evidenciaUsada.push(
+      `Categoria identificada pela pasta (${folderEv.caminho.join(" → ") || "raiz"}), mas a leitura do conteúdo do documento sugeriu uma categoria diferente ("${CATEGORIES.find((c) => c.key === contentEv.categoria)?.label || contentEv.categoria}") — divergência que precisa de conferência manual antes de confirmar.`,
+    );
+  } else if (contentLegivel && contentEv.categoria) {
     categoria = contentEv.categoria;
     categoriaFonte = "conteudo_do_documento";
     evidenciaUsada.push(
       contentEv.viaOcr
         ? "Categoria identificada por termos via leitura de imagem (OCR) do documento"
         : "Categoria identificada por termos no conteúdo do documento",
-    );
-  } else if (folderEv.categoria) {
-    categoria = folderEv.categoria;
-    categoriaFonte = "estrutura_de_pastas";
-    evidenciaUsada.push(
-      `Categoria identificada pela pasta (${folderEv.caminho.join(" → ") || "raiz"})`,
     );
   } else if (filenameEv.categoria) {
     categoria = filenameEv.categoria;
@@ -12315,6 +12356,7 @@ async function analyzeContent(bytes, mimeType, companies) {
     empresaFonte,
     categoria,
     categoriaFonte,
+    categoriaConteudoDivergente: contentCategoriaDivergeDaPasta,
     subcategoria,
     categoriaAmbigua,
     tipoSugerido,
@@ -12346,6 +12388,8 @@ async function analyzeContent(bytes, mimeType, companies) {
   const {
     empresa,
     categoria,
+    categoriaFonte,
+    categoriaConteudoDivergente,
     subcategoria,
     categoriaAmbigua,
     tipoSugerido,
@@ -12470,8 +12514,19 @@ async function analyzeContent(bytes, mimeType, companies) {
   // versão específica etc.) não rebaixa isso a "necessita de conferência"
   // — vira "não identificado" no próprio registro, conforme a distinção
   // pedida.
-  const confirmadoPeloConteudo =
-    contentEv.lido && contentEv.legivel && contentEv.categoria === categoria;
+  // confirmadoPeloConteudo — reestruturado em 2026-09-15 junto com
+  // crossReferenceEvidence: agora a estrutura de pastas (já organizada
+  // pela usuária segundo a mesma taxonomia do portal) também confirma a
+  // categoria sozinha, contanto que a leitura do conteúdo não tenha
+  // encontrado uma categoria DIFERENTE (silêncio do conteúdo não é
+  // contradição — nem todo documento repete no texto uma palavra-chave da
+  // sua própria categoria, ex.: uma Declaração de Faturamento). A leitura
+  // do conteúdo continua indispensável: é ela que detecta uma divergência
+  // real e impede a classificação automática nesse caso.
+  const categoriaConfirmada =
+    categoriaFonte === "pasta_e_conteudo" ||
+    categoriaFonte === "conteudo_do_documento" ||
+    (categoriaFonte === "estrutura_de_pastas" && !categoriaConteudoDivergente);
   const camposNaoIdentificados = [];
   if (!dataEmissao && !dataValidade)
     camposNaoIdentificados.push("data de emissão/validade");
@@ -12482,19 +12537,39 @@ async function analyzeContent(bytes, mimeType, companies) {
   if (!numero) camposNaoIdentificados.push("número/identificação do documento");
   if (!orgao) camposNaoIdentificados.push("órgão emissor"); // Regra final do fluxo: analise sempre; classificação automática é o
   // padrão; confiança ALTA é o resultado esperado (quando o conteúdo real
-  // do documento - extraído ou via OCR - confirma categoria e localização);
-  // média e baixa são SEMPRE exceção e vão para conferência manual, nunca
-  // classificadas automaticamente (a ausência de campos secundários como
-  // número/órgão/datas fica registrada em camposNaoIdentificados, mas por si
-  // só não rebaixa a confiança quando categoria e localização já foram
-  // confirmadas pelo conteúdo).
-  if (!confirmadoPeloConteudo) {
+  // do documento - extraído ou via OCR - confirma categoria e localização,
+  // OU quando a estrutura de pastas já organizada pela usuária identifica a
+  // categoria sem que o conteúdo a contrarie); média e baixa são SEMPRE
+  // exceção e vão para conferência manual, nunca classificadas
+  // automaticamente (a ausência de campos secundários como número/órgão/
+  // datas fica registrada em camposNaoIdentificados, mas por si só não
+  // rebaixa a confiança quando categoria e localização já foram
+  // confirmadas).
+  if (categoriaFonte === "estrutura_de_pastas" && categoriaConteudoDivergente) {
+    return {
+      tipo: "conferencia",
+      caso: "Divergência entre a pasta e o conteúdo do documento",
+      confianca: "media",
+      motivo:
+        `O documento está organizado na pasta da categoria "${CATEGORIES.find((c) => c.key === categoria)?.label || categoria}", mas a leitura do conteúdo do documento (inclusive após tentativa de leitura via OCR, quando aplicável) sugeriu uma categoria diferente ("${CATEGORIES.find((c) => c.key === contentEv.categoria)?.label || contentEv.categoria}"). Como a pasta e o conteúdo divergem, este caso segue para conferência manual em vez de decidir automaticamente por um dos dois lados.`,
+      categoriaSugerida: categoria,
+      empresaSugerida: empresa,
+      tipoSugerido,
+      abrangencia,
+      estabelecimentosRelacionados,
+      ...extras,
+      evidenciaUsada,
+      camposNaoIdentificados,
+      sugerirOcr: conteudoIlegivel,
+    };
+  }
+  if (!categoriaConfirmada) {
     return {
       tipo: "conferencia",
       caso: "Confiança insuficiente para classificação automática",
       confianca: "media",
       motivo:
-        "A categoria e a base foram identificadas apenas pelo nome do arquivo e/ou pela estrutura de pastas — o conteúdo do documento (inclusive após tentativa de leitura via OCR, quando aplicável) não confirmou essas informações. Classificação automática exige confirmação pelo conteúdo real do documento — este caso segue para conferência manual.",
+        "A categoria e a base foram identificadas apenas pelo nome do arquivo — nem a estrutura de pastas nem o conteúdo do documento (inclusive após tentativa de leitura via OCR, quando aplicável) confirmaram essa informação. Classificação automática exige confirmação pela estrutura de pastas já organizada ou pelo conteúdo real do documento — este caso segue para conferência manual.",
       categoriaSugerida: categoria,
       empresaSugerida: empresa,
       tipoSugerido,
@@ -12518,7 +12593,11 @@ async function analyzeContent(bytes, mimeType, companies) {
     evidenciaUsada,
     camposNaoIdentificados,
     motivo:
-      "Categoria e localização (base/abrangência) confirmadas pelo conteúdo real do documento — classificação automática.",
+      categoriaFonte === "pasta_e_conteudo"
+        ? "Categoria confirmada tanto pela estrutura de pastas quanto pelo conteúdo real do documento, e localização (base/abrangência) identificada com segurança — classificação automática."
+        : categoriaFonte === "estrutura_de_pastas"
+          ? "Categoria confirmada pela estrutura de pastas (já organizada pela usuária segundo a mesma taxonomia do portal), sem contradição encontrada na leitura do conteúdo do documento, e localização (base/abrangência) identificada com segurança — classificação automática."
+          : "Categoria e localização (base/abrangência) confirmadas pelo conteúdo real do documento — classificação automática.",
   };
 }
 /** validarAntesDeIndexar: checklist mínimo de validação pré-inserção
