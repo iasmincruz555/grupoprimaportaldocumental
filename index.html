@@ -1445,14 +1445,30 @@ const DRIVE_PROXY_KEY = "Z8ib8D02tbTvCsc4O54KjMbdTU1WGSBsx14m9Ng8";
  *      ordem relativa anterior), nunca um valor inventado.
  *  Esta é a ÚNICA função de ordenação de documentos do portal — reutilizada
  *  em toda a exibição/lista/busca/ZIP, para não duplicar a lógica em cada
- *  tela. */ function sortDocumentsByVersion(docs) {
+ *  tela.
+ *
+ *  Exceção deliberada (pedido da Iasmin, 2026-09-15): "contratos_sociais"
+ *  ordena SEMPRE pelo número da alteração (23ª → 1ª), ignorando emissao/
+ *  validade mesmo quando presentes. Motivo: a maioria das alterações
+ *  contratuais não tem data de emissão extraída automaticamente, então
+ *  misturar documentos com e sem data embaralhava a ordem (ex.: a 5ª
+ *  Alteração, sem data, pulava pra depois da 20ª só porque a 20ª tinha uma
+ *  data reconhecida) — para essa categoria o número da alteração já é, por
+ *  si só, um identificador de ordem cronológica mais confiável que datas
+ *  parcialmente extraídas. Quando o número não foi identificado em nenhum
+ *  dos dois lados, cai para confirmadoEm (mesmo desempate final de sempre),
+ *  nunca inventa uma ordem. */ function sortDocumentsByVersion(docs) {
   return [...docs].sort((a, b) => {
-    const ea = parseDateBR(a.emissao);
-    const eb = parseDateBR(b.emissao);
-    if (ea !== eb) return eb - ea;
-    const vaDate = parseDateBR(a.validade);
-    const vbDate = parseDateBR(b.validade);
-    if (vaDate !== vbDate) return vbDate - vaDate;
+    const isContratoSocial =
+      a.categoria === "contratos_sociais" && b.categoria === "contratos_sociais";
+    if (!isContratoSocial) {
+      const ea = parseDateBR(a.emissao);
+      const eb = parseDateBR(b.emissao);
+      if (ea !== eb) return eb - ea;
+      const vaDate = parseDateBR(a.validade);
+      const vbDate = parseDateBR(b.validade);
+      if (vaDate !== vbDate) return vbDate - vaDate;
+    }
     const va = docSortValue(a);
     const vb = docSortValue(b);
     if (va !== null && vb !== null && va !== vb) return vb - va;
@@ -3441,15 +3457,19 @@ function docTituloExibido(doc) {
   );
 }
 /** formatDocDescricao: monta a descrição padronizada do documento, SEMPRE
- *  na ordem fixa [número] · [órgão] · emitido em [data] · [formato] ·
- *  [tamanho] - cada parte só aparece quando o dado foi realmente
- *  identificado, nunca um segmento vazio (ex.: "· · emitido em ·"). */
+ *  na ordem fixa [número] · [órgão] · emitido em [data] · válido até [data] ·
+ *  [formato] · [tamanho] - cada parte só aparece quando o dado foi realmente
+ *  identificado, nunca um segmento vazio (ex.: "· · emitido em ·"). A versão
+ *  (`versao`) não entra aqui de propósito — já aparece em destaque ao lado
+ *  do título (doc-row-version/timeline-meta), duplicar sobrecarregaria a
+ *  linha sem agregar informação nova. */
 function formatDocDescricao(doc) {
   if (!doc) return "";
   const partes = [];
   if (doc.numero) partes.push(doc.numero);
   if (doc.orgao) partes.push(doc.orgao);
   if (doc.emissao) partes.push(`emitido em ${doc.emissao}`);
+  if (doc.validade) partes.push(`válido até ${doc.validade}`);
   if (doc.formato) partes.push(doc.formato);
   const tamanho = doc.arquivo?.tamanho || doc.tamanho;
   if (tamanho) partes.push(tamanho);
@@ -6736,7 +6756,18 @@ function DocFamilyHistory({
             { className: "timeline-content" },
             /*#__PURE__*/ React.createElement(
               "div",
-              { className: "timeline-top" },
+              { className: "timeline-title" },
+              /*#__PURE__*/ React.createElement(DocTituloEditable, {
+                doc: v,
+                onNotify: onNotify,
+                isAdmin: isAdmin,
+              }),
+              " ",
+              /*#__PURE__*/ React.createElement(DocScopeBadge, { doc: v }),
+            ),
+            /*#__PURE__*/ React.createElement(
+              "div",
+              { className: "timeline-meta" },
               /*#__PURE__*/ React.createElement(
                 "span",
                 {
@@ -6751,19 +6782,8 @@ function DocFamilyHistory({
                 { className: "timeline-date" },
                 v.emissao || "data não identificada",
               ),
-            ),
-            /*#__PURE__*/ React.createElement(
-              "div",
-              { className: "timeline-version" },
-              /*#__PURE__*/ React.createElement(DocTituloEditable, {
-                doc: v,
-                onNotify: onNotify,
-                isAdmin: isAdmin,
-              }),
               " · ",
               v.versao || "versão não identificada",
-              " ",
-              /*#__PURE__*/ React.createElement(DocScopeBadge, { doc: v }),
             ),
             /*#__PURE__*/ React.createElement(
               "div",
@@ -10860,17 +10880,45 @@ function formatCnpjDigits(digits) {
     selAbrangencia === "corporativa" ||
     selAbrangencia === "empresa";
   const podeConfirmar = !!(selCategoria && localizacaoOk) && !confirming;
-  async function handleConfirmar() {
-    setConfirming(true);
-    try {
-      await onConfirm(item, {
+  // tituloPreview: mesma conta que handleConfirmar faz na hora de salvar —
+  // mostrada ao vivo aqui pra pessoa ver exatamente o título que vai ficar
+  // gravado, sem precisar confirmar pra descobrir (item pedido por ela,
+  // 2026-09-15: "os títulos... não são considerados na hora de subir").
+  const tituloPreview = selCategoria
+    ? generateDocumentTitle({
         categoria: selCategoria,
         tipo: selTipo || null,
-        subcategoria: selCategoria === "seguros" ? selSubcategoria || "geral" : null,
         companyId:
           selAbrangencia === "estabelecimento_especifico"
             ? selCompanyId || null
             : null,
+        abrangencia: selAbrangencia,
+      })
+    : null;
+  async function handleConfirmar() {
+    setConfirming(true);
+    try {
+      const companyIdConfirmado =
+        selAbrangencia === "estabelecimento_especifico"
+          ? selCompanyId || null
+          : null;
+      // Título calculado AGORA, a partir do que está na tela no momento do
+      // clique em "Classificar" — nunca recalculado depois a partir de um
+      // `tipo` que pode ter sido salvo/lido em outro momento. Isso garante
+      // que "Tipo documental" editado em "Editar classificação" sempre vira
+      // o título do documento, sem depender de nenhuma outra função
+      // recalcular a mesma coisa mais tarde.
+      const tituloConfirmado = generateDocumentTitle({
+        categoria: selCategoria,
+        tipo: selTipo || null,
+        companyId: companyIdConfirmado,
+        abrangencia: selAbrangencia,
+      });
+      await onConfirm(item, {
+        categoria: selCategoria,
+        tipo: selTipo || null,
+        subcategoria: selCategoria === "seguros" ? selSubcategoria || "geral" : null,
+        companyId: companyIdConfirmado,
         abrangencia: selAbrangencia,
         estabelecimentosRelacionados:
           selAbrangencia === "estabelecimento_especifico" && selCompanyId
@@ -10878,6 +10926,7 @@ function formatCnpjDigits(digits) {
             : [],
         versaoSugerida:
           (decisao && decisao.versaoSugerida) || item.versaoSugerida || null,
+        titulo: tituloConfirmado,
       });
       onClose();
     } finally {
@@ -11207,6 +11256,20 @@ function formatCnpjDigits(digits) {
                 ),
                 /*#__PURE__*/ React.createElement(
                   "label",
+                  { className: "classify-titulo-preview" },
+                  /*#__PURE__*/ React.createElement(
+                    "span",
+                    null,
+                    "Título do documento (assim que salvo)",
+                  ),
+                  /*#__PURE__*/ React.createElement(
+                    "span",
+                    { className: "classify-readonly classify-titulo-valor" },
+                    tituloPreview || "Selecione a base/categoria acima",
+                  ),
+                ),
+                /*#__PURE__*/ React.createElement(
+                  "label",
                   null,
                   /*#__PURE__*/ React.createElement(
                     "span",
@@ -11445,6 +11508,12 @@ function ConferenceQueueView({ onNotify, onView, companies }) {
     const orgao = overrides.orgao ?? item.orgao ?? null;
     const dataEmissao = overrides.dataEmissao ?? item.dataEmissao ?? null;
     const dataValidade = overrides.dataValidade ?? item.dataValidade ?? null;
+    // titulo: quando o modal manda um valor explícito (calculado no momento
+    // da confirmação, a partir do que a pessoa efetivamente editou em "Tipo
+    // documental"/Base), ele é respeitado ao pé da letra — nunca recalculado
+    // de novo aqui a partir de `tipo`, o que poderia divergir do que a
+    // pessoa viu na tela e confirmou.
+    const tituloConfirmado = overrides.titulo ?? null;
     const categoriaLabel =
       CATEGORIES.find((c) => c.key === categoria)?.label ||
       categoria ||
@@ -11489,6 +11558,7 @@ function ConferenceQueueView({ onNotify, onView, companies }) {
       orgao,
       emissao: dataEmissao,
       validade: dataValidade,
+      titulo: tituloConfirmado,
       companyId,
       abrangencia,
       estabelecimentosRelacionados,
@@ -15843,11 +15913,11 @@ function GrupoprimaPortal() {
         .timeline-dot-current { background: var(--verde); border-color: var(--verde); box-shadow: 0 0 0 3px rgba(107,254,156,0.25); }
         .timeline-line { position: absolute; left: 5px; top: 16px; bottom: -4px; width: 2px; background: var(--cinza-frio); }
         .timeline-content { flex: 1; min-width: 0; padding-bottom: 2px; }
-        .timeline-top { display: flex; align-items: center; gap: 8px; margin-bottom: 3px; flex-wrap: wrap; }
+        .timeline-title { font-size: 13px; font-weight: 700; color: var(--azul); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 3px; }
+        .timeline-meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 11.5px; font-weight: 500; color: var(--carvao); margin-bottom: 6px; }
         .timeline-badge { font-size: 10px; font-weight: 800; letter-spacing: 0.04em; color: var(--carvao); background: var(--branco-frio); padding: 2px 7px; border-radius: 999px; }
         .timeline-badge-current { color: #0b4a2c; background: rgba(107,254,156,0.22); }
-        .timeline-date { font-size: 11.5px; font-weight: 700; color: var(--azul); }
-        .timeline-version { font-size: 12px; color: var(--carvao); margin-bottom: 6px; }
+        .timeline-date { font-size: 11.5px; font-weight: 500; color: var(--carvao); }
         .version-family-more-btn { display: flex; align-items: center; gap: 5px; background: none; border: 1px dashed var(--cinza-frio); color: var(--azul); font-size: 11.5px; font-weight: 700; padding: 7px 12px; border-radius: 7px; cursor: pointer; margin-top: 4px; }
         .version-family-more-btn:hover { border-color: var(--azul); background: var(--branco-frio); }
         .version-compare { margin-top: 12px; padding: 12px; background: var(--branco-frio); border-radius: 8px; }
@@ -15956,6 +16026,8 @@ function GrupoprimaPortal() {
           background: #fff; font-family: inherit; text-transform: none; font-weight: 600;
         }
         .classify-readonly { font-size: 13px; font-weight: 700; color: var(--azul); text-transform: none; }
+        .classify-titulo-preview { grid-column: 1 / -1; background: var(--branco-frio); border-radius: 7px; padding: 8px 10px; }
+        .classify-titulo-valor { display: block; margin-top: 2px; }
         .classify-warning { display: flex; align-items: center; gap: 6px; color: #a13333; font-size: 11.5px; font-weight: 600; margin: 10px 0 0; }
         .classify-suggestion-grid-full { grid-column: 1 / -1; }
         .classify-multi-estab { display: flex; flex-direction: column; gap: 6px; background: #fff; border: 1px solid var(--cinza-frio); border-radius: 8px; padding: 8px 10px; max-height: 160px; overflow-y: auto; }
