@@ -1145,8 +1145,15 @@ function useDerived(extraDocuments) {
       const docs = sortDocumentsByVersion(todosDocumentos).map((d, i) => ({
         ...d,
         id: d.id || `${c.id}-${d.categoria}-${i}`,
-      }));
-      const totalDocs = docs.length;
+      })); // totalDocs conta DOCUMENTOS REAIS (famílias/tipos documentais), não
+      // cada versão individual — um Contrato Social com 24 alterações
+      // arquivadas ao longo do tempo é 1 documento com histórico, não 24
+      // documentos (pedido explícito da Iasmin, 2026-09-15: o número exibido
+      // deve bater com o que a pessoa vê ao abrir a base, não com a soma de
+      // todas as versões arquivadas de cada tipo). `docs` continua completo
+      // (todas as versões) para a tela de detalhe/histórico — só a CONTAGEM
+      // muda.
+      const totalDocs = groupDocumentsByFamily(docs).length;
       const flagged = docs.filter(
         (d) => d.flag && d.flag.severity === "warning",
       ).length;
@@ -1471,6 +1478,14 @@ const DRIVE_PROXY_KEY = "Z8ib8D02tbTvCsc4O54KjMbdTU1WGSBsx14m9Ng8";
     }
     const va = docSortValue(a);
     const vb = docSortValue(b);
+    // Quando só um dos dois tem número de versão identificado, o
+    // identificado vem SEMPRE antes — nunca deixa a data de confirmação
+    // (critério de desempate, abaixo) intercalar um "não identificado" no
+    // meio de uma sequência numerada (ex.: pedido da Iasmin, 2026-09-15:
+    // Contratos Sociais em ordem estrita 23ª → 1ª, sem itens sem número
+    // aparecendo entre os numerados).
+    if (va !== null && vb === null) return -1;
+    if (va === null && vb !== null) return 1;
     if (va !== null && vb !== null && va !== vb) return vb - va;
     const ca = a.confirmadoEm ? new Date(a.confirmadoEm).getTime() : 0;
     const cb = b.confirmadoEm ? new Date(b.confirmadoEm).getTime() : 0;
@@ -3425,12 +3440,27 @@ function tituloCurtoParaTipo(tipo) {
  *  partir da CLASSIFICAÇÃO real do documento (categoria/tipo/base) - nunca
  *  do nome do arquivo original. Ex.: tipo "Cartão CNPJ" + Matriz vira
  *  "CNPJ Matriz". É só o valor INICIAL sugerido; a pessoa pode sempre
- *  editar depois (item "título editável" da nova arquitetura). */
-function generateDocumentTitle({ categoria, tipo, companyId, abrangencia }) {
-  const base =
+ *  editar depois (item "título editável" da nova arquitetura).
+ *  Exceção "contratos_sociais" (pedido da Iasmin, 2026-09-15): o `tipo`
+ *  dessa categoria é sempre o rótulo GENÉRICO do subtipo (ex.: "Alteração
+ *  Contratual", igual para as 24 alterações de uma empresa) — sem o número
+ *  da alteração, os cartões do histórico ficavam todos com o mesmo título,
+ *  impossíveis de diferenciar. Quando `versao` (vindo de
+ *  `extractVersaoLabel`, ex.: "23ª Alteração") tem um número reconhecido e
+ *  o `tipo` ainda não o contém, o número é prefixado ao título. Nunca
+ *  inventa um número: sem `versao` reconhecida, o título continua só o
+ *  rótulo genérico. */
+function generateDocumentTitle({ categoria, tipo, companyId, abrangencia, versao }) {
+  let base =
     tituloCurtoParaTipo(tipo) ||
     CATEGORIES.find((c) => c.key === categoria)?.label ||
     "Documento";
+  if (categoria === "contratos_sociais" && versao) {
+    const m = /^(\d+)/.exec(String(versao).trim());
+    if (m && !new RegExp(`(^|\\s)${m[1]}\\D`).test(base)) {
+      base = `${m[1]}ª ${base}`;
+    }
+  }
   if (abrangencia === "estabelecimento_especifico" && companyId) {
     const c = companiesRaw.find((x) => x.id === companyId);
     if (c)
@@ -3441,17 +3471,36 @@ function generateDocumentTitle({ categoria, tipo, companyId, abrangencia }) {
 /** docTituloExibido: título mostrado na interface para um documento -
  *  usa o título já salvo/editado quando existir; para documentos antigos
  *  (sem `titulo` gravado) gera o mesmo título padronizado na hora, só
- *  para exibição, sem alterar o registro. */
+ *  para exibição, sem alterar o registro.
+ *  Exceção "contratos_sociais" (pedido da Iasmin, 2026-09-15): documentos
+ *  confirmados ANTES da melhoria de título numerado (acima) já têm um
+ *  `titulo` gravado igual ao rótulo genérico do tipo (ex.: "Alteração
+ *  Contratual", sem número) — nesse caso específico, o título recalculado
+ *  agora (com o número da alteração, quando identificável) é usado em vez
+ *  do salvo, só para exibição, sem tocar no registro. Qualquer título
+ *  realmente diferente do rótulo genérico (editado à mão, ou já com
+ *  número) continua prevalecendo — nunca sobrescreve uma edição real. */
 function docTituloExibido(doc) {
   if (!doc) return "";
+  const gerado = generateDocumentTitle({
+    categoria: doc.categoria,
+    tipo: doc.tipo,
+    companyId: doc.companyId,
+    abrangencia: doc.abrangencia,
+    versao: doc.versao,
+  });
+  if (
+    doc.categoria === "contratos_sociais" &&
+    doc.titulo &&
+    gerado &&
+    doc.titulo !== gerado &&
+    doc.titulo === tituloCurtoParaTipo(doc.tipo)
+  ) {
+    return gerado;
+  }
   return (
     doc.titulo ||
-    generateDocumentTitle({
-      categoria: doc.categoria,
-      tipo: doc.tipo,
-      companyId: doc.companyId,
-      abrangencia: doc.abrangencia,
-    }) ||
+    gerado ||
     doc.tipo ||
     "Documento"
   );
@@ -11214,6 +11263,7 @@ function formatCnpjDigits(digits) {
             ? selCompanyId || null
             : null,
         abrangencia: selAbrangencia,
+        versao: (decisao && decisao.versaoSugerida) || item.versaoSugerida || null,
       })
     : null;
   async function handleConfirmar() {
@@ -11229,11 +11279,14 @@ function formatCnpjDigits(digits) {
       // que "Tipo documental" editado em "Editar classificação" sempre vira
       // o título do documento, sem depender de nenhuma outra função
       // recalcular a mesma coisa mais tarde.
+      const versaoConfirmada =
+        (decisao && decisao.versaoSugerida) || item.versaoSugerida || null;
       const tituloConfirmado = generateDocumentTitle({
         categoria: selCategoria,
         tipo: selTipo || null,
         companyId: companyIdConfirmado,
         abrangencia: selAbrangencia,
+        versao: versaoConfirmada,
       });
       await onConfirm(item, {
         categoria: selCategoria,
@@ -11245,8 +11298,7 @@ function formatCnpjDigits(digits) {
           selAbrangencia === "estabelecimento_especifico" && selCompanyId
             ? [selCompanyId]
             : [],
-        versaoSugerida:
-          (decisao && decisao.versaoSugerida) || item.versaoSugerida || null,
+        versaoSugerida: versaoConfirmada,
         titulo: tituloConfirmado,
       });
       onClose();
@@ -13368,6 +13420,7 @@ function buildConfirmedDocRecord({
         tipo: tipoFinal,
         companyId: companyId || null,
         abrangencia: abrangenciaFinal,
+        versao: versaoSugerida,
       }),
     numero: numero || null,
     orgao: orgao || null,
