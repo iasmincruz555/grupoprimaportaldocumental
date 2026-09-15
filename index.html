@@ -2294,6 +2294,94 @@ async function excluirDocumentoConfirmado(doc, company, { onNotify } = {}) {
   );
   return true;
 }
+/** limparDocumentosOrfaos: revalida, um a um, todo registro persistido
+ *  (documentos_confirmados + conference_queue) que tem um driveFileId real
+ *  — chamando o MESMO endpoint que Ver/Baixar usam — e só remove o registro
+ *  quando o backend confirma, de fato, 404 (arquivo não existe mais no
+ *  Drive). Qualquer outra resposta (erro de rede, backend fora do ar, 403
+ *  etc.) é tratada como inconclusiva e o registro é mantido — nunca apaga
+ *  por suposição. Nunca toca no arquivo físico no Drive, só no índice do
+ *  portal (mesma garantia de `excluirDocumentoConfirmado`), e registra
+ *  auditoria de cada remoção (2026-09-15, pedido explícito da usuária depois
+ *  de encontrar documentos "Arquivo original não encontrado" após uma
+ *  reorganização de pastas no Drive). */
+async function limparDocumentosOrfaos({ onProgresso } = {}) {
+  const db = await getDb();
+  if (!db) return { ok: false, motivo: "armazenamento_indisponivel" };
+  if (!DRIVE_PROXY_URL) return { ok: false, motivo: "backend_indisponivel" };
+  async function arquivoExisteNoDrive(driveFileId) {
+    try {
+      const resp = await fetch(
+        `${DRIVE_PROXY_URL}/api/documents/${encodeURIComponent(driveFileId)}/file`,
+        { headers: DRIVE_PROXY_KEY ? { "X-Portal-Key": DRIVE_PROXY_KEY } : {} },
+      );
+      if (resp.status === 404) return false;
+      resp.body?.cancel?.().catch(() => {}); // nunca baixa o arquivo inteiro só pra confirmar que existe
+      return resp.ok ? true : null; // null = inconclusivo (403/500/etc.) — nunca remove
+    } catch (e) {
+      return null; // falha de rede — inconclusivo, nunca remove
+    }
+  }
+  const alvos = [];
+  const confirmadosSnap = await db.collection("documentos_confirmados").get();
+  confirmadosSnap.docs.forEach((d) => {
+    const data = d.data();
+    if (data?.arquivo?.driveFileId) {
+      alvos.push({
+        colecao: "documentos_confirmados",
+        id: d.id,
+        driveFileId: data.arquivo.driveFileId,
+        titulo: data.titulo || data.tipo || data.arquivo.nomeOriginal,
+        categoria: data.categoria,
+      });
+    }
+  });
+  const conferenciaSnap = await db.collection("conference_queue").get();
+  conferenciaSnap.docs.forEach((d) => {
+    const data = d.data();
+    if (data?.driveFileId) {
+      alvos.push({
+        colecao: "conference_queue",
+        id: d.id,
+        driveFileId: data.driveFileId,
+        titulo: data.nomeOriginal,
+        categoria: data.possivelCategoria,
+      });
+    }
+  });
+  const removidos = [];
+  const mantidos = [];
+  const inconclusivos = [];
+  for (let i = 0; i < alvos.length; i++) {
+    const alvo = alvos[i];
+    onProgresso?.({ atual: i + 1, total: alvos.length });
+    const existe = await arquivoExisteNoDrive(alvo.driveFileId);
+    if (existe === false) {
+      try {
+        await db.collection(alvo.colecao).doc(alvo.id).delete();
+        removidos.push(alvo);
+        logDocumentAction("removeu_documento_orfao", {
+          documento: alvo.titulo || "(sem título)",
+          categoria:
+            CATEGORIES.find((c) => c.key === alvo.categoria)?.label ||
+            alvo.categoria ||
+            "categoria não identificada",
+          driveFileIdRemovido: alvo.driveFileId,
+          colecao: alvo.colecao,
+          motivo:
+            "Arquivo não encontrado no Google Drive ao revalidar (verificação/limpeza de documentos órfãos) — provavelmente substituído/reenviado em vez de movido durante uma reorganização de pastas.",
+        });
+      } catch (e) {
+        mantidos.push(alvo); // falhou ao excluir (não ao verificar) — mantém como estava
+      }
+    } else if (existe === true) {
+      mantidos.push(alvo);
+    } else {
+      inconclusivos.push(alvo);
+    }
+  }
+  return { ok: true, total: alvos.length, removidos, mantidos, inconclusivos };
+}
 /** editarDocumentoConfirmado: edição manual dos metadados de um documento já
  *  indexado (item 1 do pedido de 2026-09-14 — "MANTER A EDIÇÃO DA
  *  ABRANGÊNCIA DOS DOCUMENTOS"), sem excluir o arquivo nem repetir a
@@ -13080,6 +13168,42 @@ function SyncView({ companies, onNotify }) {
   const [lastSync, setLastSync] = useState(null);
   const [result, setResult] = useState(null);
   const [progresso, setProgresso] = useState(null); // { atual, total } — feedback durante a leitura de conteúdo
+  const [orphanState, setOrphanState] = useState("idle"); // idle | working | done | error
+  const [orphanProgresso, setOrphanProgresso] = useState(null);
+  const [orphanResult, setOrphanResult] = useState(null);
+  async function handleLimparOrfaos() {
+    setOrphanState("working");
+    setOrphanProgresso(null);
+    setOrphanResult(null);
+    try {
+      const resultado = await limparDocumentosOrfaos({
+        onProgresso: setOrphanProgresso,
+      });
+      if (!resultado.ok) {
+        setOrphanState("error");
+        onNotify?.(
+          resultado.motivo === "backend_indisponivel"
+            ? "Não foi possível verificar agora — backend indisponível."
+            : "Não foi possível verificar agora — armazenamento indisponível.",
+          "error",
+        );
+        return;
+      }
+      setOrphanResult(resultado);
+      setOrphanState("done");
+      onNotify?.(
+        resultado.removidos.length > 0
+          ? `${resultado.removidos.length} documento(s) órfão(s) removido(s) do índice (o arquivo original não foi encontrado no Drive). O arquivo físico, quando ainda existir em algum lugar, nunca foi tocado.`
+          : "Nenhum documento órfão encontrado — todos os arquivos indexados ainda existem no Drive.",
+        "info",
+      );
+    } catch (e) {
+      setOrphanState("error");
+      onNotify?.("Não foi possível concluir a verificação agora.", "error");
+    } finally {
+      setOrphanProgresso(null);
+    }
+  }
   const knownDriveIds = useMemo(() => {
     const ids = new Set();
     companies.forEach((c) =>
@@ -13563,6 +13687,137 @@ function SyncView({ companies, onNotify }) {
             : 'Os itens "enviados para conferência" ficam na fila de conferência até serem revisados.',
         ),
       ),
+    /*#__PURE__*/ React.createElement(
+      "section",
+      { className: "section-block", style: { marginTop: 24 } },
+      /*#__PURE__*/ React.createElement(
+        "header",
+        { className: "view-header", style: { marginBottom: 4 } },
+        /*#__PURE__*/ React.createElement(
+          "div",
+          null,
+          /*#__PURE__*/ React.createElement(
+            "h3",
+            null,
+            "🧹 Verificar e limpar documentos órfãos",
+          ),
+          /*#__PURE__*/ React.createElement(
+            "p",
+            { className: "lede" },
+            'Revalida cada documento já indexado contra o Google Drive de verdade (o mesmo que "Ver"/"Baixar" usam) e remove do índice só os que o Drive confirma que não existem mais — nunca toca no arquivo físico. Use depois de mover/reorganizar arquivos no Drive, se "Ver" ou "Baixar" passarem a dizer "arquivo original não encontrado".',
+          ),
+        ),
+        /*#__PURE__*/ React.createElement(
+          "button",
+          {
+            className: "chat-toggle",
+            onClick: handleLimparOrfaos,
+            disabled: orphanState === "working",
+          },
+          orphanState === "working"
+            ? /*#__PURE__*/ React.createElement(Loader2, {
+                size: 14,
+                className: "spin",
+              })
+            : /*#__PURE__*/ React.createElement(FileSearch, { size: 14 }),
+          orphanState === "working"
+            ? orphanProgresso
+              ? `Verificando ${orphanProgresso.atual}/${orphanProgresso.total}...`
+              : "Verificando..."
+            : "Verificar e limpar",
+        ),
+      ),
+      orphanState === "error" &&
+        /*#__PURE__*/ React.createElement(
+          "div",
+          { className: "alert-row alert-amber" },
+          /*#__PURE__*/ React.createElement(AlertTriangle, { size: 16 }),
+          /*#__PURE__*/ React.createElement(
+            "span",
+            null,
+            "Não foi possível concluir a verificação agora. Tente novamente em alguns instantes.",
+          ),
+        ),
+      orphanState === "done" &&
+        orphanResult &&
+        /*#__PURE__*/ React.createElement(
+          React.Fragment,
+          null,
+          /*#__PURE__*/ React.createElement(
+            "div",
+            { className: "kpi-grid kpi-grid-5", style: { marginTop: 10 } },
+            /*#__PURE__*/ React.createElement(KpiCard, {
+              icon: FolderOpen,
+              label: "Documentos verificados",
+              value: orphanResult.total,
+            }),
+            /*#__PURE__*/ React.createElement(KpiCard, {
+              icon: AlertTriangle,
+              label: "Órfãos removidos do índice",
+              value: orphanResult.removidos.length,
+              tone: orphanResult.removidos.length > 0 ? "accent" : "default",
+            }),
+            /*#__PURE__*/ React.createElement(KpiCard, {
+              icon: CheckCircle2,
+              label: "Confirmados no Drive",
+              value: orphanResult.mantidos.length,
+            }),
+            orphanResult.inconclusivos.length > 0 &&
+              /*#__PURE__*/ React.createElement(KpiCard, {
+                icon: AlertTriangle,
+                label: "Não verificados (tente de novo)",
+                value: orphanResult.inconclusivos.length,
+                tone: "accent",
+              }),
+          ),
+          orphanResult.removidos.length > 0 &&
+            /*#__PURE__*/ React.createElement(
+              "div",
+              { className: "conference-list", style: { marginTop: 14 } },
+              orphanResult.removidos.map((r) =>
+                /*#__PURE__*/ React.createElement(
+                  "div",
+                  {
+                    key: `${r.colecao}-${r.id}`,
+                    className: "conference-item",
+                    style: { borderLeftColor: "var(--vermelho, #c0392b)" },
+                  },
+                  /*#__PURE__*/ React.createElement(
+                    "div",
+                    { className: "conference-item-head" },
+                    /*#__PURE__*/ React.createElement(AlertTriangle, {
+                      size: 15,
+                    }),
+                    /*#__PURE__*/ React.createElement(
+                      "span",
+                      { className: "conference-item-name" },
+                      r.titulo || "(sem título)",
+                    ),
+                  ),
+                  /*#__PURE__*/ React.createElement(
+                    "div",
+                    { className: "conference-item-motivo" },
+                    "Categoria: ",
+                    CATEGORIES.find((c) => c.key === r.categoria)?.label ||
+                      r.categoria ||
+                      "não identificada",
+                    " — removido de ",
+                    r.colecao === "documentos_confirmados"
+                      ? "Documentos confirmados"
+                      : "Fila de conferência",
+                    " (arquivo não encontrado no Drive).",
+                  ),
+                ),
+              ),
+            ),
+          orphanResult.removidos.length === 0 &&
+            /*#__PURE__*/ React.createElement(
+              "p",
+              { className: "empty-note", style: { marginTop: 10 } },
+              "Nenhum documento órfão encontrado — todos os arquivos indexados ainda existem no Drive.",
+            ),
+        ),
+    ),
   );
 }
 /** useAutoSyncedDriveDocuments: torna os documentos da pasta oficial do
