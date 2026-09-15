@@ -44,6 +44,20 @@
  *      pessoa escolhe o arquivo, e a indexação só depois que ela confirma
  *      a classificação — igual já era com "assets".
  *
+ * Rota nova — assistente de IA (Gemini):
+ *  POST /api/assistente/ia
+ *      Proxy autenticado para a API do Gemini (Google AI Studio, camada
+ *      gratuita). Recebe `contents`/`tools`/`systemInstruction` no MESMO
+ *      formato que a API do Gemini espera e devolve a resposta crua do
+ *      Gemini — este backend só existe aqui para a GEMINI_API_KEY nunca
+ *      precisar estar no navegador. Este servidor NUNCA decide sozinho o
+ *      que é um documento, nem monta ZIP, nem inventa dados: quem chama
+ *      (o portal, no navegador) é quem decide quais "ferramentas" oferecer
+ *      ao modelo e quem EXECUTA essas ferramentas de verdade, com os dados
+ *      reais já carregados na tela — exatamente como já acontecia com a
+ *      capability "sample" do Claude dentro do claude.ai. Ver
+ *      tryGeminiAnswer/buildAssistantTools no index.html do portal.
+ *
  * Segurança:
  *  - Todas as rotas exigem a mesma chave simples (BACKEND_ACCESS_KEY) no
  *    header "X-Portal-Key" — não é autenticação de usuário (não distingue
@@ -55,6 +69,9 @@
  *    leitura) — necessário para o upload real funcionar. A pasta oficial
  *    precisa estar compartilhada com a conta de serviço como Editor (não
  *    só Leitor como antes) — ver notas de deploy.
+ *  - A GEMINI_API_KEY fica só nas variáveis de ambiente deste serviço
+ *    (Secret Manager) — nunca é devolvida em nenhuma resposta, nunca é
+ *    logada.
  */
  
 const express = require("express");
@@ -126,6 +143,9 @@ function exigirChaveDeAcesso(req, res, next) {
 const DRIVE_FOLDER_ID =
   process.env.DRIVE_FOLDER_ID || "1n3uwQkMA6qCGaBi7g2kcHSsE2TIi8uSN";
  
+const SHARED_DRIVE_ID =
+  process.env.SHARED_DRIVE_ID || "0AOGKdPj3tXYIUk9PVA";
+ 
 function carregarCredenciais() {
   const b64 = process.env.GOOGLE_SERVICE_ACCOUNT_KEY_B64;
   if (b64) {
@@ -140,6 +160,7 @@ function carregarCredenciais() {
 }
  
 const credentials = carregarCredenciais();
+app.get("/debug/quem-sou", (req, res) => { res.json({ client_email: credentials.client_email }); });
  
 // Escopo ampliado: antes só "drive.readonly". O upload real de documento
 // novo exige escrita — por isso agora é "drive" (leitura + escrita), e a
@@ -169,6 +190,7 @@ async function pertenceAPastaAutorizada(fileId) {
     const meta = await drive.files.get({
       fileId: idAtual,
       fields: "id, parents",
+      supportsAllDrives: true,
     });
     const pais = meta.data.parents || [];
     if (pais.includes(DRIVE_FOLDER_ID)) return true;
@@ -187,6 +209,10 @@ async function listarArquivosRecursivo(pastaId, caminho = []) {
     fields: "files(id, name, mimeType, size, modifiedTime)",
     pageSize: 200,
     orderBy: "name",
+    supportsAllDrives: true,
+    includeItemsFromAllDrives: true,
+    corpora: "drive",
+    driveId: SHARED_DRIVE_ID,
   });
  
   const itens = result.data.files || [];
@@ -233,10 +259,11 @@ app.get("/api/documents/:id/file", exigirChaveDeAcesso, async (req, res) => {
     const meta = await drive.files.get({
       fileId,
       fields: "name, mimeType",
+      supportsAllDrives: true,
     });
  
     const arquivo = await drive.files.get(
-      { fileId, alt: "media" },
+      { fileId, alt: "media", supportsAllDrives: true },
       { responseType: "stream" }
     );
  
@@ -378,6 +405,10 @@ async function encontrarOuCriarSubpastaUploads() {
     q: `'${DRIVE_FOLDER_ID}' in parents and trashed = false and mimeType = '${FOLDER_MIME_TYPE}' and name = '${NOME_SUBPASTA_UPLOADS.replace(/'/g, "\\'")}'`,
     fields: "files(id, name)",
     pageSize: 1,
+    supportsAllDrives: true,
+    includeItemsFromAllDrives: true,
+    corpora: "drive",
+    driveId: SHARED_DRIVE_ID,
   });
   const existente = (busca.data.files || [])[0];
   if (existente) {
@@ -391,6 +422,7 @@ async function encontrarOuCriarSubpastaUploads() {
       parents: [DRIVE_FOLDER_ID],
     },
     fields: "id",
+    supportsAllDrives: true,
   });
   idSubpastaUploadsCache = criada.data.id;
   return criada.data.id;
@@ -428,6 +460,7 @@ app.post(
           body: Readable.from(req.file.buffer),
         },
         fields: "id, name, mimeType, size, modifiedTime",
+        supportsAllDrives: true,
       });
  
       const arquivoDrive = criado.data;
@@ -445,6 +478,84 @@ app.post(
     }
   }
 );
+ 
+// =========================================================================
+// ASSISTENTE (IA) — proxy autenticado para a API do Gemini (camada
+// gratuita do Google AI Studio). Esta rota é deliberadamente "burra": só
+// repassa contents/tools/systemInstruction para o Gemini e devolve a
+// resposta crua. Quem decide QUAIS ferramentas existem e quem EXECUTA
+// essas ferramentas de verdade (buscar empresa, entregar documento, montar
+// ZIP etc.) é sempre o portal, no navegador, com os dados reais já
+// carregados — nunca este servidor, e nunca o próprio Gemini. Isso é
+// proposital: o Gemini nunca tem acesso direto ao Drive/Firestore, só
+// decide qual ferramenta chamar e formula a resposta em linguagem natural
+// a partir do resultado real que o portal devolve.
+// =========================================================================
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || null;
+if (!GEMINI_API_KEY) {
+  console.warn(
+    "[aviso] GEMINI_API_KEY não definida — a rota /api/assistente/ia vai responder 503 até essa variável ser configurada."
+  );
+}
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+ 
+/**
+ * POST /api/assistente/ia
+ * body JSON:
+ *   - contents: array de turnos no formato do Gemini
+ *       ({ role: "user"|"model", parts: [{ text }] | [{ functionResponse }] })
+ *   - tools: array de declarações de função no formato do Gemini
+ *       ({ name, description, parameters? }) — opcional
+ *   - systemInstruction: string com as instruções gerais do assistente —
+ *       opcional
+ *
+ * Devolve a resposta crua da API do Gemini (generateContent) — o portal já
+ * sabe interpretar esse formato (candidates[0].content.parts, cada parte
+ * podendo ser texto ou um pedido de chamada de função).
+ */
+app.post("/api/assistente/ia", exigirChaveDeAcesso, async (req, res) => {
+  if (!GEMINI_API_KEY) {
+    return res.status(503).json({ erro: "Assistente de IA não está configurado neste servidor." });
+  }
+  const { contents, tools, systemInstruction } = req.body || {};
+  if (!Array.isArray(contents) || contents.length === 0) {
+    return res.status(400).json({ erro: "Envie 'contents' (histórico da conversa no formato do Gemini)." });
+  }
+ 
+  const corpoRequisicao = {
+    contents,
+    generationConfig: { temperature: 0.3, maxOutputTokens: 2048 },
+  };
+  if (typeof systemInstruction === "string" && systemInstruction.trim()) {
+    corpoRequisicao.systemInstruction = { role: "system", parts: [{ text: systemInstruction }] };
+  }
+  if (Array.isArray(tools) && tools.length > 0) {
+    corpoRequisicao.tools = [{ functionDeclarations: tools }];
+  }
+ 
+  try {
+    const respostaGemini = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(corpoRequisicao),
+      }
+    );
+ 
+    if (!respostaGemini.ok) {
+      const corpoErro = await respostaGemini.text();
+      console.error("Erro na API do Gemini:", respostaGemini.status, corpoErro);
+      return res.status(502).json({ erro: "O assistente de IA não respondeu corretamente agora. Tente novamente em instantes." });
+    }
+ 
+    const dados = await respostaGemini.json();
+    res.json(dados);
+  } catch (err) {
+    console.error("Erro ao chamar a API do Gemini:", err.message);
+    res.status(500).json({ erro: "Não foi possível falar com o assistente de IA agora." });
+  }
+});
  
 app.get("/", (req, res) => {
   res.send("Proxy de documentos do Portal Grupoprima está funcionando.");
@@ -469,6 +580,16 @@ app.listen(PORT, () => {
  *                                   por vírgula, ex.:
  *       https://iasmincruz555.github.io,https://claude.site
  *   DRIVE_FOLDER_ID                 (sem mudança).
+ *   GEMINI_API_KEY                  NOVA — chave da API do Gemini (Google
+ *                                   AI Studio, camada gratuita), lida do
+ *                                   Secret Manager (secret "gemini-api-key",
+ *                                   igual ao padrão já usado para a
+ *                                   credencial do Drive). Sem ela, a rota
+ *                                   /api/assistente/ia responde 503 (o
+ *                                   resto do backend continua funcionando
+ *                                   normalmente).
+ *   GEMINI_MODEL                    opcional — nome do modelo do Gemini a
+ *                                   usar (padrão: "gemini-2.5-flash").
  *
  * Passos que só você consegue fazer (fora deste código):
  *
@@ -485,6 +606,13 @@ app.listen(PORT, () => {
  *     DOCUMENTAL | GRUPOPRIMA" → Compartilhar → localizar o e-mail da
  *     conta de serviço → trocar de "Leitor" para "Editor"). Sem isso, as
  *     rotas de leitura continuam funcionando, mas todo upload falha.
+ *
+ *  4) Gemini: criar o secret "gemini-api-key" no Secret Manager com a
+ *     chave gerada em aistudio.google.com/apikey, dar à service account
+ *     que o Cloud Run usa a role "Secret Manager Secret Accessor" nesse
+ *     secret, e incluir GEMINI_API_KEY=gemini-api-key:latest em
+ *     --update-secrets no deploy. Sem isso, só a rota /api/assistente/ia
+ *     fica indisponível (503) — nada mais é afetado.
  *
  * Este backend agora tem escopo de ESCRITA no Drive e escreve no
  * Firestore — ambos exigem os passos manuais acima antes de funcionar de
