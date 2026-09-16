@@ -4787,7 +4787,31 @@ async function gerarChecklistViaGemini(texto) {
   try {
     lista = JSON.parse(semCrases);
   } catch (e) {
-    return { ok: false, motivo: "resposta_nao_e_json" };
+    // Mesmo instruída a responder só o array, a IA às vezes devolve texto
+    // explicativo antes/depois do JSON, ou uma cerca de código num formato
+    // levemente diferente do esperado ("```JSON", cerca sem fechar certinho
+    // etc.) — em vez de desistir, tenta isolar o trecho entre o primeiro
+    // "[" e o último "]" do texto bruto. Continua seguro: ainda é
+    // JSON.parse de verdade (nunca eval, nunca regex "adivinhando"
+    // conteúdo) — ou é JSON válido de verdade, ou falha do mesmo jeito. */
+    const inicio = bruto.indexOf("[");
+    const fim = bruto.lastIndexOf("]");
+    if (inicio === -1 || fim === -1 || fim <= inicio) {
+      return { ok: false, motivo: "resposta_nao_e_json" };
+    }
+    try {
+      lista = JSON.parse(bruto.slice(inicio, fim + 1));
+    } catch (e2) {
+      return { ok: false, motivo: "resposta_nao_e_json" };
+    }
+  }
+  // Alguns modelos embrulham o array num objeto (ex.: {"itens": [...]})
+  // mesmo instruídos a não fazer isso — aceita esse formato também, em vez
+  // de obrigar a usuária a reenviar o arquivo por causa de uma diferença de
+  // formatação da IA.
+  if (!Array.isArray(lista) && lista && typeof lista === "object") {
+    const primeiraLista = Object.values(lista).find((v) => Array.isArray(v));
+    if (primeiraLista) lista = primeiraLista;
   }
   if (!Array.isArray(lista)) return { ok: false, motivo: "formato_inesperado" };
   const tiposValidos = new Set(DOC_TYPE_KEYWORDS.map((k) => k.label));
