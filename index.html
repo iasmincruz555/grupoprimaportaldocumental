@@ -3712,7 +3712,18 @@ function detectRequestedCategories(text) {
   }
   return null;
 }
-/** searchDocuments: localiza documentos de uma empresa por tipo/categoria. */ function searchDocuments({
+/** searchDocuments: localiza documentos de uma empresa por tipo/categoria.
+ *  Pedido de TIPO específico (`wantedTypeKeys`, ex.: "CND municipal") filtra
+ *  por `d.tipo === t.label` — o tipo específico, nunca a categoria inteira
+ *  (`t.key`) (pedido explícito da Iasmin, 2026-09-16: "CND municipal de MS"
+ *  não pode devolver a Federal e a Estadual junto, só porque as três
+ *  compartilham a categoria "Fiscal e Tributária"). Quando ninguém tem
+ *  exatamente esse tipo, NUNCA cai de volta para a categoria inteira como
+ *  substituto — isso reintroduziria o mesmo problema (mandar documentos que
+ *  não foram pedidos); fica como "não encontrado" mesmo. Pedido de
+ *  CATEGORIA inteira (`wantedCategoryKeys`, ex.: "toda a documentação de
+ *  seguros") continua filtrando por `d.categoria`, propositalmente — é um
+ *  pedido diferente, que realmente quer tudo daquela categoria. */ function searchDocuments({
   company,
   wantedTypeKeys = [],
   wantedCategoryKeys = [],
@@ -3721,7 +3732,7 @@ function detectRequestedCategories(text) {
   const notFoundLabels = [];
   const seenIds = new Set();
   wantedTypeKeys.forEach((t) => {
-    const matches = company.documentos.filter((d) => d.categoria === t.key);
+    const matches = company.documentos.filter((d) => d.tipo === t.label);
     if (matches.length === 0) {
       notFoundLabels.push(t.label);
       return;
@@ -3757,6 +3768,124 @@ function detectRequestedCategories(text) {
 }
 function getDocument(company, docId) {
   return company.documentos.find((d) => d.id === docId) || null;
+}
+/* =========================================================================
+   RESUMO DE SOLICITAÇÃO DE HOMOLOGAÇÃO — checklist a partir do pedido real
+   de um cliente (BID, e-mail, formulário) e correspondência com os
+   documentos reais do portal (pedido da Iasmin, 2026-09-16).
+   ========================================================================= */
+/** resolveCompanyFromHomologacaoBase: extrai o número da base (ex.: "0004")
+ *  do rótulo escolhido no formulário de Homologação (ex.: "Pernambuco
+ *  (Filial 0004)") e localiza a empresa real correspondente entre as bases
+ *  já indexadas no portal. "Nextflow" e bases ainda sem documentos
+ *  indexados (ex.: uma filial nova) devolvem null — nunca inventa uma
+ *  correspondência. */
+function resolveCompanyFromHomologacaoBase(baseLabel, companies) {
+  const m = /(\d{4})/.exec(baseLabel || "");
+  if (!m) return null;
+  return (companies || []).find((c) => c.id === m[1]) || null;
+}
+/** CHECKLIST_STOPWORDS: palavras genéricas demais pra servir de pista de
+ *  desempate por título (item 3 abaixo) — sobra só o que realmente
+ *  distingue um documento do outro (ex.: "RCTR-C"). */
+const CHECKLIST_STOPWORDS = new Set([
+  "de", "da", "do", "das", "dos", "e", "ou", "a", "o", "as", "os", "para",
+  "com", "em", "no", "na", "nos", "nas", "um", "uma", "por", "ao", "aos",
+  "documento", "documentos", "atualizado", "atualizada", "atualizados",
+  "ultimas", "ultima", "ultimo", "alteracoes", "alteracao", "negativas",
+  "negativa", "certidao", "certidoes",
+]);
+/** extraKeywordsFromChecklistItem: pistas específicas do texto original do
+ *  item (ex.: "RCTR-C" em "Apólices de seguro (RCTR-C / RCF-DC)"), usadas
+ *  só como critério de DESEMPATE quando o tipo específico sozinho ainda
+ *  deixa mais de um documento real na mesma empresa — nunca como critério
+ *  primário. */
+function extraKeywordsFromChecklistItem(item) {
+  const norm = normalize(item.descricaoOriginal || "");
+  return [
+    ...new Set(
+      norm
+        .split(/[^a-z0-9-]+/)
+        .filter((w) => w.length >= 3 && !CHECKLIST_STOPWORDS.has(w)),
+    ),
+  ];
+}
+/** currentDocsFor: reduz uma lista de documentos brutos (já filtrados por
+ *  tipo/categoria) aos que contam como "um documento real" pra fins de
+ *  ambiguidade — nunca histórico duplicado, mas também nunca escondendo
+ *  documentos genuinamente diferentes.
+ *  "contratos_sociais" é caso especial DE PROPÓSITO (mesmo critério de
+ *  `sortDocumentsByVersion`/`groupDocumentsByFamily` usado no resto do
+ *  portal): as alterações contratuais são o histórico de UM documento só,
+ *  então colapsam pra só a versão atual — senão pedir "contrato social"
+ *  devolveria as dezenas de alterações arquivadas juntas.
+ *  Nas DEMAIS categorias, `groupDocumentsByFamily` NÃO é usado aqui de
+ *  propósito: hoje a família de um documento é derivada do próprio `tipo`
+ *  (ver `docFamilyFor`), e um tipo ainda genérico (ex.: "Apólice" cobrindo
+ *  RCTR-C e RCF-DC ao mesmo tempo, enquanto a Camada 2 não distingue os
+ *  dois) faria dois documentos REALMENTE diferentes colapsarem num só,
+ *  escondendo um deles sem avisar — o oposto do que foi pedido. Aqui só se
+ *  remove o que já foi EXPLICITAMENTE substituído (`flag === "versao_anterior"`,
+ *  gravado quando o mesmo arquivo do Drive é reprocessado) — o resto conta
+ *  como candidato próprio, inclusive pra virar "ambíguo" quando for o
+ *  caso. */
+function currentDocsFor(docsFiltrados) {
+  if (docsFiltrados.length > 0 && docsFiltrados[0].categoria === "contratos_sociais") {
+    return groupDocumentsByFamily(docsFiltrados).map((f) => f.versions[0]);
+  }
+  return docsFiltrados.filter((d) => d.flag !== "versao_anterior");
+}
+/** matchChecklistItemToCompany: resolve um item da checklist a documento(s)
+ *  real(is) de UMA empresa, em camadas — nunca "chuta" quando há mais de
+ *  uma possibilidade real (pedido explícito da Iasmin: "cada documento é
+ *  único e não pode ser enviado junto com vários"):
+ *   1) tipo específico identificado (`item.tipoSugerido`) é o critério
+ *      primário — nunca a categoria inteira;
+ *   2) `currentDocsFor` primeiro, pra comparar só documentos REAIS e atuais
+ *      (nunca histórico/arquivadas contando como "mais um documento
+ *      diferente" — ver comentário da função acima);
+ *   3) se sobrar mais de um documento real e atual com o mesmo tipo
+ *      específico, tenta desempatar comparando palavras próprias do texto
+ *      do item (ex.: "RCTR-C") com o título de cada candidato;
+ *   4) só a CATEGORIA foi identificada (`item.categoriaSugerida`, sem tipo
+ *      específico) — todos os documentos atuais dessa categoria entram como
+ *      um "grupo": cada um vira um arquivo numerado à parte no ZIP (item
+ *      6 do prompt combinado), nunca escondidos atrás de um só;
+ *   5) sem tipo nem categoria identificados, ou tipo/categoria sem nenhum
+ *      documento real: devolve o status correspondente para a tela mostrar
+ *      como "não localizado" — nunca inventa um documento. */
+function matchChecklistItemToCompany(item, company) {
+  if (!company) return { status: "sem_base", candidatos: [] };
+  const docs = company.documentos || [];
+  if (item.tipoSugerido) {
+    const brutos = docs.filter((d) => d.tipo === item.tipoSugerido);
+    const atuais = currentDocsFor(brutos);
+    if (atuais.length === 0) return { status: "nao_localizado", candidatos: [] };
+    if (atuais.length === 1)
+      return { status: "encontrado", doc: atuais[0], candidatos: atuais };
+    // Só palavras que aparecem em ALGUNS títulos, não em TODOS, servem de
+    // desempate — uma palavra comum a todos os candidatos (ex.: "apólice",
+    // quando o próprio tipo já é "Apólice") não distingue nada, e contá-la
+    // faria dois documentos diferentes empatarem por engano.
+    const titulosNorm = atuais.map((d) => normalize(docTituloExibido(d)));
+    const pistas = extraKeywordsFromChecklistItem(item).filter((p) => {
+      const ocorrencias = titulosNorm.filter((t) => t.includes(p)).length;
+      return ocorrencias > 0 && ocorrencias < atuais.length;
+    });
+    if (pistas.length > 0) {
+      const bateram = atuais.filter((d, i) => pistas.some((p) => titulosNorm[i].includes(p)));
+      if (bateram.length === 1)
+        return { status: "encontrado", doc: bateram[0], candidatos: atuais };
+    }
+    return { status: "ambiguo", candidatos: atuais };
+  }
+  if (item.categoriaSugerida) {
+    const brutos = docs.filter((d) => d.categoria === item.categoriaSugerida);
+    const atuais = currentDocsFor(brutos);
+    if (atuais.length === 0) return { status: "nao_localizado", candidatos: [] };
+    return { status: "grupo", candidatos: atuais };
+  }
+  return { status: "tipo_nao_identificado", candidatos: [] };
 }
 /* =========================================================================
    CENTRAL DE AJUDA DO ASSISTENTE
@@ -4589,6 +4718,97 @@ async function tryGeminiAnswer(history, text, companies, totals, actions) {
   } catch (e) {
     return { text: null, unavailable: false };
   }
+}
+/** buildResumoSolicitacaoInstrucao: monta as instruções do extrator de
+ *  checklist a partir do VOCABULÁRIO REAL do portal (CATEGORIES/
+ *  DOC_TYPE_KEYWORDS já existentes) — nunca uma lista separada e fixa, pra
+ *  nunca desalinhar quando o classificador ganhar um tipo novo. */
+function buildResumoSolicitacaoInstrucao() {
+  const tiposConhecidos = [...new Set(DOC_TYPE_KEYWORDS.map((k) => k.label))];
+  const categoriasConhecidas = CATEGORIES.map((c) => c.label);
+  return [
+    "Você é um extrator de checklist de documentos para o Portal Documental Grupoprima.",
+    "Vai receber o texto de um pedido real de um cliente (BID de transportadoras, e-mail, formulário de homologação) e deve devolver, em JSON puro (sem markdown, sem crases, sem texto fora do JSON), um array de itens — um para cada documento exigido no texto.",
+    'Cada item deve ter exatamente estes campos: "descricaoOriginal" (o trecho/frase do pedido que descreve o documento, resumido, em português, até 200 caracteres), "tipoSugerido" (o rótulo EXATO de um dos tipos conhecidos abaixo, só quando um bater com precisão real) e "categoriaSugerida" (o rótulo EXATO de uma das categorias conhecidas abaixo, só quando não for possível identificar o tipo específico mas a categoria for clara).',
+    `Tipos conhecidos: ${tiposConhecidos.join(", ")}.`,
+    `Categorias conhecidas: ${categoriasConhecidas.join(", ")}.`,
+    'Se um item do pedido citar VÁRIOS documentos distintos numa mesma frase (ex.: "Certidões negativas: Federal, Estadual, Municipal, FGTS e Trabalhista"), separe cada um em um item próprio do array, usando o tipo específico de cada um quando ele existir na lista de tipos conhecidos.',
+    "Quando não conseguir identificar com confiança real nem um tipo específico nem a categoria, deixe os dois campos (tipoSugerido e categoriaSugerida) como null — NUNCA invente um valor fora das listas acima só para preencher o campo.",
+    "Ignore trechos do pedido que não são pedidos de documento (prazos, critérios de avaliação, cronograma, premissas comerciais, regras de dúvidas etc.) — extraia SÓ a lista de documentos exigidos.",
+    "Responda APENAS com o array JSON, começando em [ e terminando em ], nada antes, nada depois.",
+  ].join(" ");
+}
+/** gerarChecklistViaGemini: extrai, do texto de um pedido de cliente, a
+ *  lista estruturada de documentos exigidos (pedido da Iasmin, 2026-09-16).
+ *  Chama a MESMA rota já usada pelo assistente (`/api/assistente/ia`), sem
+ *  ferramentas — é extração de dado, não execução de ação. Faz o parse do
+ *  JSON de forma defensiva e valida cada item contra o vocabulário REAL do
+ *  portal antes de aceitar um tipoSugerido/categoriaSugerida — um valor que
+ *  a IA "inventou" fora da lista conhecida é descartado (vira null), nunca
+ *  aceito como se fosse real. Nunca finge sucesso: qualquer etapa que falhar
+ *  devolve ok:false com o motivo. */
+async function gerarChecklistViaGemini(texto) {
+  if (!DRIVE_PROXY_URL) return { ok: false, motivo: "backend_indisponivel" };
+  if (!texto || !texto.trim()) return { ok: false, motivo: "texto_vazio" };
+  let resp;
+  try {
+    resp = await fetch(`${DRIVE_PROXY_URL}/api/assistente/ia`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(DRIVE_PROXY_KEY ? { "X-Portal-Key": DRIVE_PROXY_KEY } : {}),
+      },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: texto.slice(0, 60000) }] }],
+        systemInstruction: buildResumoSolicitacaoInstrucao(),
+      }),
+    });
+  } catch (e) {
+    return { ok: false, motivo: "erro_de_rede" };
+  }
+  if (!resp.ok) {
+    return { ok: false, motivo: resp.status === 503 || resp.status === 429 ? "indisponivel_agora" : "falha_ia" };
+  }
+  let dados;
+  try {
+    dados = await resp.json();
+  } catch (e) {
+    return { ok: false, motivo: "resposta_invalida" };
+  }
+  const candidate = dados?.candidates?.[0];
+  const parts = candidate?.content?.parts || [];
+  const bruto = parts.map((p) => p.text || "").join("").trim();
+  const semCrases = bruto
+    .replace(/^```json/i, "")
+    .replace(/^```/, "")
+    .replace(/```$/, "")
+    .trim();
+  let lista;
+  try {
+    lista = JSON.parse(semCrases);
+  } catch (e) {
+    return { ok: false, motivo: "resposta_nao_e_json" };
+  }
+  if (!Array.isArray(lista)) return { ok: false, motivo: "formato_inesperado" };
+  const tiposValidos = new Set(DOC_TYPE_KEYWORDS.map((k) => k.label));
+  const categoriasValidas = new Set(CATEGORIES.map((c) => c.label));
+  const categoriaLabelToKey = Object.fromEntries(CATEGORIES.map((c) => [c.label, c.key]));
+  const itens = lista
+    .filter((it) => it && typeof it === "object" && it.descricaoOriginal)
+    .map((it, i) => {
+      const tipoSugerido = tiposValidos.has(it.tipoSugerido) ? it.tipoSugerido : null;
+      const categoriaLabel =
+        !tipoSugerido && categoriasValidas.has(it.categoriaSugerida) ? it.categoriaSugerida : null;
+      return {
+        id: `chk-${Date.now().toString(36)}-${i}-${Math.random().toString(36).slice(2, 6)}`,
+        descricaoOriginal: String(it.descricaoOriginal).slice(0, 300),
+        tipoSugerido,
+        categoriaSugerida: categoriaLabel ? categoriaLabelToKey[categoriaLabel] : null,
+        editadoManualmente: false,
+      };
+    });
+  if (itens.length === 0) return { ok: false, motivo: "nenhum_item_identificado" };
+  return { ok: true, itens };
 }
 function parseIntent(text) {
   const t = normalize(text);
@@ -10046,6 +10266,741 @@ function HomologacaoStatusBadge({ status, atrasada }) {
     ),
   );
 }
+/** EXTRACAO_MOTIVO_LABEL / motivoParaTexto: traduz os códigos internos de
+ *  falha (extração de texto do arquivo OU geração da checklist via IA)
+ *  em mensagens claras para quem está usando o portal — nunca mostra um
+ *  código técnico cru na tela. */ const EXTRACAO_MOTIVO_LABEL = {
+  pdf_sem_texto_reconhecivel:
+    "Não foi possível reconhecer texto neste PDF (nem no texto do arquivo, nem via OCR). Tente enviar uma versão mais nítida ou outro formato.",
+  ocr_sem_texto_reconhecivel:
+    "Não foi possível reconhecer texto nesta imagem. Tente uma foto ou scan mais nítido.",
+  biblioteca_word_indisponivel:
+    "A leitura de arquivos Word não está disponível neste momento.",
+  biblioteca_planilha_indisponivel:
+    "A leitura de planilhas Excel não está disponível neste momento.",
+  formato_nao_suportado:
+    "Este formato de arquivo não é suportado. Envie Word, PDF, Excel, imagem (PNG/JPG) ou texto (TXT/CSV).",
+  erro_ao_ler_arquivo: "Não foi possível ler este arquivo agora.",
+  backend_indisponivel:
+    "A geração de checklist por IA não está disponível neste momento.",
+  texto_vazio: "Não há texto para analisar neste arquivo.",
+  erro_de_rede:
+    "Não foi possível conectar ao serviço de IA agora. Tente novamente em instantes.",
+  indisponivel_agora:
+    "O serviço de IA está sobrecarregado agora. Tente novamente em instantes.",
+  falha_ia: "O serviço de IA não conseguiu processar este pedido agora.",
+  resposta_invalida: "A resposta da IA veio em um formato inesperado.",
+  resposta_nao_e_json: "A resposta da IA não pôde ser interpretada.",
+  formato_inesperado: "A resposta da IA não veio no formato esperado.",
+  nenhum_item_identificado:
+    "Não foi possível identificar nenhum item de documentação neste arquivo.",
+};
+function motivoParaTexto(motivo) {
+  return (
+    EXTRACAO_MOTIVO_LABEL[motivo] ||
+    "Não foi possível gerar a checklist a partir deste arquivo agora."
+  );
+}
+/** checklistItemSelectValue / parseChecklistItemSelectValue: codificam a
+ *  escolha de um item da checklist (tipo específico OU categoria inteira,
+ *  nunca os dois) em um único valor de <select>, e voltam. */ function checklistItemSelectValue(
+  item,
+) {
+  if (item.tipoSugerido) return `tipo:${item.tipoSugerido}`;
+  if (item.categoriaSugerida) return `categoria:${item.categoriaSugerida}`;
+  return "";
+}
+function parseChecklistItemSelectValue(value) {
+  if (value.startsWith("tipo:"))
+    return { tipoSugerido: value.slice(5), categoriaSugerida: null };
+  if (value.startsWith("categoria:"))
+    return { tipoSugerido: null, categoriaSugerida: value.slice(10) };
+  return { tipoSugerido: null, categoriaSugerida: null };
+}
+/** ChecklistTipoSelect: permite corrigir manualmente o que a IA sugeriu
+ *  para cada item — um tipo específico (documento único) ou uma categoria
+ *  inteira (grupo), nunca inventando um valor fora do vocabulário real do
+ *  portal (mesma lista usada pela busca do Assistente). */ function ChecklistTipoSelect({
+  value,
+  onChange,
+}) {
+  const tipos = [...new Set(DOC_TYPE_KEYWORDS.map((k) => k.label))].sort(
+    (a, b) => a.localeCompare(b, "pt-BR"),
+  );
+  return /*#__PURE__*/ React.createElement(
+    "select",
+    {
+      className: "homolog-checklist-select",
+      value,
+      onChange: (e) => onChange(e.target.value),
+    },
+    /*#__PURE__*/ React.createElement("option", { value: "" }, "Não identificado"),
+    /*#__PURE__*/ React.createElement(
+      "optgroup",
+      { label: "Tipo específico" },
+      tipos.map((label) =>
+        /*#__PURE__*/ React.createElement(
+          "option",
+          { key: `tipo:${label}`, value: `tipo:${label}` },
+          label,
+        ),
+      ),
+    ),
+    /*#__PURE__*/ React.createElement(
+      "optgroup",
+      { label: "Categoria inteira (todos os documentos)" },
+      CATEGORIES.map((c) =>
+        /*#__PURE__*/ React.createElement(
+          "option",
+          { key: `categoria:${c.key}`, value: `categoria:${c.key}` },
+          c.label,
+        ),
+      ),
+    ),
+  );
+}
+/** buildResumoZipPlan: monta a numeração final do ZIP a partir da checklist
+ *  já resolvida contra os documentos reais da base — segue a ORDEM da
+ *  checklist (pedido explícito), com sub-numeração decimal (4, 4.1, 4.2...)
+ *  só quando um item legitimamente corresponde a vários documentos reais
+ *  (categoria inteira, ou ambíguo já resolvido manualmente). Um item
+ *  ambíguo SEM escolha manual nunca entra no ZIP sozinho — fica pendente
+ *  até a usuária escolher exatamente qual documento é o certo (regra:
+ *  "cada documento é único e não pode ser enviado junto com vários"). */ function buildResumoZipPlan(
+  itens,
+  company,
+  selecoesAmbiguos,
+) {
+  const numerados = [];
+  const ambiguosPendentes = [];
+  const naoLocalizados = [];
+  let contador = 0;
+  (itens || []).forEach((item) => {
+    const r = matchChecklistItemToCompany(item, company);
+    if (r.status === "encontrado") {
+      contador++;
+      numerados.push({ numero: String(contador), item, doc: r.doc });
+    } else if (r.status === "grupo") {
+      contador++;
+      r.candidatos.forEach((doc, i) => {
+        numerados.push({ numero: `${contador}.${i + 1}`, item, doc });
+      });
+    } else if (r.status === "ambiguo") {
+      const escolhidoId = selecoesAmbiguos && selecoesAmbiguos[item.id];
+      const doc = escolhidoId
+        ? r.candidatos.find((d) => d.id === escolhidoId)
+        : null;
+      if (doc) {
+        contador++;
+        numerados.push({ numero: String(contador), item, doc });
+      } else {
+        ambiguosPendentes.push({ item, candidatos: r.candidatos });
+      }
+    } else {
+      naoLocalizados.push({ item, status: r.status });
+    }
+  });
+  return { numerados, ambiguosPendentes, naoLocalizados };
+}
+/** HomologacaoZipPreviewModal: a PRÉVIA pedida explicitamente antes de
+ *  baixar — mostra o que foi encontrado (com "Ver"), o que ficou ambíguo
+ *  (exige escolha manual, nunca automática) e o que não foi localizado,
+ *  antes de qualquer download. */ function HomologacaoZipPreviewModal({
+  h,
+  company,
+  baseLabel,
+  itens,
+  onClose,
+  onNotify,
+  onView,
+}) {
+  const [selecoesAmbiguos, setSelecoesAmbiguos] = useState({});
+  const [gerando, setGerando] = useState(false);
+  const plano = useMemo(
+    () => buildResumoZipPlan(itens, company, selecoesAmbiguos),
+    [itens, company, selecoesAmbiguos],
+  );
+  function escolherCandidato(itemId, docId) {
+    setSelecoesAmbiguos((prev) => ({ ...prev, [itemId]: docId }));
+  }
+  async function handleVer(doc) {
+    await viewDocument(doc, { onNotify, company, onView });
+  }
+  async function handleGerarEBaixar() {
+    if (plano.numerados.length === 0) {
+      onNotify?.(
+        "Nenhum documento localizado para incluir no ZIP.",
+        "info",
+      );
+      return;
+    }
+    setGerando(true);
+    const arquivos = [];
+    let falhas = 0;
+    for (const entrada of plano.numerados) {
+      try {
+        const { bytes, filename } = await fetchDocumentFile(entrada.doc);
+        const ext = (filename || "").split(".").pop();
+        const nomeArquivo = `${entrada.numero} - ${docTituloExibido(entrada.doc)}`;
+        arquivos.push({
+          name: ext && ext !== filename ? `${nomeArquivo}.${ext}` : nomeArquivo,
+          data: bytes,
+        });
+      } catch (e) {
+        falhas++;
+      }
+    }
+    if (arquivos.length === 0) {
+      setGerando(false);
+      onNotify?.(
+        "Não foi possível obter nenhum dos arquivos para montar o ZIP agora.",
+        "error",
+      );
+      return;
+    }
+    const blob = createZip(arquivos);
+    await downloadZip(
+      blob,
+      `Documentacao - ${h.cliente} - ${new Date().toISOString().slice(0, 10)}.zip`,
+    );
+    logDocumentAction("gerou_zip_resumo_homologacao", {
+      homologacao: h.cliente,
+      itens: arquivos.length,
+    });
+    setGerando(false);
+    onNotify?.(
+      falhas > 0
+        ? `ZIP gerado com ${arquivos.length} arquivo(s) — ${falhas} não puderam ser obtidos agora.`
+        : `ZIP gerado com ${arquivos.length} arquivo(s).`,
+      "info",
+    );
+    onClose();
+  }
+  return /*#__PURE__*/ React.createElement(
+    "div",
+    { className: "docs-modal-overlay", onClick: onClose },
+    /*#__PURE__*/ React.createElement(
+      "div",
+      {
+        className: "docs-modal homolog-zip-modal",
+        onClick: (e) => e.stopPropagation(),
+      },
+      /*#__PURE__*/ React.createElement(
+        "div",
+        { className: "docs-modal-head" },
+        /*#__PURE__*/ React.createElement(
+          "div",
+          null,
+          /*#__PURE__*/ React.createElement(
+            "div",
+            { className: "docs-modal-title" },
+            /*#__PURE__*/ React.createElement(FolderArchive, { size: 16 }),
+            " Prévia do ZIP da documentação",
+          ),
+          /*#__PURE__*/ React.createElement(
+            "div",
+            { className: "docs-modal-sub" },
+            baseLabel || "Base não selecionada",
+          ),
+        ),
+        /*#__PURE__*/ React.createElement(
+          "button",
+          {
+            className: "icon-btn-dark",
+            onClick: onClose,
+            "aria-label": "Fechar",
+          },
+          /*#__PURE__*/ React.createElement(X, { size: 18 }),
+        ),
+      ),
+      /*#__PURE__*/ React.createElement(
+        "div",
+        { className: "docs-modal-body" },
+        !company &&
+          /*#__PURE__*/ React.createElement(
+            "div",
+            { className: "login-error" },
+            /*#__PURE__*/ React.createElement(AlertTriangle, { size: 14 }),
+            "Esta base não foi localizada entre as empresas do portal — nenhum documento pode ser localizado automaticamente.",
+          ),
+        /*#__PURE__*/ React.createElement(
+          "div",
+          { className: "homolog-zip-resumo" },
+          /*#__PURE__*/ React.createElement(CheckCircle2, { size: 13 }),
+          " ",
+          plano.numerados.length,
+          " arquivo(s) prontos · ",
+          /*#__PURE__*/ React.createElement(HelpCircle, { size: 13 }),
+          " ",
+          plano.ambiguosPendentes.length,
+          " ambíguo(s) · ",
+          /*#__PURE__*/ React.createElement(XCircle, { size: 13 }),
+          " ",
+          plano.naoLocalizados.length,
+          " não localizado(s)",
+        ),
+        plano.numerados.length > 0 &&
+          /*#__PURE__*/ React.createElement(
+            "div",
+            { className: "homolog-zip-grupo" },
+            /*#__PURE__*/ React.createElement("h4", null, "Encontrados"),
+            /*#__PURE__*/ React.createElement(
+              "ul",
+              { className: "homolog-zip-lista" },
+              plano.numerados.map((entrada) =>
+                /*#__PURE__*/ React.createElement(
+                  "li",
+                  {
+                    key: `${entrada.item.id}-${entrada.doc.id}`,
+                    className: "homolog-zip-item",
+                  },
+                  /*#__PURE__*/ React.createElement(
+                    "span",
+                    { className: "homolog-zip-numero" },
+                    entrada.numero,
+                  ),
+                  /*#__PURE__*/ React.createElement(
+                    "span",
+                    null,
+                    docTituloExibido(entrada.doc),
+                  ),
+                  /*#__PURE__*/ React.createElement(
+                    "button",
+                    {
+                      type: "button",
+                      className: "mini-download-btn",
+                      onClick: () => handleVer(entrada.doc),
+                    },
+                    /*#__PURE__*/ React.createElement(Eye, { size: 12 }),
+                    " Ver",
+                  ),
+                ),
+              ),
+            ),
+          ),
+        plano.ambiguosPendentes.length > 0 &&
+          /*#__PURE__*/ React.createElement(
+            "div",
+            { className: "homolog-zip-grupo" },
+            /*#__PURE__*/ React.createElement(
+              "h4",
+              null,
+              "Ambíguos — escolha o documento certo",
+            ),
+            plano.ambiguosPendentes.map(({ item, candidatos }) =>
+              /*#__PURE__*/ React.createElement(
+                "div",
+                { key: item.id, className: "homolog-zip-ambiguo-bloco" },
+                /*#__PURE__*/ React.createElement(
+                  "p",
+                  { className: "empty-note" },
+                  '"',
+                  item.descricaoOriginal || item.tipoSugerido,
+                  '" tem mais de um documento possível — escolha qual enviar:',
+                ),
+                /*#__PURE__*/ React.createElement(
+                  "ul",
+                  { className: "homolog-zip-lista" },
+                  candidatos.map((doc) =>
+                    /*#__PURE__*/ React.createElement(
+                      "li",
+                      { key: doc.id, className: "homolog-zip-item" },
+                      /*#__PURE__*/ React.createElement("input", {
+                        type: "radio",
+                        name: `ambiguo-${item.id}`,
+                        checked: selecoesAmbiguos[item.id] === doc.id,
+                        onChange: () => escolherCandidato(item.id, doc.id),
+                      }),
+                      /*#__PURE__*/ React.createElement(
+                        "span",
+                        null,
+                        docTituloExibido(doc),
+                      ),
+                      /*#__PURE__*/ React.createElement(
+                        "button",
+                        {
+                          type: "button",
+                          className: "mini-download-btn",
+                          onClick: () => handleVer(doc),
+                        },
+                        /*#__PURE__*/ React.createElement(Eye, { size: 12 }),
+                        " Ver",
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        plano.naoLocalizados.length > 0 &&
+          /*#__PURE__*/ React.createElement(
+            "div",
+            { className: "homolog-zip-grupo" },
+            /*#__PURE__*/ React.createElement("h4", null, "Não localizados"),
+            /*#__PURE__*/ React.createElement(
+              "ul",
+              { className: "homolog-zip-lista" },
+              plano.naoLocalizados.map(({ item }) =>
+                /*#__PURE__*/ React.createElement(
+                  "li",
+                  { key: item.id, className: "homolog-zip-item" },
+                  /*#__PURE__*/ React.createElement(
+                    "span",
+                    null,
+                    item.descricaoOriginal || "(item sem descrição)",
+                  ),
+                ),
+              ),
+            ),
+          ),
+      ),
+      /*#__PURE__*/ React.createElement(
+        "div",
+        { className: "homolog-form-actions" },
+        /*#__PURE__*/ React.createElement(
+          "button",
+          {
+            type: "button",
+            className: "filters-clear-btn",
+            onClick: onClose,
+            style: { flex: "none" },
+          },
+          "Cancelar",
+        ),
+        /*#__PURE__*/ React.createElement(
+          "button",
+          {
+            type: "button",
+            className: "doc-download-btn",
+            disabled: gerando || plano.numerados.length === 0,
+            onClick: handleGerarEBaixar,
+          },
+          gerando
+            ? /*#__PURE__*/ React.createElement(Loader2, { size: 13 })
+            : /*#__PURE__*/ React.createElement(FolderArchive, { size: 13 }),
+          gerando ? " Gerando..." : " Baixar ZIP",
+        ),
+      ),
+    ),
+  );
+}
+/** HomologacaoResumoSolicitacao: nova seção da Homologação — lê o pedido de
+ *  documentação do cliente (qualquer formato: Word, PDF, imagem, Excel,
+ *  texto), gera uma checklist via IA (vocabulário real do portal, nunca
+ *  inventado), permite edição manual item a item, e abre a prévia do ZIP
+ *  antes de qualquer download. Reaproveita `bases` da própria homologação
+ *  — nunca pergunta de novo qual é a empresa/filial. */ function HomologacaoResumoSolicitacao({
+  h,
+  companies,
+  onUpdate,
+  onNotify,
+  onView,
+  pushHistorico,
+}) {
+  const [baseSelecionada, setBaseSelecionada] = useState(
+    (h.resumoSolicitacao && h.resumoSolicitacao.baseUsada) ||
+      (h.bases && h.bases[0]) ||
+      "",
+  );
+  const [processando, setProcessando] = useState(false);
+  const [erro, setErro] = useState(null);
+  const [zipAberto, setZipAberto] = useState(false);
+  const inputRef = useRef(null);
+  const resumo = h.resumoSolicitacao || null;
+  const company = resolveCompanyFromHomologacaoBase(baseSelecionada, companies);
+  async function handleArquivo(file) {
+    if (!file) return;
+    setErro(null);
+    setProcessando(true);
+    try {
+      const buf = await file.arrayBuffer();
+      const bytes = new Uint8Array(buf);
+      const extraido = await extractTextForResumoSolicitacao(
+        bytes,
+        file.type,
+        file.name,
+      );
+      if (!extraido.ok) {
+        setErro(motivoParaTexto(extraido.motivo));
+        return;
+      }
+      const gerado = await gerarChecklistViaGemini(extraido.text);
+      if (!gerado.ok) {
+        setErro(motivoParaTexto(gerado.motivo));
+        return;
+      }
+      onUpdate(h.id, {
+        resumoSolicitacao: {
+          arquivoNome: file.name,
+          geradoEm: new Date().toISOString(),
+          baseUsada: baseSelecionada,
+          itens: gerado.itens,
+        },
+        historico: pushHistorico
+          ? pushHistorico("checklist_gerada", {
+              arquivo: file.name,
+              itens: gerado.itens.length,
+            })
+          : h.historico,
+      });
+      onNotify?.(
+        `Checklist gerada a partir de "${file.name}" — ${gerado.itens.length} item(ns). Revise antes de gerar o ZIP.`,
+        "info",
+      );
+    } catch (e) {
+      setErro("Não foi possível processar este arquivo agora.");
+    } finally {
+      setProcessando(false);
+    }
+  }
+  function patchResumo(patch) {
+    onUpdate(h.id, { resumoSolicitacao: { ...resumo, ...patch } });
+  }
+  function editarItem(id, patch) {
+    patchResumo({
+      itens: resumo.itens.map((it) =>
+        it.id === id ? { ...it, ...patch, editadoManualmente: true } : it,
+      ),
+    });
+  }
+  function removerItem(id) {
+    patchResumo({ itens: resumo.itens.filter((it) => it.id !== id) });
+  }
+  function adicionarItemManual() {
+    patchResumo({
+      itens: [
+        ...resumo.itens,
+        {
+          id: `chk-manual-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+          descricaoOriginal: "",
+          tipoSugerido: null,
+          categoriaSugerida: null,
+          editadoManualmente: true,
+        },
+      ],
+    });
+  }
+  function removerChecklistInteira() {
+    onUpdate(h.id, { resumoSolicitacao: null });
+    setErro(null);
+  }
+  const seletorArquivo = /*#__PURE__*/ React.createElement("input", {
+    ref: inputRef,
+    type: "file",
+    hidden: true,
+    disabled: processando,
+    accept: ".pdf,.doc,.docx,.xls,.xlsx,.csv,.txt,.png,.jpg,.jpeg",
+    onChange: (e) => {
+      const f = e.target.files?.[0];
+      e.target.value = "";
+      if (f) handleArquivo(f);
+    },
+  });
+  return /*#__PURE__*/ React.createElement(
+    "section",
+    { className: "section-block" },
+    /*#__PURE__*/ React.createElement(
+      "h3",
+      null,
+      "Resumo de solicitação de homologação",
+    ),
+    /*#__PURE__*/ React.createElement(
+      "p",
+      { className: "lede", style: { maxWidth: "none" } },
+      "Envie o pedido de documentação do cliente (Word, PDF, imagem, Excel ou texto) e a IA gera uma checklist dos documentos exigidos — revise e edite antes de montar o ZIP.",
+    ),
+    h.bases &&
+      h.bases.length > 1 &&
+      /*#__PURE__*/ React.createElement(
+        "div",
+        { className: "homolog-field", style: { maxWidth: 340 } },
+        /*#__PURE__*/ React.createElement(
+          "label",
+          null,
+          "Base de origem dos documentos",
+        ),
+        /*#__PURE__*/ React.createElement(
+          "select",
+          {
+            value: baseSelecionada,
+            onChange: (e) => setBaseSelecionada(e.target.value),
+          },
+          h.bases.map((b) =>
+            /*#__PURE__*/ React.createElement("option", { key: b, value: b }, b),
+          ),
+        ),
+      ),
+    !resumo &&
+      /*#__PURE__*/ React.createElement(
+        React.Fragment,
+        null,
+        /*#__PURE__*/ React.createElement(
+          "div",
+          {
+            className: "homolog-dropzone",
+            onClick: () => !processando && inputRef.current?.click(),
+            role: "button",
+            tabIndex: 0,
+          },
+          processando
+            ? /*#__PURE__*/ React.createElement(Loader2, { size: 20 })
+            : /*#__PURE__*/ React.createElement(Sparkles, { size: 20 }),
+          /*#__PURE__*/ React.createElement(
+            "span",
+            null,
+            processando
+              ? "Lendo o arquivo e gerando a checklist..."
+              : "Clique para enviar o pedido de documentação do cliente",
+          ),
+          seletorArquivo,
+        ),
+        erro &&
+          /*#__PURE__*/ React.createElement(
+            "div",
+            { className: "login-error" },
+            /*#__PURE__*/ React.createElement(AlertTriangle, { size: 14 }),
+            erro,
+          ),
+      ),
+    resumo &&
+      /*#__PURE__*/ React.createElement(
+        React.Fragment,
+        null,
+        /*#__PURE__*/ React.createElement(
+          "div",
+          { className: "homolog-resumo-origem" },
+          /*#__PURE__*/ React.createElement(FileText, { size: 14 }),
+          /*#__PURE__*/ React.createElement(
+            "span",
+            null,
+            resumo.arquivoNome,
+            " · checklist gerada em ",
+            formatAuditWhen(new Date(resumo.geradoEm)),
+          ),
+          /*#__PURE__*/ React.createElement(
+            "button",
+            {
+              type: "button",
+              className: "mini-download-btn",
+              onClick: () => !processando && inputRef.current?.click(),
+              disabled: processando,
+            },
+            processando
+              ? /*#__PURE__*/ React.createElement(Loader2, { size: 12 })
+              : /*#__PURE__*/ React.createElement(Sparkles, { size: 12 }),
+            " Gerar de novo",
+          ),
+          seletorArquivo,
+          /*#__PURE__*/ React.createElement(
+            "button",
+            {
+              type: "button",
+              className: "icon-btn-dark",
+              onClick: removerChecklistInteira,
+              "aria-label": "Remover checklist",
+            },
+            /*#__PURE__*/ React.createElement(X, { size: 14 }),
+          ),
+        ),
+        erro &&
+          /*#__PURE__*/ React.createElement(
+            "div",
+            { className: "login-error" },
+            /*#__PURE__*/ React.createElement(AlertTriangle, { size: 14 }),
+            erro,
+          ),
+        !company &&
+          /*#__PURE__*/ React.createElement(
+            "p",
+            { className: "empty-note" },
+            'A base "',
+            baseSelecionada || "—",
+            '" não foi localizada entre as empresas do portal — selecione outra base para localizar os documentos automaticamente.',
+          ),
+        resumo.itens.length === 0 &&
+          /*#__PURE__*/ React.createElement(
+            "div",
+            { className: "empty-state" },
+            "Nenhum item na checklist ainda.",
+          ),
+        resumo.itens.length > 0 &&
+          /*#__PURE__*/ React.createElement(
+            "ul",
+            { className: "homolog-checklist" },
+            resumo.itens.map((item, idx) =>
+              /*#__PURE__*/ React.createElement(
+                "li",
+                { key: item.id, className: "homolog-checklist-item" },
+                /*#__PURE__*/ React.createElement(
+                  "span",
+                  { className: "homolog-checklist-numero" },
+                  idx + 1,
+                  ".",
+                ),
+                /*#__PURE__*/ React.createElement("input", {
+                  type: "text",
+                  className: "homolog-checklist-desc",
+                  value: item.descricaoOriginal,
+                  placeholder: "Descrição do item pedido pelo cliente",
+                  onChange: (e) =>
+                    editarItem(item.id, { descricaoOriginal: e.target.value }),
+                }),
+                /*#__PURE__*/ React.createElement(ChecklistTipoSelect, {
+                  value: checklistItemSelectValue(item),
+                  onChange: (v) =>
+                    editarItem(item.id, parseChecklistItemSelectValue(v)),
+                }),
+                /*#__PURE__*/ React.createElement(
+                  "button",
+                  {
+                    type: "button",
+                    className: "icon-btn-dark",
+                    onClick: () => removerItem(item.id),
+                    "aria-label": "Remover item",
+                  },
+                  /*#__PURE__*/ React.createElement(X, { size: 14 }),
+                ),
+              ),
+            ),
+          ),
+        /*#__PURE__*/ React.createElement(
+          "div",
+          { className: "homolog-checklist-actions" },
+          /*#__PURE__*/ React.createElement(
+            "button",
+            {
+              type: "button",
+              className: "doc-view-btn",
+              onClick: adicionarItemManual,
+            },
+            /*#__PURE__*/ React.createElement(Plus, { size: 13 }),
+            " Adicionar item",
+          ),
+          /*#__PURE__*/ React.createElement(
+            "button",
+            {
+              type: "button",
+              className: "doc-download-btn",
+              disabled: resumo.itens.length === 0,
+              onClick: () => setZipAberto(true),
+            },
+            /*#__PURE__*/ React.createElement(FolderArchive, { size: 13 }),
+            " Gerar ZIP da documentação",
+          ),
+        ),
+        zipAberto &&
+          /*#__PURE__*/ React.createElement(HomologacaoZipPreviewModal, {
+            h,
+            company,
+            baseLabel: baseSelecionada,
+            itens: resumo.itens,
+            onClose: () => setZipAberto(false),
+            onNotify,
+            onView,
+          }),
+      ),
+  );
+}
 /** HomologacaoDetailView: espelha o padrão visual de CompanyDetailView
  *  (back-btn + company-header). `onUpdate` grava um objeto TOTALMENTE
  *  MESCLADO (mesmo padrão de ConferenceQueueView) — nunca um patch parcial. */ function HomologacaoDetailView({
@@ -10055,6 +11010,7 @@ function HomologacaoStatusBadge({ status, atrasada }) {
   onUpdate,
   onNotify,
   onView,
+  companies,
 }) {
   const [senhaRevelada, setSenhaRevelada] = useState(false);
   const [linkEdit, setLinkEdit] = useState(h.linkHomologacao || "");
@@ -10472,6 +11428,14 @@ function HomologacaoStatusBadge({ status, atrasada }) {
           "Um ou mais anexos não foram salvos de forma permanente agora (backend indisponível no momento do envio) — continuam disponíveis para Ver/Baixar só enquanto esta página não recarrega. Reenvie o anexo para tentar salvar de verdade.",
         ),
     ),
+    /*#__PURE__*/ React.createElement(HomologacaoResumoSolicitacao, {
+      h,
+      companies,
+      onUpdate,
+      onNotify,
+      onView,
+      pushHistorico,
+    }),
     /*#__PURE__*/ React.createElement(
       "section",
       { className: "section-block" },
@@ -10528,7 +11492,7 @@ function HomologacaoStatusBadge({ status, atrasada }) {
  *  próprio, sem tocar no roteamento do GrupoprimaPortal. Mesmo padrão de
  *  persistência best-effort de ConferenceQueueView/AuditLogView: usa a
  *  capability "db" quando disponível; em memória, para a sessão atual,
- *  quando não. */ function HomologacaoView({ currentUser, onNotify, onView }) {
+ *  quando não. */ function HomologacaoView({ currentUser, onNotify, onView, companies }) {
   const [items, setItems] = useState([]);
   const [dbBacked, setDbBacked] = useState(false);
   const [selectedId, setSelectedId] = useState(null);
@@ -10665,6 +11629,7 @@ function HomologacaoStatusBadge({ status, atrasada }) {
       onUpdate: handleUpdate,
       onNotify: onNotify,
       onView: onView,
+      companies: companies,
     });
   }
   return /*#__PURE__*/ React.createElement(
@@ -12608,6 +13573,73 @@ function analyzeFolderPath(folderPath, companies) {
         /* liberar recursos é best-effort */
       }
     }
+  }
+}
+/** extractTextForResumoSolicitacao: extrai texto de um arquivo de pedido de
+ *  cliente (Word, txt, Excel, PDF ou imagem) para alimentar a geração da
+ *  checklist via IA (pedido da Iasmin, 2026-09-16 — "esses arquivos podem
+ *  vir como word, docs, txt, excel, pdf, png, etc."). Recebe os bytes já
+ *  resolvidos (nunca um File direto) — funciona tanto para um anexo recém
+ *  escolhido no picker (File real) quanto para um anexo já salvo, buscado
+ *  via `fetchHomologAnexoFile`/`fetchDocumentFile` (que devolvem
+ *  {bytes, mimeType, filename}, não um File). Reaproveita as MESMAS
+ *  bibliotecas já usadas na classificação automática de documentos
+ *  (mammoth, XLSX, pdf.js, Tesseract OCR em português) — nenhuma extração
+ *  nova foi inventada, só um novo ponto de entrada para elas. Nunca finge
+ *  sucesso: formato não suportado ou falha real de leitura devolvem
+ *  ok:false com o motivo, nunca um texto vazio disfarçado de sucesso. */
+async function extractTextForResumoSolicitacao(bytesIn, mimeTypeIn, filenameIn) {
+  const bytes = bytesIn instanceof Uint8Array ? bytesIn : new Uint8Array(bytesIn);
+  const mimeType = mimeTypeIn || "";
+  const ext = (filenameIn || "").toLowerCase().split(".").pop();
+  const isPdf = mimeType === "application/pdf" || ext === "pdf";
+  const isImage = mimeType.startsWith("image/") || ["png", "jpg", "jpeg"].includes(ext);
+  const isDocx = mimeType === OFFICE_MIME_BY_EXT.docx || ext === "docx";
+  const isXlsx =
+    mimeType === OFFICE_MIME_BY_EXT.xlsx ||
+    mimeType === OFFICE_MIME_BY_EXT.xls ||
+    ["xlsx", "xls"].includes(ext);
+  const isTxt = mimeType === "text/plain" || ext === "txt";
+  const isCsv = mimeType === "text/csv" || ext === "csv";
+  try {
+    if (isPdf) {
+      const direto = await extractPdfText(bytes, 30);
+      if (direto.ok && direto.text && direto.text.trim().length > 40) {
+        return { ok: true, text: direto.text };
+      } // PDF sem texto embutido (provável digitalização) — cai para OCR real,
+      // igual já acontece na classificação automática.
+      const viaOcr = await extractTextViaOcrFromPdf(bytes, 8);
+      if (viaOcr.ok && viaOcr.text && viaOcr.text.trim().length > 0)
+        return { ok: true, text: viaOcr.text };
+      return { ok: false, motivo: "pdf_sem_texto_reconhecivel" };
+    }
+    if (isImage) {
+      const viaOcr = await extractTextViaOcrFromImage(bytes, mimeType);
+      if (viaOcr.ok && viaOcr.text && viaOcr.text.trim().length > 0)
+        return { ok: true, text: viaOcr.text };
+      return { ok: false, motivo: viaOcr.motivo || "ocr_sem_texto_reconhecivel" };
+    }
+    if (isDocx) {
+      if (!window.mammoth) return { ok: false, motivo: "biblioteca_word_indisponivel" };
+      const result = await window.mammoth.extractRawText({
+        arrayBuffer: bytes.slice().buffer,
+      });
+      return { ok: true, text: result.value || "" };
+    }
+    if (isXlsx) {
+      if (!window.XLSX) return { ok: false, motivo: "biblioteca_planilha_indisponivel" };
+      const wb = window.XLSX.read(bytes, { type: "array" });
+      const partes = wb.SheetNames.map(
+        (nome) => `--- ${nome} ---\n${window.XLSX.utils.sheet_to_csv(wb.Sheets[nome])}`,
+      );
+      return { ok: true, text: partes.join("\n\n") };
+    }
+    if (isTxt || isCsv) {
+      return { ok: true, text: new TextDecoder("utf-8").decode(bytes) };
+    }
+    return { ok: false, motivo: "formato_nao_suportado" };
+  } catch (e) {
+    return { ok: false, motivo: "erro_ao_ler_arquivo" };
   }
 }
 async function analyzeContent(bytes, mimeType, companies) {
@@ -16471,6 +17503,26 @@ function GrupoprimaPortal() {
         .homolog-historico-item:first-child { border-top: none; }
         .homolog-historico-item svg { flex-shrink: 0; margin-top: 1px; }
         .homolog-historico-when { color: var(--carvao); font-size: 11px; margin-top: 2px; }
+        .homolog-resumo-origem { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; background: var(--branco-frio); border: 1px solid var(--cinza-frio); border-radius: 9px; padding: 8px 10px; font-size: 12px; color: var(--azul); margin-bottom: 12px; }
+        .homolog-resumo-origem > span { flex: 1; min-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .homolog-checklist { list-style: none; margin: 0 0 12px; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+        .homolog-checklist-item { display: flex; align-items: center; gap: 8px; background: var(--branco-frio); border: 1px solid var(--cinza-frio); border-radius: 9px; padding: 8px 10px; }
+        .homolog-checklist-numero { font-weight: 800; color: var(--azul); font-size: 12px; flex-shrink: 0; }
+        .homolog-checklist-desc { flex: 1; min-width: 120px; border: 1px solid var(--cinza-frio); border-radius: 7px; padding: 7px 9px; font-size: 12.5px; color: var(--azul); background: #fff; outline: none; }
+        .homolog-checklist-desc:focus { border-color: var(--azul); }
+        .homolog-checklist-select { border: 1px solid var(--cinza-frio); border-radius: 7px; padding: 7px 9px; font-size: 12px; color: var(--azul); background: #fff; outline: none; max-width: 220px; }
+        .homolog-checklist-select:focus { border-color: var(--azul); }
+        .homolog-checklist-actions { display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-top: 4px; }
+        .homolog-zip-modal { max-width: 620px; width: 100%; }
+        .homolog-zip-resumo { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 12px; color: var(--azul); font-weight: 700; background: var(--branco-frio); border-radius: 8px; padding: 8px 10px; margin-bottom: 14px; }
+        .homolog-zip-grupo { margin-bottom: 16px; }
+        .homolog-zip-grupo h4 { font-family: 'Archivo', sans-serif; font-size: 12.5px; font-weight: 800; color: var(--azul); margin: 0 0 8px; }
+        .homolog-zip-lista { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+        .homolog-zip-item { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--azul); background: var(--branco-frio); border: 1px solid var(--cinza-frio); border-radius: 7px; padding: 7px 9px; }
+        .homolog-zip-item > span:not(.homolog-zip-numero) { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .homolog-zip-numero { font-weight: 800; color: var(--azul); flex-shrink: 0; min-width: 26px; }
+        .homolog-zip-ambiguo-bloco { background: rgba(214,158,46,0.08); border: 1px solid rgba(214,158,46,0.3); border-radius: 9px; padding: 10px; margin-bottom: 10px; }
+        .homolog-zip-ambiguo-bloco:last-child { margin-bottom: 0; }
 
         /* ---- Cards de empresa (mobile) ---- */
         .desktop-only { display: block !important; }
@@ -16850,6 +17902,7 @@ function GrupoprimaPortal() {
             currentUser: currentUser,
             onNotify: notify,
             onView: setViewer,
+            companies: data.companies,
           }),
         view === "auditoria" &&
           currentUser?.perfil === "admin" &&
