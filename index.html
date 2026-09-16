@@ -4738,6 +4738,53 @@ function buildResumoSolicitacaoInstrucao() {
     "Responda APENAS com o array JSON, começando em [ e terminando em ], nada antes, nada depois.",
   ].join(" ");
 }
+/** parseJsonArrayParcial: quando a resposta da IA foi CORTADA no meio (ex.:
+ *  pedido grande de verdade, estourou o limite de tokens de saída), o JSON
+ *  não fecha certinho — em vez de descartar a checklist inteira, varre o
+ *  texto a partir do primeiro "[" e recupera cada objeto `{...}` que
+ *  terminou de ser escrito antes do corte (ignora chaves dentro de strings
+ *  entre aspas, respeita escape de aspas), descartando só o último item,
+ *  que ficou pela metade. Sempre JSON.parse de verdade em cada objeto
+ *  recuperado — nunca eval, nunca aceita texto que não é JSON válido. */ function parseJsonArrayParcial(
+  texto,
+) {
+  const inicio = texto.indexOf("[");
+  if (inicio === -1) return null;
+  let profundidade = 0;
+  let dentroString = false;
+  let escapando = false;
+  let inicioObjeto = -1;
+  const objetos = [];
+  for (let i = inicio + 1; i < texto.length; i++) {
+    const ch = texto[i];
+    if (dentroString) {
+      if (escapando) escapando = false;
+      else if (ch === "\\") escapando = true;
+      else if (ch === '"') dentroString = false;
+      continue;
+    }
+    if (ch === '"') {
+      dentroString = true;
+      continue;
+    }
+    if (ch === "{") {
+      if (profundidade === 0) inicioObjeto = i;
+      profundidade++;
+    } else if (ch === "}") {
+      profundidade--;
+      if (profundidade === 0 && inicioObjeto !== -1) {
+        objetos.push(texto.slice(inicioObjeto, i + 1));
+        inicioObjeto = -1;
+      }
+    }
+  }
+  if (objetos.length === 0) return null;
+  try {
+    return JSON.parse(`[${objetos.join(",")}]`);
+  } catch (e) {
+    return null;
+  }
+}
 /** gerarChecklistViaGemini: extrai, do texto de um pedido de cliente, a
  *  lista estruturada de documentos exigidos (pedido da Iasmin, 2026-09-16).
  *  Chama a MESMA rota já usada pelo assistente (`/api/assistente/ia`), sem
@@ -4761,6 +4808,12 @@ async function gerarChecklistViaGemini(texto) {
       body: JSON.stringify({
         contents: [{ role: "user", parts: [{ text: texto.slice(0, 60000) }] }],
         systemInstruction: buildResumoSolicitacaoInstrucao(),
+        // Pedidos reais (BID inteiro) podem gerar uma checklist longa — o
+        // limite padrão de saída (pensado pra respostas curtas de chat) já
+        // cortou a resposta no meio uma vez (finishReason=MAX_TOKENS,
+        // confirmado ao vivo). Pede um teto bem mais alto; se o backend
+        // ignorar este campo, nada quebra — só volta a valer o padrão dele. */
+        generationConfig: { maxOutputTokens: 8192 },
       }),
     });
   } catch (e) {
@@ -4776,24 +4829,21 @@ async function gerarChecklistViaGemini(texto) {
     return { ok: false, motivo: "resposta_invalida" };
   }
   const candidate = dados?.candidates?.[0];
-  // Antes de tentar interpretar como JSON: a IA pode ter recusado/bloqueado
-  // a resposta (filtro de segurança, corte por tamanho etc.) — nesse caso
-  // `parts` vem vazio e não adianta insistir no parse, é melhor avisar o
-  // motivo real em vez de um genérico "não pôde ser interpretada". */
   const finishReason = candidate?.finishReason;
   const blockReason = dados?.promptFeedback?.blockReason;
-  if (blockReason || (finishReason && finishReason !== "STOP")) {
+  // Bloqueio de verdade (recusa/filtro de segurança) nunca tem conteúdo
+  // recuperável — falha direto. MAX_TOKENS (corte por tamanho da resposta)
+  // é diferente: o que a IA já escreveu até cortar pode ter itens completos
+  // de sobra — por isso ele CONTINUA pro parse abaixo em vez de falhar
+  // aqui, e só vira erro se nem um item completo sobrar (ver mais abaixo). */
+  if (blockReason === "SAFETY" || finishReason === "SAFETY" || finishReason === "RECITATION") {
     return {
       ok: false,
-      motivo:
-        blockReason === "SAFETY" || finishReason === "SAFETY"
-          ? "bloqueado_seguranca"
-          : finishReason === "MAX_TOKENS"
-            ? "resposta_cortada"
-            : "falha_ia",
+      motivo: "bloqueado_seguranca",
       debug: `finishReason=${finishReason || "-"} blockReason=${blockReason || "-"}`,
     };
   }
+  const cortada = finishReason === "MAX_TOKENS";
   const parts = candidate?.content?.parts || [];
   const bruto = parts.map((p) => p.text || "").join("").trim();
   const semCrases = bruto
@@ -4802,6 +4852,7 @@ async function gerarChecklistViaGemini(texto) {
     .replace(/```$/, "")
     .trim();
   let lista;
+  let parcial = false;
   try {
     lista = JSON.parse(semCrases);
   } catch (e) {
@@ -4814,24 +4865,26 @@ async function gerarChecklistViaGemini(texto) {
     // conteúdo) — ou é JSON válido de verdade, ou falha do mesmo jeito. */
     const inicio = bruto.indexOf("[");
     const fim = bruto.lastIndexOf("]");
-    if (inicio === -1 || fim === -1 || fim <= inicio) {
-      // Nenhum "[...]" em lugar nenhum da resposta — guarda um pedaço do
-      // texto bruto pra aparecer na mensagem de erro (nunca escondido),
-      // pra dar pra entender o que a IA respondeu de fato sem precisar
-      // repetir o teste. */
-      return {
-        ok: false,
-        motivo: "resposta_nao_e_json",
-        debug: bruto.slice(0, 260) || "(resposta vazia)",
-      };
+    let recuperado = null;
+    if (inicio !== -1 && fim !== -1 && fim > inicio) {
+      try {
+        lista = JSON.parse(bruto.slice(inicio, fim + 1));
+      } catch (e2) {
+        recuperado = parseJsonArrayParcial(bruto);
+      }
+    } else {
+      // Sem "[...]" fechado — só faz sentido tentar salvar o que der se a
+      // resposta foi CORTADA (senão é só uma resposta que não é JSON). */
+      recuperado = parseJsonArrayParcial(bruto);
     }
-    try {
-      lista = JSON.parse(bruto.slice(inicio, fim + 1));
-    } catch (e2) {
+    if (!lista && recuperado && recuperado.length > 0) {
+      lista = recuperado;
+      parcial = true;
+    } else if (!lista) {
       return {
         ok: false,
-        motivo: "resposta_nao_e_json",
-        debug: bruto.slice(0, 260),
+        motivo: cortada ? "resposta_cortada" : "resposta_nao_e_json",
+        debug: bruto.slice(0, 260) || "(resposta vazia)",
       };
     }
   }
@@ -4863,7 +4916,10 @@ async function gerarChecklistViaGemini(texto) {
       };
     });
   if (itens.length === 0) return { ok: false, motivo: "nenhum_item_identificado" };
-  return { ok: true, itens };
+  // `parcial` avisa a tela que a resposta foi cortada (limite de tokens) e
+  // nem todo o pedido foi lido — a checklist devolvida tem só os itens que
+  // a IA chegou a terminar de escrever antes do corte, nunca inventados. */
+  return { ok: true, itens, parcial };
 }
 function parseIntent(text) {
   const t = normalize(text);
@@ -10836,7 +10892,9 @@ function parseChecklistItemSelectValue(value) {
           : h.historico,
       });
       onNotify?.(
-        `Checklist gerada a partir de "${file.name}" — ${gerado.itens.length} item(ns). Revise antes de gerar o ZIP.`,
+        gerado.parcial
+          ? `Checklist gerada a partir de "${file.name}" — ${gerado.itens.length} item(ns), mas o pedido é grande e a resposta da IA foi cortada no meio: pode faltar item. Confira com o arquivo original e complete manualmente se precisar.`
+          : `Checklist gerada a partir de "${file.name}" — ${gerado.itens.length} item(ns). Revise antes de gerar o ZIP.`,
         "info",
       );
     } catch (e) {
