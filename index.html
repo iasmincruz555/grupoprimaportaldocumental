@@ -4737,7 +4737,9 @@ function buildResumoSolicitacaoInstrucao() {
     `Categorias conhecidas: ${categoriasConhecidas.join(", ")}.`,
     'Se um item do pedido citar VÁRIOS documentos distintos numa mesma frase (ex.: "Certidões negativas: Federal, Estadual, Municipal, FGTS e Trabalhista"), separe cada um em um item próprio do array, usando o tipo específico de cada um quando ele existir na lista de tipos conhecidos.',
     "Quando não conseguir identificar com confiança real nem um tipo específico nem a categoria, deixe os dois campos (tipoSugerido e categoriaSugerida) como null — NUNCA invente um valor fora das listas acima só para preencher o campo.",
-    "Ignore trechos do pedido que não são pedidos de documento (prazos, critérios de avaliação, cronograma, premissas comerciais, regras de dúvidas etc.) — extraia SÓ a lista de documentos exigidos.",
+    "Ignore trechos do pedido que não são pedidos de documento (prazos, critérios de avaliação, cronograma/etapas, premissas comerciais, regras de dúvidas etc.) — extraia SÓ a lista de documentos exigidos.",
+    'Um cronograma/tabela de etapas pode ter uma linha que MENCIONA um documento de passagem (ex.: uma etapa "Divulgação e convite às transportadoras + NDA assinado" com prazo/responsável) — isso é a DESCRIÇÃO DE UMA ETAPA do processo, não um item da checklist de documentação exigida da transportadora; não devolva itens extraídos de linhas de cronograma/etapas, mesmo que mencionem algo "assinado" ou "enviado".',
+    "A lista real de documentos exigidos fica tipicamente sob um título claro do tipo \"documentação obrigatória\", \"documentos exigidos\", \"checklist de documentos\" ou semelhante — pode ter mais de uma seção dessas (ex.: documentos obrigatórios E documentos complementares), possivelmente organizadas por área (jurídico, operacional, financeiro, compliance etc.). Releia o texto INTEIRO do início ao fim antes de responder e devolva TODOS os documentos exigidos de TODAS essas seções, não só os da primeira ou os mais óbvios — não pare de procurar depois de achar o primeiro item.",
     "Responda APENAS com o array JSON, começando em [ e terminando em ], nada antes, nada depois.",
   ].join(" ");
 }
@@ -4814,18 +4816,16 @@ async function gerarChecklistViaGemini(texto) {
         // Pedidos reais (BID inteiro) podem gerar uma checklist longa — o
         // limite padrão de saída (pensado pra respostas curtas de chat) já
         // cortou a resposta no meio uma vez (finishReason=MAX_TOKENS,
-        // confirmado ao vivo). Pede um teto bem mais alto; se o backend
-        // ignorar este campo, nada quebra — só volta a valer o padrão dele.
-        // thinkingBudget:0 desliga o "raciocínio interno" do modelo pra essa
-        // chamada — é extração de dado, não precisa pensar em voz alta, e o
-        // raciocínio ligado é o que estava consumindo o limite de tokens
-        // antes de chegar a escrever a resposta de verdade (confirmado: a
-        // mensagem de erro trazia texto de raciocínio em inglês, não JSON).
-        // Se o backend ignorar este campo, nada quebra. */
-        generationConfig: {
-          maxOutputTokens: 8192,
-          thinkingConfig: { thinkingBudget: 0 },
-        },
+        // confirmado ao vivo, e a mensagem de erro chegou a mostrar o
+        // raciocínio interno em inglês em vez do JSON). Testei desligar o
+        // raciocínio (thinkingBudget:0) pra sobrar mais espaço pra resposta,
+        // mas isso piorou a extração (ela ficou rasa — achou só 1 item de um
+        // documento que tinha vários): o raciocínio parece ajudar o modelo a
+        // varrer o documento inteiro com mais cuidado. Por isso o raciocínio
+        // continua LIGADO (padrão do modelo) e o teto de saída sobe bem mais
+        // (dá espaço pra raciocínio + checklist longa, sem cortar nenhum dos
+        // dois) — se o backend ignorar este campo, nada quebra. */
+        generationConfig: { maxOutputTokens: 32768 },
       }),
     });
   } catch (e) {
