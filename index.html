@@ -4776,6 +4776,24 @@ async function gerarChecklistViaGemini(texto) {
     return { ok: false, motivo: "resposta_invalida" };
   }
   const candidate = dados?.candidates?.[0];
+  // Antes de tentar interpretar como JSON: a IA pode ter recusado/bloqueado
+  // a resposta (filtro de segurança, corte por tamanho etc.) — nesse caso
+  // `parts` vem vazio e não adianta insistir no parse, é melhor avisar o
+  // motivo real em vez de um genérico "não pôde ser interpretada". */
+  const finishReason = candidate?.finishReason;
+  const blockReason = dados?.promptFeedback?.blockReason;
+  if (blockReason || (finishReason && finishReason !== "STOP")) {
+    return {
+      ok: false,
+      motivo:
+        blockReason === "SAFETY" || finishReason === "SAFETY"
+          ? "bloqueado_seguranca"
+          : finishReason === "MAX_TOKENS"
+            ? "resposta_cortada"
+            : "falha_ia",
+      debug: `finishReason=${finishReason || "-"} blockReason=${blockReason || "-"}`,
+    };
+  }
   const parts = candidate?.content?.parts || [];
   const bruto = parts.map((p) => p.text || "").join("").trim();
   const semCrases = bruto
@@ -4797,12 +4815,24 @@ async function gerarChecklistViaGemini(texto) {
     const inicio = bruto.indexOf("[");
     const fim = bruto.lastIndexOf("]");
     if (inicio === -1 || fim === -1 || fim <= inicio) {
-      return { ok: false, motivo: "resposta_nao_e_json" };
+      // Nenhum "[...]" em lugar nenhum da resposta — guarda um pedaço do
+      // texto bruto pra aparecer na mensagem de erro (nunca escondido),
+      // pra dar pra entender o que a IA respondeu de fato sem precisar
+      // repetir o teste. */
+      return {
+        ok: false,
+        motivo: "resposta_nao_e_json",
+        debug: bruto.slice(0, 260) || "(resposta vazia)",
+      };
     }
     try {
       lista = JSON.parse(bruto.slice(inicio, fim + 1));
     } catch (e2) {
-      return { ok: false, motivo: "resposta_nao_e_json" };
+      return {
+        ok: false,
+        motivo: "resposta_nao_e_json",
+        debug: bruto.slice(0, 260),
+      };
     }
   }
   // Alguns modelos embrulham o array num objeto (ex.: {"itens": [...]})
@@ -4813,7 +4843,8 @@ async function gerarChecklistViaGemini(texto) {
     const primeiraLista = Object.values(lista).find((v) => Array.isArray(v));
     if (primeiraLista) lista = primeiraLista;
   }
-  if (!Array.isArray(lista)) return { ok: false, motivo: "formato_inesperado" };
+  if (!Array.isArray(lista))
+    return { ok: false, motivo: "formato_inesperado", debug: bruto.slice(0, 260) };
   const tiposValidos = new Set(DOC_TYPE_KEYWORDS.map((k) => k.label));
   const categoriasValidas = new Set(CATEGORIES.map((c) => c.label));
   const categoriaLabelToKey = Object.fromEntries(CATEGORIES.map((c) => [c.label, c.key]));
@@ -10316,6 +10347,10 @@ function HomologacaoStatusBadge({ status, atrasada }) {
   resposta_invalida: "A resposta da IA veio em um formato inesperado.",
   resposta_nao_e_json: "A resposta da IA não pôde ser interpretada.",
   formato_inesperado: "A resposta da IA não veio no formato esperado.",
+  bloqueado_seguranca:
+    "O conteúdo deste arquivo foi bloqueado pelo filtro de segurança da IA e não pôde ser processado. Tente outro arquivo, ou peça pra reformular o pedido.",
+  resposta_cortada:
+    "O arquivo é grande demais e a resposta da IA foi cortada no meio. Tente um arquivo menor, ou peça pra reformular o pedido de forma mais resumida.",
   nenhum_item_identificado:
     "Não foi possível identificar nenhum item de documentação neste arquivo.",
 };
@@ -10324,6 +10359,32 @@ function motivoParaTexto(motivo) {
     EXTRACAO_MOTIVO_LABEL[motivo] ||
     "Não foi possível gerar a checklist a partir deste arquivo agora."
   );
+}
+/** checklistParaTexto: exporta a checklist (como está NA TELA, já com as
+ *  edições manuais) em texto simples — pedido dela pra poder baixar a
+ *  checklist em si, não só o ZIP final dos documentos encontrados. */ function checklistParaTexto(
+  h,
+  resumo,
+) {
+  const categoriaLabelPorKey = Object.fromEntries(
+    CATEGORIES.map((c) => [c.key, c.label]),
+  );
+  const linhas = [
+    `Checklist de documentação — ${h.cliente}`,
+    `Base: ${resumo.baseUsada || "-"}`,
+    `Arquivo de origem: ${resumo.arquivoNome}`,
+    `Gerada em: ${formatAuditWhen(new Date(resumo.geradoEm))}`,
+    "",
+    ...resumo.itens.map((item, i) => {
+      const alvo = item.tipoSugerido
+        ? `tipo: ${item.tipoSugerido}`
+        : item.categoriaSugerida
+          ? `categoria: ${categoriaLabelPorKey[item.categoriaSugerida] || item.categoriaSugerida}`
+          : "não identificado";
+      return `${i + 1}. ${item.descricaoOriginal || "(sem descrição)"} [${alvo}]`;
+    }),
+  ];
+  return linhas.join("\n");
 }
 /** checklistItemSelectValue / parseChecklistItemSelectValue: codificam a
  *  escolha de um item da checklist (tipo específico OU categoria inteira,
@@ -10750,7 +10811,14 @@ function parseChecklistItemSelectValue(value) {
       }
       const gerado = await gerarChecklistViaGemini(extraido.text);
       if (!gerado.ok) {
-        setErro(motivoParaTexto(gerado.motivo));
+        // O trecho de depuração (quando existe) é mostrado JUNTO da
+        // mensagem — nunca escondido — pra dar pra entender o que a IA
+        // respondeu de fato sem precisar reproduzir o problema de novo.
+        setErro(
+          gerado.debug
+            ? `${motivoParaTexto(gerado.motivo)} (resposta da IA: "${gerado.debug}")`
+            : motivoParaTexto(gerado.motivo),
+        );
         return;
       }
       onUpdate(h.id, {
@@ -10807,6 +10875,20 @@ function parseChecklistItemSelectValue(value) {
   function removerChecklistInteira() {
     onUpdate(h.id, { resumoSolicitacao: null });
     setErro(null);
+  }
+  async function handleBaixarChecklist() {
+    const texto = checklistParaTexto(h, resumo);
+    const blob = new Blob([texto], { type: "text/plain;charset=utf-8" });
+    try {
+      await entregaArquivo(blob, `Checklist - ${safeFileSlug(h.cliente)}.txt`);
+    } catch (e) {
+      onNotify?.(
+        e instanceof DocumentFileError
+          ? e.message
+          : "Não foi possível baixar a checklist.",
+        "error",
+      );
+    }
   }
   const seletorArquivo = /*#__PURE__*/ React.createElement("input", {
     ref: inputRef,
@@ -10991,14 +11073,29 @@ function parseChecklistItemSelectValue(value) {
           "div",
           { className: "homolog-checklist-actions" },
           /*#__PURE__*/ React.createElement(
-            "button",
-            {
-              type: "button",
-              className: "doc-view-btn",
-              onClick: adicionarItemManual,
-            },
-            /*#__PURE__*/ React.createElement(Plus, { size: 13 }),
-            " Adicionar item",
+            "div",
+            { style: { display: "flex", gap: 10, flexWrap: "wrap" } },
+            /*#__PURE__*/ React.createElement(
+              "button",
+              {
+                type: "button",
+                className: "doc-view-btn",
+                onClick: adicionarItemManual,
+              },
+              /*#__PURE__*/ React.createElement(Plus, { size: 13 }),
+              " Adicionar item",
+            ),
+            /*#__PURE__*/ React.createElement(
+              "button",
+              {
+                type: "button",
+                className: "doc-view-btn",
+                disabled: resumo.itens.length === 0,
+                onClick: handleBaixarChecklist,
+              },
+              /*#__PURE__*/ React.createElement(Download, { size: 13 }),
+              " Baixar checklist",
+            ),
           ),
           /*#__PURE__*/ React.createElement(
             "button",
