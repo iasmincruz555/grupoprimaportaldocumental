@@ -4694,7 +4694,10 @@ async function tryGeminiAnswer(history, text, companies, totals, actions) {
       }
       const dados = await resp.json();
       const candidate = dados?.candidates?.[0];
-      const parts = candidate?.content?.parts || [];
+      // Em modelos com "raciocínio" ligado, a API pode devolver partes de
+      // pensamento interno (`thought: true`) junto da resposta real — nunca
+      // devem contar como texto de resposta nem como chamada de função. */
+      const parts = (candidate?.content?.parts || []).filter((p) => !p.thought);
       const chamadas = parts.filter((p) => p.functionCall).map((p) => p.functionCall);
       if (chamadas.length === 0) {
         const texto = parts.map((p) => p.text || "").join("").trim();
@@ -4812,8 +4815,17 @@ async function gerarChecklistViaGemini(texto) {
         // limite padrão de saída (pensado pra respostas curtas de chat) já
         // cortou a resposta no meio uma vez (finishReason=MAX_TOKENS,
         // confirmado ao vivo). Pede um teto bem mais alto; se o backend
-        // ignorar este campo, nada quebra — só volta a valer o padrão dele. */
-        generationConfig: { maxOutputTokens: 8192 },
+        // ignorar este campo, nada quebra — só volta a valer o padrão dele.
+        // thinkingBudget:0 desliga o "raciocínio interno" do modelo pra essa
+        // chamada — é extração de dado, não precisa pensar em voz alta, e o
+        // raciocínio ligado é o que estava consumindo o limite de tokens
+        // antes de chegar a escrever a resposta de verdade (confirmado: a
+        // mensagem de erro trazia texto de raciocínio em inglês, não JSON).
+        // Se o backend ignorar este campo, nada quebra. */
+        generationConfig: {
+          maxOutputTokens: 8192,
+          thinkingConfig: { thinkingBudget: 0 },
+        },
       }),
     });
   } catch (e) {
@@ -4844,7 +4856,13 @@ async function gerarChecklistViaGemini(texto) {
     };
   }
   const cortada = finishReason === "MAX_TOKENS";
-  const parts = candidate?.content?.parts || [];
+  // Em modelos com "raciocínio" ligado, a API pode devolver partes de
+  // pensamento interno (`thought: true`) ANTES da resposta de verdade —
+  // são elas que apareciam na mensagem de erro (texto em inglês tipo
+  // "Qualidade e Compliance" fits SASSMAQ..., analisando o pedido por
+  // dentro) — nunca são JSON e nunca devem entrar no texto considerado
+  // resposta. Descarta ANTES de tentar interpretar como JSON. */
+  const parts = (candidate?.content?.parts || []).filter((p) => !p.thought);
   const bruto = parts.map((p) => p.text || "").join("").trim();
   const semCrases = bruto
     .replace(/^```json/i, "")
