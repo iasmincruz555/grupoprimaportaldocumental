@@ -1052,13 +1052,15 @@ const companiesRaw = [
     documentos: [],
   },
   {
-    id: "0006",
-    tipo: "Filial", // ID/CNPJ corrigidos (2026-09-10, a pedido explícito da usuária): esta
-    // filial de Cabedelo/PB estava cadastrada como "0012" / .../0012-13;
-    // a lista oficial de CNPJs da empresa identifica a mesma unidade como
-    // "Filial 0006 — PB", CNPJ 30.668.797/0006-75. Demais dados (endereço,
+    id: "0012",
+    tipo: "Filial", // ID/CNPJ corrigidos de volta (2026-09-17, a pedido explícito da
+    // usuária, após conferência cruzada com a planilha de controle de
+    // documentação): a correção anterior (2026-09-10), que trocou esta
+    // filial de Cabedelo/PB de "0012"/.../0012-13 para "0006"/.../0006-75,
+    // estava errada — a Iasmin confirmou que o CNPJ real desta filial é
+    // .../0012-13 ("considere apenas ele"). Demais dados (endereço,
     // e-mail, telefone, abertura) preservados como já estavam cadastrados.
-    cnpj: "30.668.797/0006-75",
+    cnpj: "30.668.797/0012-13",
     razaoSocial: "GPRIMA LOGISTICA LTDA",
     nomeFantasia: "GRUPOPRIMA LOGISTICA",
     municipio: "Cabedelo",
@@ -3063,18 +3065,43 @@ async function createDocumentPackageMultiBase(entradasPorBase, opts = {}) {
     },
     {
       key: "licencas_autorizacoes",
+      // "alvara sanitario" adicionado em 2026-09-17 (pedido explícito da
+      // Iasmin, a partir da planilha de controle real de documentação):
+      // é o mesmo documento que "Licença Sanitária", só um sinônimo comum
+      // usado por clientes/consultores — nunca deve cair como "não
+      // identificado" só por não repetir a palavra exata "licença".
       label: "Licença Sanitária",
-      match: /licen[c]a sanitaria|vigilancia sanitaria/,
+      match: /licen[c]a sanitaria|vigilancia sanitaria|alvara sanitario/,
     },
     {
       key: "licencas_autorizacoes",
+      // "inscricao municipal" removido daqui em 2026-09-17: virou um tipo
+      // próprio ("Inscrição Municipal", abaixo) — deixava de bater com ele
+      // porque esta entrada vem antes no array e "ganhava" o match.
       label: "Alvará de Localização e Funcionamento",
-      match: /alvar[a]|inscri[c]ao municipal|localiza[c]ao e funcionamento/,
+      match: /alvar[a]|localiza[c]ao e funcionamento/,
     },
     {
       key: "licencas_autorizacoes",
+      // "\bclf\b" adicionado em 2026-09-17: sigla real usada nos arquivos
+      // da própria Iasmin para este documento ("Certificado de Licença de
+      // Funcionamento — CLF", Polícia Federal/SIPROQUIM).
       label: "Licença de Funcionamento",
-      match: /licen[c]a de funcionamento/,
+      match: /licen[c]a de funcionamento|\bclf\b/,
+    }, // Inscrições — tipos específicos (2026-09-17, a partir da planilha real
+    // de documentação: até então só existia reconhecimento por CATEGORIA
+    // "inscricoes", sem distinguir Estadual de Municipal — um item de
+    // checklist pedindo só "inscrição estadual" batia com o grupo inteiro
+    // da categoria, incluindo a municipal junto).
+    {
+      key: "inscricoes",
+      label: "Inscrição Estadual",
+      match: /inscri[c]ao estadual|cadastro de contribuinte/,
+    },
+    {
+      key: "inscricoes",
+      label: "Inscrição Municipal",
+      match: /inscri[c]ao municipal|ficha cadastral do mobiliario/,
     }, // Contratos (com clientes/fornecedores) — distinto de "Contratos Sociais"
     // (categoria societária); exige termos que indicam instrumento comercial.
     {
@@ -3159,6 +3186,19 @@ async function createDocumentPackageMultiBase(entradasPorBase, opts = {}) {
       key: "contabilidade",
       label: "Demonstração Contábil",
       match: /demonstra[c]a[o0]es? contabe/,
+    },
+    {
+      key: "contabilidade",
+      // Adicionado em 2026-09-17 (planilha real de documentação): "balan[c]o"
+      // sozinho não cobre "balancete" (falta o "o" logo após o "c") — sem
+      // isso, um Balancete caía sem tipo específico, só na categoria.
+      label: "Balancete",
+      match: /balancete/,
+    },
+    {
+      key: "contabilidade",
+      label: "Declaração de Faturamento",
+      match: /declara[c]ao de faturamento/,
     }, // Planos, Procedimentos e Manuais — tipicamente corporativos, mas a
     // abrangência nunca é presumida daqui (regra explícita item 23).
     {
@@ -9226,10 +9266,10 @@ function ViewerModal({ viewer, onClose }) {
    resto do portal), mais "Nextflow" como opção adicional de seleção. */ const HOMOLOGACAO_BASES =
   [
     "Mato Grosso do Sul (Matriz 0001)",
-    "Minas Gerais (Filial 0002)",
+    "Minas Gerais (Filial 0011)",
     "Pernambuco (Filial 0004)",
     "Paraná (Filial 0005)",
-    "Paraíba (Filial 0006)",
+    "Paraíba (Filial 0012)",
     "São Paulo (Filial 0007)",
     "Espírito Santo (Filial 0010)",
     "Nextflow",
