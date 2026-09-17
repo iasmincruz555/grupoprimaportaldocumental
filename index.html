@@ -3413,14 +3413,26 @@ async function createDocumentPackageMultiBase(entradasPorBase, opts = {}) {
   return found ? found.nome : null;
 }
 /* COMPANY_HISTORICAL_NAMES — evolução histórica REAL da razão social do
- * grupo (Cortez & Andrade → Rodoprima → Gprima), informada explicitamente
- * pela Iasmin. Usada só como CONTEXTO para o cruzamento de evidências —
- * documentos antigos emitidos com um nome anterior não são de "outra
- * empresa", são a mesma linha societária. NUNCA usada para alterar o nome
- * original impresso/exibido de um documento (isso é proibido pela regra
- * dela) — só para ajudar a reconhecer que o documento pertence ao
- * Grupoprima quando não há CNPJ ou menção de filial suficiente. */ const COMPANY_HISTORICAL_NAMES =
-  ["cortez & andrade", "cortez e andrade", "rodoprima", "gprima", "grupoprima"];
+ * grupo (Cortez & Andrade → Global Logística → Rodoprima → Gprima, razão
+ * social atual), informada explicitamente pela Iasmin. Usada só como
+ * CONTEXTO INTERNO para o cruzamento de evidências — documentos antigos
+ * emitidos com um nome anterior não são de "outra empresa", são a mesma
+ * linha societária. NUNCA usada para alterar o nome original
+ * impresso/exibido de um documento (isso é proibido pela regra dela) — só
+ * para ajudar a reconhecer que o documento pertence ao Grupoprima quando
+ * não há CNPJ ou menção de filial suficiente. IMPORTANTE (pedido explícito
+ * da Iasmin, 2026-09-17): esse histórico de mudança de razão social é só
+ * para uso interno da lógica — NUNCA deve ser mencionado ou exibido em
+ * nenhum campo/tela do portal (nem o nome antigo específico, nem a cadeia
+ * de mudanças). Qualquer texto voltado ao usuário deve ficar genérico. */ const COMPANY_HISTORICAL_NAMES =
+  [
+    "cortez & andrade",
+    "cortez e andrade",
+    "global log",
+    "rodoprima",
+    "gprima",
+    "grupoprima",
+  ];
 function matchHistoricalCompanyName(text) {
   const norm = normalize(text).replace(/&/g, "e");
   for (const nome of COMPANY_HISTORICAL_NAMES) {
@@ -13674,11 +13686,13 @@ async function analyzeContent(bytes, mimeType, companies) {
     evidenciaUsada.push(
       `Empresa/filial identificada pela estrutura de pastas (${folderEv.caminho.join(" → ") || "raiz"}) — sinal mais fraco, usado só na ausência de CNPJ ou menção de filial no arquivo`,
     );
-  } // Histórico de razão social (Cortez & Andrade → Rodoprima → Gprima): não
-  // resolve por si só QUAL filial/matriz é (isso continua exigindo CNPJ ou
-  // menção de filial), mas evita tratar um documento antigo como "de
-  // terceiros"/não relacionado só porque o nome impresso não é o atual, e
-  // registra a evidência para quem for revisar.
+  } // Histórico de razão social: não resolve por si só QUAL filial/matriz é
+  // (isso continua exigindo CNPJ ou menção de filial), mas evita tratar um
+  // documento antigo como "de terceiros"/não relacionado só porque o nome
+  // impresso não é o atual. Uso estritamente interno (pedido explícito da
+  // Iasmin, 2026-09-17) — o texto de evidência registrado abaixo nunca
+  // nomeia o nome histórico específico nem a cadeia de mudanças, só indica
+  // de forma genérica que o vínculo foi reconhecido.
   const historicoDetectado =
     (contentLegivel && contentEv.historicoDetectado) ||
     filenameEv.historicoDetectado ||
@@ -13686,11 +13700,11 @@ async function analyzeContent(bytes, mimeType, companies) {
   if (historicoDetectado) {
     if (!empresa) {
       evidenciaUsada.push(
-        `Razão social histórica do Grupoprima identificada ("${historicoDetectado}") — mesma linha societária (Cortez & Andrade → Rodoprima → Gprima), mas sem CNPJ/filial explícita para confirmar a empresa específica`,
+        "Razão social anterior do Grupoprima reconhecida no documento — mesma linha societária, mas sem CNPJ/filial explícita para confirmar a empresa específica",
       );
     } else {
       evidenciaUsada.push(
-        `Nome "${historicoDetectado}" reconhecido como razão social histórica do Grupoprima (Cortez & Andrade → Rodoprima → Gprima) — não é uma empresa diferente`,
+        "Razão social anterior do Grupoprima reconhecida no documento — não é uma empresa diferente",
       );
     }
   }
@@ -13984,7 +13998,7 @@ async function analyzeContent(bytes, mimeType, companies) {
       motivo:
         `A categoria do documento foi identificada com segurança (${CATEGORIES.find((c) => c.key === categoria)?.label || categoria}), mas não foi possível identificar a base responsável, após analisar o nome do arquivo, a pasta e o conteúdo.` +
         (historicoDetectado
-          ? ` O documento menciona "${historicoDetectado}" — reconhecida como razão social histórica do Grupoprima (Cortez & Andrade → Rodoprima → Gprima) — mas isso por si só não indica qual estabelecimento específico, é necessário CNPJ, menção de filial, ou uma menção explícita de abrangência corporativa.`
+          ? " O documento menciona uma razão social anterior do Grupoprima, mas isso por si só não indica qual estabelecimento específico, é necessário CNPJ, menção de filial, ou uma menção explícita de abrangência corporativa."
           : ""),
       categoriaSugerida: categoria,
       empresaSugerida: null,
@@ -15638,23 +15652,6 @@ function SyncView({ companies, onNotify }) {
           : "não encontrado",
       ),
     ),
-    decisao?.historicoDetectado &&
-      /*#__PURE__*/ React.createElement(
-        "div",
-        { className: "classify-info-row" },
-        /*#__PURE__*/ React.createElement(
-          "span",
-          null,
-          "Histórico reconhecido",
-        ),
-        /*#__PURE__*/ React.createElement(
-          "span",
-          null,
-          '"',
-          decisao.historicoDetectado,
-          '" — razão social histórica do Grupoprima (Cortez & Andrade → Rodoprima → Gprima)',
-        ),
-      ),
     /*#__PURE__*/ React.createElement(
       "div",
       {
