@@ -2532,6 +2532,15 @@ async function editarDocumentoConfirmado(doc, changes, { onNotify } = {}) {
     categoria === "seguros"
       ? (changes.subcategoria ?? doc.subcategoria ?? "geral")
       : null;
+  // tituloParaVersao: o título FINAL (já considerando a edição manual), usado
+  // pra tentar re-extrair a versão (ex.: "16ª Alteração Contratual" digitado
+  // pelo Administrador) — sem isso, corrigir o título de um Contrato Social
+  // mal classificado (2026-09-17: "contratos sociais fora de ordem, sem
+  // título, sem análise") não mudava a versão usada em sortDocumentsByVersion
+  // nem o badge "ATUAL", porque versaoSugerida ficava sempre presa ao valor
+  // antigo (doc.versao), mesmo com o título corrigido manualmente.
+  const tituloParaVersao =
+    changes.titulo !== undefined ? changes.titulo : doc.titulo;
   if (!categoria || !abrangencia || (abrangencia === "estabelecimento_especifico" && !companyId)) {
     onNotify?.(
       "É preciso indicar categoria E abrangência (com a Base correspondente, quando aplicável) antes de salvar.",
@@ -2549,7 +2558,13 @@ async function editarDocumentoConfirmado(doc, changes, { onNotify } = {}) {
     categoria,
     subcategoria,
     tipoSugerido: changes.tipo !== undefined ? changes.tipo : doc.tipo,
-    versaoSugerida: doc.versao,
+    // Tenta re-extrair a versão do título final (corrige o caso comum de
+    // edição manual: Administrador escreve "16ª Alteração Contratual" pra
+    // corrigir um documento que a sincronização automática não reconheceu);
+    // só cai pro valor antigo (doc.versao) quando o título editado não tem
+    // um padrão de versão reconhecível (nunca apaga uma versão já correta).
+    versaoSugerida:
+      extractVersaoLabel(categoria, tituloParaVersao || "") || doc.versao,
     companyId,
     abrangencia,
     estabelecimentosRelacionados,
@@ -2562,7 +2577,7 @@ async function editarDocumentoConfirmado(doc, changes, { onNotify } = {}) {
     orgao: changes.orgao !== undefined ? changes.orgao : doc.orgao,
     emissao: changes.emissao !== undefined ? changes.emissao : doc.emissao,
     validade: changes.validade !== undefined ? changes.validade : doc.validade,
-    titulo: changes.titulo !== undefined ? changes.titulo : doc.titulo,
+    titulo: tituloParaVersao,
     descricao: changes.descricao !== undefined ? changes.descricao : doc.descricao,
     driveModifiedTime: doc.driveModifiedTime,
   });
@@ -3070,7 +3085,16 @@ async function createDocumentPackageMultiBase(entradasPorBase, opts = {}) {
     {
       key: "societaria",
       label: "Alteração Contratual",
-      match: /altera[c]ao contratual|\d+\s*[oaºª]?\s*altera[c]ao/,
+      // Correção (pedido da Iasmin, 2026-09-17 — "contratos sociais sem
+      // título"): a Grupoprima também nomeia alterações reais como "ACS"
+      // (ex.: "23- ACS GLOBAL LOGISTICA"), às vezes sem a palavra
+      // "alteração" por extenso — sem isso, essas alterações caíam como
+      // "Tipo específico não identificado" (mesma causa raiz do
+      // extractVersaoLabel, corrigida junto). Mesmo alcance de separadores
+      // (espaço, "_", "-", ".", "°"/"ª"/"º"/"o"/"a") entre o número e a
+      // palavra-chave.
+      match:
+        /altera[c]ao contratual|\d+\s*[oaºª°]?[\s_.-]*(altera[c]ao|acs)/,
     },
     { key: "societaria", label: "Contrato Social", match: /contrato social/ },
     { key: "societaria", label: "Estatuto Social", match: /estatuto/ },
@@ -3847,13 +3871,23 @@ function DocTituloEditable({ doc, onNotify, className, isAdmin }) {
  *  ordem da alteração contratual quando ele aparece explicitamente no nome
  *  ou conteúdo (ex.: "15ª alteração" → "15ª Alteração"). Nunca inventa um
  *  número quando ele não está escrito; nesse caso retorna null e o campo
- *  fica como "não identificado" em vez de um valor fabricado. */ function extractVersaoLabel(
+ *  fica como "não identificado" em vez de um valor fabricado.
+ *  Correção (pedido da Iasmin, 2026-09-17 — "contratos sociais fora de
+ *  ordem"): a Grupoprima também nomeia alterações reais com "ACS"
+ *  (ex.: "23- ACS GLOBAL LOGISTICA", "22ª ACS ...", "20ª ACS_RODOPRIMA"),
+ *  às vezes sem a palavra "alteração" por extenso, às vezes com "°" (grau)
+ *  em vez de "ª", às vezes com "_" ou "-" no lugar de espaço. A versão
+ *  antiga só reconhecia "Nª alteração" com espaço — por isso justamente as
+ *  alterações mais recentes (22ª/23ª, nomeadas "ACS") não eram reconhecidas
+ *  e uma alteração mais antiga (mas com o texto certinho) acabava marcada
+ *  como ATUAL. Agora aceita "alteração" OU "acs" como indicador, com
+ *  qualquer separador comum entre o número e a palavra. */ function extractVersaoLabel(
   categoria,
   text,
 ) {
   if (categoria !== "contratos_sociais") return null;
   const norm = normalize(text);
-  const m = /(\d+)\s*[oaºª]?\s*altera[c]ao/.exec(norm);
+  const m = /(\d+)\s*[oaºª°]?[\s_.-]*(altera[c]ao|acs)/.exec(norm);
   if (m) return `${m[1]}ª Alteração`;
   if (/consolida[c]ao/.test(norm)) return "Consolidação";
   if (/distrato/.test(norm)) return "Distrato";
@@ -4200,16 +4234,28 @@ function matchChecklistItemToCompany(item, company) {
       // lote" (forma como a própria Iasmin se referiu ao fluxo), já que o
       // botão real da tela se chama "Envio de documentações em lote" mas
       // as pessoas tendem a chamar de "homologação em lote" no dia a dia.
+      // Correção (2026-09-17, mesmo dia — testado ao vivo no portal): a
+      // frase real usada ("como eu faço um envio em lote?") não menciona
+      // nem "documento" nem "homologação" — só "envio em lote" mesmo, por
+      // isso caía no fallback genérico. Adicionado "envio em lote"/"enviar
+      // em lote" soltos como alternativa própria.
       match:
-        /envi\w+ document\w* em lote|envio de document\w* em lote|lote de document|document\w* em lote|homologa[cç][aã]o em lote|envi\w+ (uma )?homologa[cç][aã]o em lote/,
+        /envi\w+ document\w* em lote|envio de document\w* em lote|lote de document|document\w* em lote|homologa[cç][aã]o em lote|envi\w+ (uma )?homologa[cç][aã]o em lote|\benvi\w* em lote\b/,
       answer:
         'Para enviar documentações em lote: 1. Vá em Homologação (menu lateral). 2. Clique no botão "Envio de documentações em lote", logo abaixo dos indicadores no topo da tela. 3. Em "Documentações necessárias", cole ou digite a lista de documentos pedidos (um por linha) — ou envie um arquivo com o pedido do cliente (PDF, Word, Excel, TXT, CSV ou imagem). 4. Em "Filiais/Bases", selecione uma ou mais bases já cadastradas. 5. Preencha o "Nome do cliente" (vai nomear a pasta final do pacote). 6. Confira os três grupos que aparecem: Documentações encontradas, Documentações não encontradas e Necessita de conferência. 7. Clique em "Baixar ZIP" para gerar o pacote com todas as bases selecionadas, organizado por base.',
     },
     {
       // Adicionado em 2026-09-17 (pedido explícito da Iasmin): instrução em
       // passo a passo pra criar/subir uma nova homologação.
+      // Correção (2026-09-17, mesmo dia — testado ao vivo no portal): "subir
+      // (uma )?homolog" só reconhecia o infinitivo "subir", nunca formas
+      // conjugadas como "subo" ("como eu SUBO uma homologação?", a frase
+      // real que a Iasmin usou) — por isso caía no fallback genérico em vez
+      // de dar a resposta em passo a passo. Trocado por radicais (\w*) em
+      // "subir"/"abrir" pra cobrir qualquer conjugação comum (subo, sobe,
+      // suba, abro, abre...), igual já era feito em "cri\w+"/"cadastr\w+".
       match:
-        /subir (uma )?homolog|cri\w+ (uma )?homolog|nova homolog|abrir (uma )?homolog|cadastr\w+ (uma )?homolog/,
+        /sub\w* (uma )?homolog|cri\w+ (uma )?homolog|nova homolog|abr\w* (uma )?homolog|cadastr\w+ (uma )?homolog/,
       answer:
         'Para criar uma nova homologação: 1. Vá em Homologação (menu lateral). 2. Clique no botão "Nova homologação", no topo da tela. 3. Informe o cliente e o prazo de retorno (campos obrigatórios). 4. Selecione a(s) base(s)/filial(is) envolvidas. 5. Escolha o formato de envio (e-mail ou plataforma do cliente — se for plataforma, informe o login de acesso). 6. Se quiser, adicione observações e anexe arquivos (arraste e solte ou selecione). 7. Clique em salvar para criar a homologação — ela entra automaticamente com status "Nova", e você pode acompanhar e atualizar o status depois dentro do próprio registro.',
     },
