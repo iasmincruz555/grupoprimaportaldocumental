@@ -3436,6 +3436,52 @@ async function createDocumentPackageMultiBase(entradasPorBase, opts = {}) {
   );
   return found ? found.nome : null;
 }
+/** AFE_ATIVIDADES_CONHECIDAS: atividades/categorias de produto já vistas nas
+ *  AFEs reais da Grupoprima (ex.: "AFE de Saneantes" vs "AFE de Cosméticos,
+ *  Correlatos") — pedido explícito da Iasmin, 2026-09-18: "se eu pedir a AFE
+ *  de saneantes, ele vai saber diferenciar da de cosméticos?". Ao contrário
+ *  do Contrato Social (uma família, versões sequenciais), cada AFE é sua
+ *  própria família (ver docFamilyFor) e pode haver mais de uma válida ao
+ *  mesmo tempo — então o pedido no chat precisa dizer qual atividade quer,
+ *  do mesmo jeito que SEGUROS_CLIENTES_ESPECIFICOS_CONHECIDOS já faz pra
+ *  seguro de cliente específico. Lista pensada pra crescer: é só adicionar
+ *  uma entrada aqui quando uma nova AFE de atividade diferente for
+ *  cadastrada. */ const AFE_ATIVIDADES_CONHECIDAS =
+  [
+    { nome: "Cosméticos, Correlatos", match: /cosmetic/ },
+    { nome: "Saneantes", match: /saneante/ },
+  ];
+/** detectAfeAtividade: reconhece, num pedido do CHAT, se a pessoa está
+ *  pedindo a AFE de uma atividade/categoria de produto conhecida (ex.: "AFE
+ *  de saneantes") — devolve o nome dessa atividade (pra restringir a busca
+ *  só à AFE correspondente) ou null quando nenhuma atividade conhecida foi
+ *  citada (pedido genérico de "AFE", que — como nenhuma AFE é "arquivada"
+ *  em relação à outra — deve trazer TODAS as AFEs válidas, não escolher uma
+ *  só). Mesma lista de AFE_ATIVIDADES_CONHECIDAS — nunca inventa uma
+ *  atividade que não está cadastrada ali. */ function detectAfeAtividade(
+  text,
+) {
+  const norm = normalize(text);
+  const found = AFE_ATIVIDADES_CONHECIDAS.find((a) => a.match.test(norm));
+  return found ? found.nome : null;
+}
+/** afeDocMatchesAtividade: testa se UM DOCUMENTO (não o texto do pedido) é a
+ *  AFE daquela atividade — usa o mesmo regex de AFE_ATIVIDADES_CONHECIDAS,
+ *  mas contra o título/nome do arquivo/descrição do próprio documento
+ *  (docFamily da AFE não é legível — é baseada no id/driveFileId — então não
+ *  dá pra comparar por família como se faz com seguroCliente). */ function afeDocMatchesAtividade(
+  d,
+  nomeAtividade,
+) {
+  const atividade = AFE_ATIVIDADES_CONHECIDAS.find(
+    (a) => a.nome === nomeAtividade,
+  );
+  if (!atividade) return false;
+  const texto = normalize(
+    [d.titulo, d.arquivo?.nomeOriginal, d.descricao].filter(Boolean).join(" "),
+  );
+  return atividade.match.test(texto);
+}
 /* COMPANY_HISTORICAL_NAMES — evolução histórica REAL da razão social do
  * grupo (Cortez & Andrade → Global Logística → Rodoprima → Gprima, razão
  * social atual), informada explicitamente pela Iasmin. Usada só como
@@ -3959,19 +4005,46 @@ function detectRequestedCategories(text) {
  *  nunca inclui seguros direcionados a um cliente específico (ex.: "Endosso
  *  Nestlé") — só os gerais da empresa. Só quando `seguroCliente` é
  *  informado (ex.: "seguro da Nestlé") a busca INVERTE: traz só os
- *  documentos daquele cliente, nunca os gerais junto. */ function searchDocuments({
+ *  documentos daquele cliente, nunca os gerais junto.
+ *  `afeAtividade` (opcional, pedido explícito da Iasmin, 2026-09-18): mesma
+ *  ideia aplicada à AFE — "AFE" sozinho no pedido pega TODAS as AFEs válidas
+ *  (nenhuma é "a mais atual", todas continuam valendo); quando uma atividade
+ *  conhecida é citada (ex.: "AFE de saneantes"), filtra só a(s) AFE(s)
+ *  daquela atividade. */ function searchDocuments({
   company,
   wantedTypeKeys = [],
   wantedCategoryKeys = [],
   seguroCliente = null,
+  afeAtividade = null,
 }) {
   const found = [];
   const notFoundLabels = [];
   const seenIds = new Set();
   wantedTypeKeys.forEach((t) => {
-    const matches = company.documentos.filter((d) => d.tipo === t.label);
+    let matches = company.documentos.filter((d) => d.tipo === t.label);
+    if (t.label === "AFE" && afeAtividade) {
+      matches = matches.filter((d) => afeDocMatchesAtividade(d, afeAtividade));
+    }
     if (matches.length === 0) {
-      notFoundLabels.push(t.label);
+      notFoundLabels.push(
+        t.label === "AFE" && afeAtividade ? `AFE ${afeAtividade}` : t.label,
+      );
+      return;
+    }
+    if (t.label === "AFE") {
+      // AFE não tem "versão mais atual que substitui as outras" (pedido
+      // explícito da Iasmin, 2026-09-18) — ao contrário dos demais tipos
+      // abaixo, aqui NUNCA se pega só sortDocumentsByVersion(matches)[0]:
+      // traz todas as AFEs que bateram (uma só, se a atividade foi
+      // reconhecida e é única; todas as cadastradas, se o pedido foi
+      // genérico) — nunca "escolhe a melhor" como se uma arquivasse a
+      // outra.
+      matches.forEach((d) => {
+        if (!seenIds.has(d.id)) {
+          found.push(d);
+          seenIds.add(d.id);
+        }
+      });
       return;
     } // company.documentos já vem ordenado do mais recente para o mais antigo (sortDocumentsByVersion),
     // então o primeiro elemento do filtro é sempre a versão mais atual deste tipo.
@@ -4785,6 +4858,11 @@ function parseIntent(text) {
   // documentos daquele cliente — nunca os gerais da empresa junto. Sem
   // cliente citado, fica null (comportamento padrão: só os gerais).
   const seguroCliente = detectSeguroClienteEspecificoNome(text);
+  // afeAtividade (pedido explícito da Iasmin, 2026-09-18): mesma lógica do
+  // seguroCliente acima, mas para diferenciar AFEs por atividade/categoria
+  // de produto ("AFE de saneantes" x "AFE de cosméticos") — sem atividade
+  // citada, fica null (searchDocuments então traz todas as AFEs válidas).
+  const afeAtividade = detectAfeAtividade(text);
   const wantsAll =
     /toda\s?a?\s?documentacao|todos os documentos|documentacao completa|tudo que tiver|documentacao dessa (filial|empresa)/.test(
       t,
@@ -4806,34 +4884,34 @@ function parseIntent(text) {
       t,
     );
   if (wantsAll)
-    return { intent: "DOWNLOAD_ALL_DOCUMENTS", types, categories, seguroCliente };
+    return { intent: "DOWNLOAD_ALL_DOCUMENTS", types, categories, seguroCliente, afeAtividade };
   if (wantsList)
-    return { intent: "LIST_COMPANY_DOCUMENTS", types, categories, seguroCliente };
+    return { intent: "LIST_COMPANY_DOCUMENTS", types, categories, seguroCliente, afeAtividade };
   if (wantsCategories)
-    return { intent: "LIST_DOCUMENT_CATEGORIES", types, categories, seguroCliente };
+    return { intent: "LIST_DOCUMENT_CATEGORIES", types, categories, seguroCliente, afeAtividade };
   if (
     (types.length > 1 ||
       categories.length > 1 ||
       types.length + categories.length > 1) &&
     (wantsDownload || wantsZip || wantsFind)
   ) {
-    return { intent: "DOWNLOAD_MULTIPLE_DOCUMENTS", types, categories, seguroCliente };
+    return { intent: "DOWNLOAD_MULTIPLE_DOCUMENTS", types, categories, seguroCliente, afeAtividade };
   }
   if (
     (types.length === 1 || categories.length === 1) &&
     wantsFind &&
     !wantsDownload
   ) {
-    return { intent: "SEARCH_DOCUMENT", types, categories, seguroCliente };
+    return { intent: "SEARCH_DOCUMENT", types, categories, seguroCliente, afeAtividade };
   }
   if (
     (types.length === 1 || categories.length === 1) &&
     (wantsDownload || wantsZip)
   ) {
-    return { intent: "DOWNLOAD_DOCUMENT", types, categories, seguroCliente };
+    return { intent: "DOWNLOAD_DOCUMENT", types, categories, seguroCliente, afeAtividade };
   }
   if (wantsZip && types.length === 0 && categories.length === 0) {
-    return { intent: "CREATE_ZIP", types, categories, seguroCliente };
+    return { intent: "CREATE_ZIP", types, categories, seguroCliente, afeAtividade };
   } // Integração do Assistente Documental ao Portal (regra explícita, seção 3
   // do prompt): quando a pessoa cita um tipo/categoria específico junto de
   // uma empresa, mesmo sem verbo de ação ("CNPJ de PE", "alvará de MG"), a
@@ -4841,9 +4919,9 @@ function parseIntent(text) {
   // texto. Só não entrega quando a pergunta pede claramente o valor
   // (wantsValueOnly).
   if (!wantsValueOnly && (types.length === 1 || categories.length === 1)) {
-    return { intent: "DOWNLOAD_DOCUMENT", types, categories, seguroCliente };
+    return { intent: "DOWNLOAD_DOCUMENT", types, categories, seguroCliente, afeAtividade };
   }
-  return { intent: "SEARCH_INFO", types, categories, seguroCliente };
+  return { intent: "SEARCH_INFO", types, categories, seguroCliente, afeAtividade };
 }
 /* =========================================================================
    COMPONENTES DE APOIO
@@ -8436,6 +8514,7 @@ function ChatDrawer({
       wantedTypeKeys: parsed.types,
       wantedCategoryKeys: parsed.categories,
       seguroCliente: parsed.seguroCliente || null,
+      afeAtividade: parsed.afeAtividade || null,
     });
     if (found.length === 0) {
       pushMessage({
@@ -9001,9 +9080,12 @@ function ChatDrawer({
         // cliente conhecido citado (ex.: "seguro da Nestlé") restringe a
         // busca só aos documentos daquele cliente.
         const seguroCliente = detectSeguroClienteEspecificoNome(tipoOuCategoria);
+        // afeAtividade: mesma regra, mas pra diferenciar AFE por
+        // atividade/categoria de produto (ex.: "AFE de saneantes").
+        const afeAtividade = detectAfeAtividade(tipoOuCategoria);
         const result = handleDocumentIntent(
           tipoOuCategoria,
-          { types: wantedTypes, categories: wantedCategories, seguroCliente },
+          { types: wantedTypes, categories: wantedCategories, seguroCliente, afeAtividade },
           c,
         );
         const found = result?.found || [];
@@ -14311,7 +14393,13 @@ const TIPO_LABEL_TO_DOC_FAMILY = {
   "Alvará de Localização e Funcionamento": "alvara_funcionamento",
   "Licença de Funcionamento": "alvara_funcionamento",
   "Licença Sanitária": "licenca_sanitaria",
-  AFE: "afe",
+  // "AFE" removido deste mapa em 2026-09-18 (pedido explícito da Iasmin:
+  // "as AFEs não há nenhuma arquivada, ambas são importantes" — diferente do
+  // Contrato Social, que tem versões). Cada AFE autoriza uma
+  // atividade/categoria de produto diferente e todas continuam válidas ao
+  // mesmo tempo; teria a chave FIXA "afe" aqui juntava todas numa única
+  // família de "versão atual vs arquivada", exatamente o que não deve
+  // acontecer — ver o caso especial em docFamilyFor, abaixo.
   "Licença Ambiental": "licenca_ambiental",
   "Autorização Ambiental": "licenca_ambiental",
   AVCB: "avcb",
@@ -14364,6 +14452,19 @@ function slugifyDocFamily(label) {
   }
   if (tipoFinal === "Tipo específico não identificado")
     return `${categoria || "sem_categoria"}__tipo_nao_identificado`;
+  // AFE (Autorização de Funcionamento Especial): cada uma autoriza uma
+  // atividade/categoria de produto diferente (ex.: "Cosméticos, Correlatos"
+  // vs "Saneantes") e todas continuam válidas ao mesmo tempo — não existe
+  // "AFE mais recente que substitui a anterior" como no Contrato Social
+  // (pedido explícito da Iasmin, 2026-09-18). Por isso cada AFE é a sua
+  // PRÓPRIA família (nunca compartilhada com outra AFE), usando um
+  // identificador estável do documento (id/driveFileId) quando disponível;
+  // sem isso, cai no nome do arquivo/título como último recurso — nunca
+  // funde duas AFEs diferentes na mesma linha de "atual vs arquivada".
+  if (tipoFinal === "AFE") {
+    const chave = opts.docKey ? slugifyDocFamily(String(opts.docKey)) : null;
+    return `afe__${chave || "sem_identificador"}`;
+  }
   return TIPO_LABEL_TO_DOC_FAMILY[tipoFinal] || slugifyDocFamily(tipoFinal);
 }
 function familyLabelFor(categoria, tipoFinal, opts = {}) {
@@ -14423,6 +14524,10 @@ function buildConfirmedDocRecord({
   const docFamily = docFamilyFor(categoria, tipoFinal, {
     subcategoria,
     clienteNome: clienteEspecificoNome,
+    // docKey: só usado pelo caso especial "AFE" (cada AFE é sua própria
+    // família) — mesma lógica do id final do registro, pra ficar estável
+    // entre reprocessamentos do mesmo arquivo.
+    docKey: id || driveFileId || nomeOriginal || null,
   }); // abrangência/estabelecimentos relacionados: quando não vierem explícitos
   // (ex.: chamadores antigos que só conheciam "companyId"), deriva de
   // companyId — nunca fica indefinido, para useDerived sempre saber onde
