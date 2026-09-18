@@ -2210,6 +2210,7 @@ const AUDIT_ACTION_LABELS = {
   criou_homologacao: "Registrou homologação",
   alterou_status_homologacao: "Alterou status de homologação",
   revelou_credenciais_homologacao: "Revelou credenciais (homologação)",
+  excluiu_homologacao: "Excluiu homologação",
 };
 /** RESTDB_POLL_INTERVAL_MS: fora do Artifact não existe um canal de tempo
  *  real (onSnapshot de verdade) sem adicionar uma dependência nova
@@ -2416,129 +2417,6 @@ async function excluirDocumentoConfirmado(doc, company, { onNotify } = {}) {
     "info",
   );
   return true;
-}
-/** limparDocumentosOrfaos: revalida, um a um, todo registro persistido
- *  (documentos_confirmados + conference_queue) que tem um driveFileId real
- *  — chamando o MESMO endpoint que Ver/Baixar usam — e só remove o registro
- *  quando o backend confirma, de fato, 404 (arquivo não existe mais no
- *  Drive). Qualquer outra resposta (erro de rede, backend fora do ar, 403
- *  etc.) é tratada como inconclusiva e o registro é mantido — nunca apaga
- *  por suposição. Nunca toca no arquivo físico no Drive, só no índice do
- *  portal (mesma garantia de `excluirDocumentoConfirmado`), e registra
- *  auditoria de cada remoção (2026-09-15, pedido explícito da usuária depois
- *  de encontrar documentos "Arquivo original não encontrado" após uma
- *  reorganização de pastas no Drive).
- *  PROTEÇÃO CONTRA FALHA SISTÊMICA (adicionada ainda em 2026-09-15, depois
- *  de um incidente real): o backend/Drive já teve, neste mesmo projeto, um
- *  bug intermitente em que a listagem (`/files`) volta a responder
- *  `total:0` sem nenhum arquivo ter sido apagado de verdade — só uma falha
- *  passageira de conexão/indexação. Na primeira versão desta função, uma
- *  falha assim faria TODO documento revalidado parecer "não encontrado" ao
- *  mesmo tempo, e a ferramenta removia o índice inteiro — foi exatamente o
- *  que aconteceu (~80 documentos reais removidos numa janela em que o
- *  backend estava com esse problema). Por isso agora a verificação sempre
- *  roda em duas fases: primeiro só CONFERE (nunca apaga nada ainda); depois,
- *  só se a fração de "não encontrados" for pequena o bastante pra ser
- *  plausível como limpeza pontual (nunca a maioria/todos de uma vez só),
- *  os removidos de fato são apagados. Caso contrário, aborta sem apagar
- *  nada e devolve `abortadoPorSeguranca: true`, para a interface avisar
- *  claramente em vez de silenciosamente destruir o índice de novo. */
-async function limparDocumentosOrfaos({ onProgresso } = {}) {
-  const db = await getDb();
-  if (!db) return { ok: false, motivo: "armazenamento_indisponivel" };
-  if (!DRIVE_PROXY_URL) return { ok: false, motivo: "backend_indisponivel" };
-  async function arquivoExisteNoDrive(driveFileId) {
-    try {
-      const resp = await fetch(
-        `${DRIVE_PROXY_URL}/api/documents/${encodeURIComponent(driveFileId)}/file`,
-        { headers: DRIVE_PROXY_KEY ? { "X-Portal-Key": DRIVE_PROXY_KEY } : {} },
-      );
-      if (resp.status === 404) return false;
-      resp.body?.cancel?.().catch(() => {}); // nunca baixa o arquivo inteiro só pra confirmar que existe
-      return resp.ok ? true : null; // null = inconclusivo (403/500/etc.) — nunca remove
-    } catch (e) {
-      return null; // falha de rede — inconclusivo, nunca remove
-    }
-  }
-  const alvos = [];
-  const confirmadosSnap = await db.collection("documentos_confirmados").get();
-  confirmadosSnap.docs.forEach((d) => {
-    const data = d.data();
-    if (data?.arquivo?.driveFileId) {
-      alvos.push({
-        colecao: "documentos_confirmados",
-        id: d.id,
-        driveFileId: data.arquivo.driveFileId,
-        titulo: data.titulo || data.tipo || data.arquivo.nomeOriginal,
-        categoria: data.categoria,
-      });
-    }
-  });
-  const conferenciaSnap = await db.collection("conference_queue").get();
-  conferenciaSnap.docs.forEach((d) => {
-    const data = d.data();
-    if (data?.driveFileId) {
-      alvos.push({
-        colecao: "conference_queue",
-        id: d.id,
-        driveFileId: data.driveFileId,
-        titulo: data.nomeOriginal,
-        categoria: data.possivelCategoria,
-      });
-    }
-  });
-  // FASE 1 — só verifica, nunca apaga nada ainda.
-  const candidatosRemocao = [];
-  const mantidos = [];
-  const inconclusivos = [];
-  for (let i = 0; i < alvos.length; i++) {
-    const alvo = alvos[i];
-    onProgresso?.({ atual: i + 1, total: alvos.length, fase: "verificando" });
-    const existe = await arquivoExisteNoDrive(alvo.driveFileId);
-    if (existe === false) candidatosRemocao.push(alvo);
-    else if (existe === true) mantidos.push(alvo);
-    else inconclusivos.push(alvo);
-  }
-  // FASE 2 — proteção contra falha sistêmica: uma fração grande demais de
-  // "não encontrados" de uma só vez é sinal muito mais forte de backend/
-  // Drive instável do que de dezenas de arquivos terem sumido ao mesmo
-  // tempo. Limite: com pelo menos 5 documentos verificados, mais de 30%
-  // vindo como órfão já é motivo pra abortar sem apagar nada.
-  const fracaoOrfaos = alvos.length > 0 ? candidatosRemocao.length / alvos.length : 0;
-  const abortadoPorSeguranca = alvos.length >= 5 && fracaoOrfaos > 0.3;
-  if (abortadoPorSeguranca) {
-    return {
-      ok: true,
-      abortadoPorSeguranca: true,
-      total: alvos.length,
-      removidos: [],
-      candidatosNaoRemovidos: candidatosRemocao,
-      mantidos,
-      inconclusivos,
-    };
-  }
-  // FASE 3 — remoção real, só depois de passar pela proteção acima.
-  const removidos = [];
-  for (const alvo of candidatosRemocao) {
-    try {
-      await db.collection(alvo.colecao).doc(alvo.id).delete();
-      removidos.push(alvo);
-      logDocumentAction("removeu_documento_orfao", {
-        documento: alvo.titulo || "(sem título)",
-        categoria:
-          CATEGORIES.find((c) => c.key === alvo.categoria)?.label ||
-          alvo.categoria ||
-          "categoria não identificada",
-        driveFileIdRemovido: alvo.driveFileId,
-        colecao: alvo.colecao,
-        motivo:
-          "Arquivo não encontrado no Google Drive ao revalidar (verificação/limpeza de documentos órfãos) — provavelmente substituído/reenviado em vez de movido durante uma reorganização de pastas.",
-      });
-    } catch (e) {
-      mantidos.push(alvo); // falhou ao excluir (não ao verificar) — mantém como estava
-    }
-  }
-  return { ok: true, total: alvos.length, removidos, mantidos, inconclusivos };
 }
 /** editarDocumentoConfirmado: edição manual dos metadados de um documento já
  *  indexado (item 1 do pedido de 2026-09-14 — "MANTER A EDIÇÃO DA
@@ -3585,6 +3463,25 @@ async function createDocumentPackageMultiBase(entradasPorBase, opts = {}) {
     .filter(Boolean)
     .join(" ");
   return texto.includes(ano);
+}
+/** anoDeDocumentoContabil: extrai o ano (número) de UM documento de
+ *  Contabilidade, para ordenar os subgrupos "Balanços Patrimoniais/DREs/
+ *  Faturamento" sempre do ano mais recente para o mais antigo (pedido
+ *  explícito da Iasmin, 2026-09-18: "sempre que chegar um ano mais recente
+ *  você põe em prioridade") — mesma fonte de texto de `docTextMentionsAno`
+ *  (título/nome do arquivo/descrição); sem ano no texto, cai pro ano da
+ *  data de emissão, se houver. Sem ano algum reconhecível, devolve null —
+ *  nunca inventa um ano; esses ficam no fim do grupo, sem embaralhar a
+ *  ordem dos que têm ano certo. */
+function anoDeDocumentoContabil(d) {
+  const texto = [d.titulo, d.arquivo?.nomeOriginal, d.descricao]
+    .filter(Boolean)
+    .join(" ");
+  const m = texto.match(/\b20\d{2}\b/);
+  if (m) return parseInt(m[0], 10);
+  const emissaoMs = parseDateBR(d.emissao);
+  if (emissaoMs) return new Date(emissaoMs).getFullYear();
+  return null;
 }
 /* COMPANY_HISTORICAL_NAMES — evolução histórica REAL da razão social do
  * grupo (Cortez & Andrade → Global Logística → Rodoprima → Gprima, razão
@@ -5671,6 +5568,60 @@ function DashboardView({
             ),
           ),
         ),
+        // Acesso rápido às "Documentações de abrangência empresarial" (pedido
+        // explícito da Iasmin, 2026-09-18: "inclui nesse espaço em branco...
+        // um acesso rápido") — mesma estrutura visual dos cards de base, no
+        // espaço que sobra na grade (4 colunas × 2 linhas com 7 bases).
+        // Nunca uma base/CNPJ novo: leva pra Empresas, que já abre mostrando
+        // essa seção por padrão.
+        /*#__PURE__*/ React.createElement(
+          "div",
+          {
+            key: "corporate-quick-access",
+            className: "company-mini company-mini-corporate",
+            role: "button",
+            tabIndex: 0,
+            onClick: onGoCompanies,
+            onKeyDown: (e) => e.key === "Enter" && onGoCompanies(),
+          },
+          /*#__PURE__*/ React.createElement(
+            "div",
+            { className: "company-mini-top" },
+            /*#__PURE__*/ React.createElement(
+              "span",
+              { className: "company-mini-tag" },
+              "Grupoprima Logística",
+            ),
+          ),
+          /*#__PURE__*/ React.createElement(
+            "div",
+            { className: "company-mini-city" },
+            /*#__PURE__*/ React.createElement(FolderArchive, { size: 13 }),
+            " Documentações de abrangência empresarial",
+          ),
+          /*#__PURE__*/ React.createElement(
+            "div",
+            { className: "company-mini-foot-row" },
+            /*#__PURE__*/ React.createElement(
+              "span",
+              { className: "company-mini-foot" },
+              computeCorporateDocs(companies).length,
+              " doc(s)",
+            ),
+            /*#__PURE__*/ React.createElement(
+              "button",
+              {
+                className: "company-mini-docs-btn",
+                onClick: (e) => {
+                  e.stopPropagation();
+                  onGoCompanies();
+                },
+              },
+              /*#__PURE__*/ React.createElement(FileSearch, { size: 12 }),
+              " Documentos",
+            ),
+          ),
+        ),
       ),
     ),
     /*#__PURE__*/ React.createElement(
@@ -6526,91 +6477,7 @@ function CompaniesView({
   // portal nunca apresenta cada estabelecimento como se fosse uma empresa
   // independente. Só ao clicar em "Ver estabelecimentos" (ou ao buscar algo) é que a
   // lista real de estabelecimentos aparece.
-  if (!showEstabelecimentos) {
-    return /*#__PURE__*/ React.createElement(
-      "div",
-      { className: "view" },
-      /*#__PURE__*/ React.createElement(
-        "header",
-        { className: "view-header" },
-        /*#__PURE__*/ React.createElement(
-          "div",
-          null,
-          /*#__PURE__*/ React.createElement(
-            "p",
-            { className: "eyebrow" },
-            "Painel",
-          ),
-          /*#__PURE__*/ React.createElement("h1", null, "Empresas"),
-          /*#__PURE__*/ React.createElement(
-            "p",
-            { className: "lede" },
-            "O Grupoprima Logística possui uma única empresa registrada, organizada em bases.",
-          ),
-        ),
-      ),
-      /*#__PURE__*/ React.createElement(
-        "div",
-        { className: "empresa-card-unica" },
-        /*#__PURE__*/ React.createElement(
-          "div",
-          { className: "empresa-card-unica-head" },
-          /*#__PURE__*/ React.createElement(Building2, { size: 22 }),
-          /*#__PURE__*/ React.createElement(
-            "div",
-            null,
-            /*#__PURE__*/ React.createElement(
-              "h2",
-              null,
-              "GRUPOPRIMA LOGÍSTICA",
-            ),
-            /*#__PURE__*/ React.createElement(
-              "p",
-              null,
-              data.companies[0]?.razaoSocial || "GPRIMA LOGISTICA LTDA",
-            ),
-          ),
-        ),
-        /*#__PURE__*/ React.createElement(
-          "div",
-          { className: "empresa-card-unica-stats" },
-          /*#__PURE__*/ React.createElement(
-            "div",
-            null,
-            /*#__PURE__*/ React.createElement("strong", null, "1"),
-            /*#__PURE__*/ React.createElement("span", null, "empresa"),
-          ),
-          /*#__PURE__*/ React.createElement(
-            "div",
-            null,
-            /*#__PURE__*/ React.createElement(
-              "strong",
-              null,
-              data.totalEmpresas,
-            ),
-            /*#__PURE__*/ React.createElement("span", null, "base(s)"),
-          ),
-          /*#__PURE__*/ React.createElement(
-            "div",
-            null,
-            /*#__PURE__*/ React.createElement(
-              "strong",
-              null,
-              data.totalDocumentos,
-            ),
-            /*#__PURE__*/ React.createElement("span", null, "documento(s)"),
-          ),
-        ),
-        /*#__PURE__*/ React.createElement(
-          "button",
-          {
-            className: "chat-toggle empresa-card-unica-btn",
-            onClick: () => setDrilled(true),
-          },
-          "Ver bases ",
-          /*#__PURE__*/ React.createElement(ChevronRight, { size: 14 }),
-        ),
-      ),
+  const corporateSectionElement =
       /*#__PURE__*/ React.createElement(
         "section",
         { className: "section-block", style: { marginTop: 20 } },
@@ -6659,8 +6526,26 @@ function CompaniesView({
                     ),
                 )
               : [];
-            function renderDocRows(docRows) {
-              return groupDocumentsByFamily(docRows.map((r) => r.doc)).map(
+            function renderDocRows(docRows, opts = {}) {
+              let families = groupDocumentsByFamily(docRows.map((r) => r.doc));
+              if (opts.ordenarPorAno) {
+                // Contabilidade (pedido explícito da Iasmin, 2026-09-18):
+                // cada ano de Balanço/DRE/Faturamento é a sua PRÓPRIA
+                // família (SEM_SUBSTITUICAO_TIPOS), então groupDocumentsByFamily
+                // sozinho não as ordena entre si — aqui sim, sempre do ano
+                // mais recente pro mais antigo; sem ano reconhecível, fica
+                // no fim (nunca embaralha os que têm ano certo).
+                families = [...families].sort((a, b) => {
+                  const anoA = anoDeDocumentoContabil(a.versions[0]);
+                  const anoB = anoDeDocumentoContabil(b.versions[0]);
+                  if (anoA !== null && anoB !== null && anoA !== anoB)
+                    return anoB - anoA;
+                  if (anoA !== null && anoB === null) return -1;
+                  if (anoA === null && anoB !== null) return 1;
+                  return 0;
+                });
+              }
+              return families.map(
                 (family) => {
                   const rowsFamily = family.versions.map(
                     (v) =>
@@ -6824,7 +6709,7 @@ function CompaniesView({
                             { key: `e-${g.key}`, className: "empty-note" },
                             "Nenhum documento nesta subcategoria ainda.",
                           )
-                        : renderDocRows(g.rows),
+                        : renderDocRows(g.rows, { ordenarPorAno: true }),
                     ]),
                     contabilidadeResto.length > 0 &&
                       /*#__PURE__*/ React.createElement(
@@ -6836,13 +6721,100 @@ function CompaniesView({
                         "Outros documentos contábeis",
                       ),
                     contabilidadeResto.length > 0 &&
-                      renderDocRows(contabilidadeResto),
+                      renderDocRows(contabilidadeResto, { ordenarPorAno: true }),
                   ],
                 ),
             );
           }),
         ),
+      );
+
+  if (!showEstabelecimentos) {
+    return /*#__PURE__*/ React.createElement(
+      "div",
+      { className: "view" },
+      /*#__PURE__*/ React.createElement(
+        "header",
+        { className: "view-header" },
+        /*#__PURE__*/ React.createElement(
+          "div",
+          null,
+          /*#__PURE__*/ React.createElement(
+            "p",
+            { className: "eyebrow" },
+            "Painel",
+          ),
+          /*#__PURE__*/ React.createElement("h1", null, "Empresas"),
+          /*#__PURE__*/ React.createElement(
+            "p",
+            { className: "lede" },
+            "O Grupoprima Logística possui uma única empresa registrada, organizada em bases.",
+          ),
+        ),
       ),
+      /*#__PURE__*/ React.createElement(
+        "div",
+        { className: "empresa-card-unica" },
+        /*#__PURE__*/ React.createElement(
+          "div",
+          { className: "empresa-card-unica-head" },
+          /*#__PURE__*/ React.createElement(Building2, { size: 22 }),
+          /*#__PURE__*/ React.createElement(
+            "div",
+            null,
+            /*#__PURE__*/ React.createElement(
+              "h2",
+              null,
+              "GRUPOPRIMA LOGÍSTICA",
+            ),
+            /*#__PURE__*/ React.createElement(
+              "p",
+              null,
+              data.companies[0]?.razaoSocial || "GPRIMA LOGISTICA LTDA",
+            ),
+          ),
+        ),
+        /*#__PURE__*/ React.createElement(
+          "div",
+          { className: "empresa-card-unica-stats" },
+          /*#__PURE__*/ React.createElement(
+            "div",
+            null,
+            /*#__PURE__*/ React.createElement("strong", null, "1"),
+            /*#__PURE__*/ React.createElement("span", null, "empresa"),
+          ),
+          /*#__PURE__*/ React.createElement(
+            "div",
+            null,
+            /*#__PURE__*/ React.createElement(
+              "strong",
+              null,
+              data.totalEmpresas,
+            ),
+            /*#__PURE__*/ React.createElement("span", null, "base(s)"),
+          ),
+          /*#__PURE__*/ React.createElement(
+            "div",
+            null,
+            /*#__PURE__*/ React.createElement(
+              "strong",
+              null,
+              data.totalDocumentos,
+            ),
+            /*#__PURE__*/ React.createElement("span", null, "documento(s)"),
+          ),
+        ),
+        /*#__PURE__*/ React.createElement(
+          "button",
+          {
+            className: "chat-toggle empresa-card-unica-btn",
+            onClick: () => setDrilled(true),
+          },
+          "Ver bases ",
+          /*#__PURE__*/ React.createElement(ChevronRight, { size: 14 }),
+        ),
+      ),
+      corporateSectionElement,
     );
   }
   return /*#__PURE__*/ React.createElement(
@@ -7177,6 +7149,7 @@ function CompaniesView({
           "Nenhuma base encontrada.",
         ),
     ),
+    corporateSectionElement,
     /*#__PURE__*/ React.createElement(FiltersModal, {
       open: filtersOpen,
       onClose: () => setFiltersOpen(false),
@@ -11487,6 +11460,7 @@ function EnvioDocumentacaoLoteModal({ companies, onNotify, onView, onClose }) {
   currentUser,
   onBack,
   onUpdate,
+  onDelete,
   onNotify,
   onView,
   companies,
@@ -11495,6 +11469,8 @@ function EnvioDocumentacaoLoteModal({ companies, onNotify, onView, onClose }) {
   const [linkEdit, setLinkEdit] = useState(h.linkHomologacao || "");
   const [editandoBases, setEditandoBases] = useState(false);
   const [basesEdit, setBasesEdit] = useState(h.bases || []);
+  const [confirmandoExclusao, setConfirmandoExclusao] = useState(false);
+  const [excluindo, setExcluindo] = useState(false);
   const isAdmin = currentUser?.perfil === "admin";
   const { atrasada, diasRestantes } = computePrazoInfo(
     h.prazoRetorno,
@@ -11559,6 +11535,10 @@ function EnvioDocumentacaoLoteModal({ companies, onNotify, onView, onClose }) {
     setBasesEdit(h.bases || []);
     setEditandoBases(false);
   }
+  async function handleExcluir() {
+    setExcluindo(true);
+    await onDelete?.(h.id);
+  }
   return /*#__PURE__*/ React.createElement(
     "div",
     { className: "view" },
@@ -11595,7 +11575,6 @@ function EnvioDocumentacaoLoteModal({ companies, onNotify, onView, onClose }) {
         formatAuditWhen(new Date(h.dataSolicitacao)),
       ),
       isAdmin &&
-        transicoes.length > 0 &&
         /*#__PURE__*/ React.createElement(
           "div",
           { className: "homolog-status-actions" },
@@ -11609,6 +11588,61 @@ function EnvioDocumentacaoLoteModal({ companies, onNotify, onView, onClose }) {
               },
               "Marcar como ",
               HOMOLOGACAO_STATUS_META[t]?.label,
+            ),
+          ),
+          // Excluir: pedido explícito da Iasmin (2026-09-18) — botão só na
+          // área interna de cada homologação, restrito a Administrador
+          // (mesmo gate de excluirDocumentoConfirmado), sempre disponível
+          // (mesmo em status final, sem transições de status restantes),
+          // nunca um clique único — abre a confirmação abaixo primeiro.
+          !confirmandoExclusao &&
+            /*#__PURE__*/ React.createElement(
+              "button",
+              {
+                className: "doc-view-btn homolog-delete-btn",
+                onClick: () => setConfirmandoExclusao(true),
+                title: "Excluir esta solicitação de homologação (Administrador)",
+              },
+              /*#__PURE__*/ React.createElement(XCircle, { size: 14 }),
+              " Excluir homologação",
+            ),
+        ),
+      isAdmin &&
+        confirmandoExclusao &&
+        /*#__PURE__*/ React.createElement(
+          "div",
+          { className: "doc-row-delete-confirm homolog-delete-confirm" },
+          /*#__PURE__*/ React.createElement(
+            "span",
+            null,
+            `Excluir a homologação de "${h.cliente}"? Isso remove o registro definitivamente e não pode ser desfeito.`,
+          ),
+          /*#__PURE__*/ React.createElement(
+            "div",
+            { className: "doc-row-delete-confirm-actions" },
+            /*#__PURE__*/ React.createElement(
+              "button",
+              {
+                className: "doc-row-delete-confirm-btn",
+                disabled: excluindo,
+                onClick: handleExcluir,
+              },
+              excluindo
+                ? /*#__PURE__*/ React.createElement(Loader2, {
+                    size: 12,
+                    className: "spin",
+                  })
+                : null,
+              "Confirmar exclusão",
+            ),
+            /*#__PURE__*/ React.createElement(
+              "button",
+              {
+                className: "filters-clear-btn filters-clear-inline",
+                disabled: excluindo,
+                onClick: () => setConfirmandoExclusao(false),
+              },
+              "Cancelar",
             ),
           ),
         ),
@@ -12042,6 +12076,35 @@ function EnvioDocumentacaoLoteModal({ companies, onNotify, onView, onClose }) {
     if (!atual) return;
     persist({ ...atual, ...patch });
   }
+  /** handleDelete: exclusão manual real de uma solicitação de homologação
+   *  (pedido explícito da Iasmin, 2026-09-18: "coloca a opção de apagar
+   *  solicitações de homologação"). Mesmo padrão de best-effort já usado
+   *  por `persist` acima (única fonte de verdade da UI é o estado local
+   *  `items`; a escrita em "db" é só um espelho persistente, nunca bloqueia
+   *  a ação) — diferente de `excluirDocumentoConfirmado`, que exige "db"
+   *  disponível, porque aqui o restante do fluxo de homologação (criar,
+   *  atualizar status) já funciona sem "db" também. Sempre precedida de uma
+   *  confirmação explícita na interface (HomologacaoDetailView é quem
+   *  garante isso, nunca um clique único). */
+  function handleDelete(id) {
+    const item = items.find((it) => it.id === id) || itemsMemoriaRef.current[id];
+    delete itemsMemoriaRef.current[id];
+    setItems((prev) => prev.filter((it) => it.id !== id));
+    setSelectedId(null);
+    getDb()
+      .then((db) => {
+        if (!db) return;
+        return db.collection("homologacoes").doc(id).delete().catch(() => {});
+      })
+      .catch(() => {});
+    logDocumentAction("excluiu_homologacao", {
+      homologacao: item?.cliente || "(sem cliente)",
+    });
+    onNotify?.(
+      `Homologação de "${item?.cliente || "cliente"}" foi excluída.`,
+      "info",
+    );
+  }
   const consultores = useMemo(
     () =>
       [
@@ -12099,6 +12162,7 @@ function EnvioDocumentacaoLoteModal({ companies, onNotify, onView, onClose }) {
       currentUser: currentUser,
       onBack: () => setSelectedId(null),
       onUpdate: handleUpdate,
+      onDelete: handleDelete,
       onNotify: onNotify,
       onView: onView,
       companies: companies,
@@ -13497,8 +13561,13 @@ function ConferenceQueueView({ onNotify, onView, companies }) {
       setAnalisandoId(null);
     }
   }
+  // Pedido explícito da Iasmin, 2026-09-18: "uma vez que forem revisadas, os
+  // cards podem sumir" — a fila de conferência mostra só o que ainda precisa
+  // de revisão (pendente); um item já classificado/ignorado nunca volta a
+  // aparecer aqui (o registro em si, e a decisão tomada, continuam
+  // preservados em "conference_queue" e na Auditoria — só a listagem "Já
+  // revisados" desta tela deixou de existir, pra não acumular indefinidamente).
   const pendentes = items.filter((it) => it.status === "pendente");
-  const resolvidos = items.filter((it) => it.status !== "pendente");
   return /*#__PURE__*/ React.createElement(
     "div",
     { className: "view" },
@@ -13516,7 +13585,7 @@ function ConferenceQueueView({ onNotify, onView, companies }) {
         /*#__PURE__*/ React.createElement(
           "h1",
           null,
-          "🟠 Necessita de conferência",
+          "Necessita de conferência",
         ),
         /*#__PURE__*/ React.createElement(
           "p",
@@ -13697,37 +13766,6 @@ function ConferenceQueueView({ onNotify, onView, companies }) {
         ),
       ),
     ),
-    resolvidos.length > 0 &&
-      /*#__PURE__*/ React.createElement(
-        "section",
-        { className: "section-block" },
-        /*#__PURE__*/ React.createElement("h3", null, "Já revisados"),
-        /*#__PURE__*/ React.createElement(
-          "div",
-          { className: "conference-list conference-list-resolved" },
-          resolvidos.map((item) =>
-            /*#__PURE__*/ React.createElement(
-              "div",
-              {
-                key: item.id,
-                className: "conference-item conference-item-resolved",
-              },
-              /*#__PURE__*/ React.createElement(FileText, { size: 14 }),
-              " ",
-              /*#__PURE__*/ React.createElement(
-                "span",
-                null,
-                item.nomeOriginal,
-              ),
-              /*#__PURE__*/ React.createElement(
-                "span",
-                { className: "status-badge status-ok" },
-                item.status === "classificado" ? "Classificado" : "Ignorado",
-              ),
-            ),
-          ),
-        ),
-      ),
     classifyModalItem &&
       /*#__PURE__*/ React.createElement(ClassificationModal, {
         item: classifyModalItem,
@@ -15272,44 +15310,6 @@ function SyncView({ companies, onNotify }) {
   const [lastSync, setLastSync] = useState(null);
   const [result, setResult] = useState(null);
   const [progresso, setProgresso] = useState(null); // { atual, total } — feedback durante a leitura de conteúdo
-  const [orphanState, setOrphanState] = useState("idle"); // idle | working | done | error
-  const [orphanProgresso, setOrphanProgresso] = useState(null);
-  const [orphanResult, setOrphanResult] = useState(null);
-  async function handleLimparOrfaos() {
-    setOrphanState("working");
-    setOrphanProgresso(null);
-    setOrphanResult(null);
-    try {
-      const resultado = await limparDocumentosOrfaos({
-        onProgresso: setOrphanProgresso,
-      });
-      if (!resultado.ok) {
-        setOrphanState("error");
-        onNotify?.(
-          resultado.motivo === "backend_indisponivel"
-            ? "Não foi possível verificar agora — backend indisponível."
-            : "Não foi possível verificar agora — armazenamento indisponível.",
-          "error",
-        );
-        return;
-      }
-      setOrphanResult(resultado);
-      setOrphanState("done");
-      onNotify?.(
-        resultado.abortadoPorSeguranca
-          ? `Nada foi removido: ${resultado.candidatosNaoRemovidos.length} de ${resultado.total} documentos pareciam "não encontrados" ao mesmo tempo — sinal de falha temporária no Drive/backend, não de arquivos apagados. Tente de novo mais tarde.`
-          : resultado.removidos.length > 0
-            ? `${resultado.removidos.length} documento(s) órfão(s) removido(s) do índice (o arquivo original não foi encontrado no Drive). O arquivo físico, quando ainda existir em algum lugar, nunca foi tocado.`
-            : "Nenhum documento órfão encontrado — todos os arquivos indexados ainda existem no Drive.",
-        resultado.abortadoPorSeguranca ? "error" : "info",
-      );
-    } catch (e) {
-      setOrphanState("error");
-      onNotify?.("Não foi possível concluir a verificação agora.", "error");
-    } finally {
-      setOrphanProgresso(null);
-    }
-  }
   const knownDriveIds = useMemo(() => {
     const ids = new Set();
     companies.forEach((c) =>
@@ -15570,7 +15570,7 @@ function SyncView({ companies, onNotify }) {
         /*#__PURE__*/ React.createElement(
           "h1",
           null,
-          "🔄 Sincronização com o Google Drive",
+          "Sincronização com o Google Drive",
         ),
         /*#__PURE__*/ React.createElement(
           "p",
@@ -15793,155 +15793,6 @@ function SyncView({ companies, onNotify }) {
             : 'Os itens "enviados para conferência" ficam na fila de conferência até serem revisados.',
         ),
       ),
-    /*#__PURE__*/ React.createElement(
-      "section",
-      { className: "section-block", style: { marginTop: 24 } },
-      /*#__PURE__*/ React.createElement(
-        "header",
-        { className: "view-header", style: { marginBottom: 4 } },
-        /*#__PURE__*/ React.createElement(
-          "div",
-          null,
-          /*#__PURE__*/ React.createElement(
-            "h3",
-            null,
-            "🧹 Verificar e limpar documentos órfãos",
-          ),
-          /*#__PURE__*/ React.createElement(
-            "p",
-            { className: "lede" },
-            'Revalida cada documento já indexado contra o Google Drive de verdade (o mesmo que "Ver"/"Baixar" usam) e remove do índice só os que o Drive confirma que não existem mais — nunca toca no arquivo físico. Use depois de mover/reorganizar arquivos no Drive, se "Ver" ou "Baixar" passarem a dizer "arquivo original não encontrado".',
-          ),
-        ),
-        /*#__PURE__*/ React.createElement(
-          "button",
-          {
-            className: "chat-toggle",
-            onClick: handleLimparOrfaos,
-            disabled: orphanState === "working",
-          },
-          orphanState === "working"
-            ? /*#__PURE__*/ React.createElement(Loader2, {
-                size: 14,
-                className: "spin",
-              })
-            : /*#__PURE__*/ React.createElement(FileSearch, { size: 14 }),
-          orphanState === "working"
-            ? orphanProgresso
-              ? `Verificando ${orphanProgresso.atual}/${orphanProgresso.total}...`
-              : "Verificando..."
-            : "Verificar e limpar",
-        ),
-      ),
-      orphanState === "error" &&
-        /*#__PURE__*/ React.createElement(
-          "div",
-          { className: "alert-row alert-amber" },
-          /*#__PURE__*/ React.createElement(AlertTriangle, { size: 16 }),
-          /*#__PURE__*/ React.createElement(
-            "span",
-            null,
-            "Não foi possível concluir a verificação agora. Tente novamente em alguns instantes.",
-          ),
-        ),
-      orphanState === "done" &&
-        orphanResult &&
-        orphanResult.abortadoPorSeguranca &&
-        /*#__PURE__*/ React.createElement(
-          React.Fragment,
-          null,
-          /*#__PURE__*/ React.createElement(
-            "div",
-            { className: "alert-row alert-amber", style: { marginTop: 10 } },
-            /*#__PURE__*/ React.createElement(AlertTriangle, { size: 16 }),
-            /*#__PURE__*/ React.createElement(
-              "span",
-              null,
-              `Nada foi removido: ${orphanResult.candidatosNaoRemovidos.length} de ${orphanResult.total} documentos verificados pareciam "não encontrados" ao mesmo tempo — isso é sinal muito mais forte de uma falha temporária de conexão com o Google Drive do que de arquivos realmente apagados. Aguarde alguns minutos e tente de novo; se continuar assim, o backend/Drive provavelmente precisa ser verificado antes de confiar nesta limpeza.`,
-            ),
-          ),
-        ),
-      orphanState === "done" &&
-        orphanResult &&
-        !orphanResult.abortadoPorSeguranca &&
-        /*#__PURE__*/ React.createElement(
-          React.Fragment,
-          null,
-          /*#__PURE__*/ React.createElement(
-            "div",
-            { className: "kpi-grid kpi-grid-5", style: { marginTop: 10 } },
-            /*#__PURE__*/ React.createElement(KpiCard, {
-              icon: FolderOpen,
-              label: "Documentos verificados",
-              value: orphanResult.total,
-            }),
-            /*#__PURE__*/ React.createElement(KpiCard, {
-              icon: AlertTriangle,
-              label: "Órfãos removidos do índice",
-              value: orphanResult.removidos.length,
-              tone: orphanResult.removidos.length > 0 ? "accent" : "default",
-            }),
-            /*#__PURE__*/ React.createElement(KpiCard, {
-              icon: CheckCircle2,
-              label: "Confirmados no Drive",
-              value: orphanResult.mantidos.length,
-            }),
-            orphanResult.inconclusivos.length > 0 &&
-              /*#__PURE__*/ React.createElement(KpiCard, {
-                icon: AlertTriangle,
-                label: "Não verificados (tente de novo)",
-                value: orphanResult.inconclusivos.length,
-                tone: "accent",
-              }),
-          ),
-          orphanResult.removidos.length > 0 &&
-            /*#__PURE__*/ React.createElement(
-              "div",
-              { className: "conference-list", style: { marginTop: 14 } },
-              orphanResult.removidos.map((r) =>
-                /*#__PURE__*/ React.createElement(
-                  "div",
-                  {
-                    key: `${r.colecao}-${r.id}`,
-                    className: "conference-item",
-                    style: { borderLeftColor: "var(--vermelho, #c0392b)" },
-                  },
-                  /*#__PURE__*/ React.createElement(
-                    "div",
-                    { className: "conference-item-head" },
-                    /*#__PURE__*/ React.createElement(AlertTriangle, {
-                      size: 15,
-                    }),
-                    /*#__PURE__*/ React.createElement(
-                      "span",
-                      { className: "conference-item-name" },
-                      r.titulo || "(sem título)",
-                    ),
-                  ),
-                  /*#__PURE__*/ React.createElement(
-                    "div",
-                    { className: "conference-item-motivo" },
-                    "Categoria: ",
-                    CATEGORIES.find((c) => c.key === r.categoria)?.label ||
-                      r.categoria ||
-                      "não identificada",
-                    " — removido de ",
-                    r.colecao === "documentos_confirmados"
-                      ? "Documentos confirmados"
-                      : "Fila de conferência",
-                    " (arquivo não encontrado no Drive).",
-                  ),
-                ),
-              ),
-            ),
-          orphanResult.removidos.length === 0 &&
-            /*#__PURE__*/ React.createElement(
-              "p",
-              { className: "empty-note", style: { marginTop: 10 } },
-              "Nenhum documento órfão encontrado — todos os arquivos indexados ainda existem no Drive.",
-            ),
-        ),
-    ),
   );
 }
 /** useAutoSyncedDriveDocuments: torna os documentos da pasta oficial do
@@ -16709,7 +16560,7 @@ function AddDocumentView({ companies, onNotify }) {
         /*#__PURE__*/ React.createElement(
           "h1",
           null,
-          "📤 Adicionar documentação",
+          "Adicionar documentação",
         ),
         /*#__PURE__*/ React.createElement(
           "p",
@@ -16832,7 +16683,15 @@ function AuditLogView({ companies }) {
   const [filtroFim, setFiltroFim] = useState(""); // No mobile os filtros da auditoria ficam numa seção recolhível (mesmos
   // campos do desktop) em vez de ocultos por completo — preserva a
   // funcionalidade de filtrar, só muda a apresentação por tamanho de tela.
-  const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false); // dbEntries: histórico persistente (capability "db"), quando disponível —
+  const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
+  // Paginação (pedido explícito da Iasmin, 2026-09-18: "mostre apenas 20
+  // resultados e o restante adicione no fim da página a quantia de
+  // registros do 1 ao último") — volta pra página 1 sempre que um filtro
+  // muda, pra nunca ficar "presa" numa página vazia depois de filtrar.
+  const [pagina, setPagina] = useState(1);
+  useEffect(() => {
+    setPagina(1);
+  }, [filtroUsuario, filtroAcao, filtroEmpresa, filtroInicio, filtroFim]); // dbEntries: histórico persistente (capability "db"), quando disponível —
   // permite que a Auditoria sobreviva a recarregamentos e mostre ações de
   // outras sessões. null = ainda não sincronizado/indisponível; nesse caso
   // a tela usa só o histórico em memória desta sessão (comportamento
@@ -16893,6 +16752,18 @@ function AuditLogView({ companies }) {
     if (filtroFim && e.at > new Date(filtroFim + "T23:59:59")) return false;
     return true;
   });
+  // AUDIT_LOG_PAGE_SIZE: 20 por página — `paginaAtual` nunca passa de
+  // `totalPaginas` (ex.: filtro reduziu o total depois da página já ter
+  // avançado), sempre recalculado a partir de `entries.length` atual.
+  const AUDIT_LOG_PAGE_SIZE = 20;
+  const totalPaginas = Math.max(1, Math.ceil(entries.length / AUDIT_LOG_PAGE_SIZE));
+  const paginaAtual = Math.min(pagina, totalPaginas);
+  const inicioIntervalo = entries.length === 0 ? 0 : (paginaAtual - 1) * AUDIT_LOG_PAGE_SIZE + 1;
+  const fimIntervalo = Math.min(paginaAtual * AUDIT_LOG_PAGE_SIZE, entries.length);
+  const entriesPagina = entries.slice(
+    (paginaAtual - 1) * AUDIT_LOG_PAGE_SIZE,
+    paginaAtual * AUDIT_LOG_PAGE_SIZE,
+  );
   function clearFilters() {
     setFiltroUsuario("");
     setFiltroAcao("");
@@ -17052,7 +16923,7 @@ function AuditLogView({ companies }) {
         /*#__PURE__*/ React.createElement(
           "tbody",
           null,
-          entries.map((e) =>
+          entriesPagina.map((e) =>
             /*#__PURE__*/ React.createElement(
               "tr",
               { key: e.id },
@@ -17086,7 +16957,7 @@ function AuditLogView({ companies }) {
     /*#__PURE__*/ React.createElement(
       "div",
       { className: "company-cards mobile-only" },
-      entries.map((e) =>
+      entriesPagina.map((e) =>
         /*#__PURE__*/ React.createElement(
           "div",
           { key: e.id, className: "company-card-mobile" },
@@ -17129,6 +17000,58 @@ function AuditLogView({ companies }) {
           "Nenhum evento encontrado.",
         ),
     ),
+    // Paginação (pedido explícito da Iasmin, 2026-09-18): 20 por página, com
+    // a quantidade de registros "<início> a <fim> de <total>" ao final da
+    // página — mesmo intervalo pro desktop e pro mobile (não duplicado por
+    // tela). Só aparece quando há pelo menos 1 resultado.
+    entries.length > 0 &&
+      /*#__PURE__*/ React.createElement(
+        "div",
+        { className: "audit-pagination" },
+        /*#__PURE__*/ React.createElement(
+          "span",
+          { className: "audit-pagination-info" },
+          inicioIntervalo,
+          " a ",
+          fimIntervalo,
+          " de ",
+          entries.length,
+          " registro(s)",
+        ),
+        totalPaginas > 1 &&
+          /*#__PURE__*/ React.createElement(
+            "div",
+            { className: "audit-pagination-nav" },
+            /*#__PURE__*/ React.createElement(
+              "button",
+              {
+                className: "icon-btn-dark",
+                disabled: paginaAtual <= 1,
+                onClick: () => setPagina((p) => Math.max(1, p - 1)),
+                "aria-label": "Página anterior",
+              },
+              /*#__PURE__*/ React.createElement(ChevronLeft, { size: 16 }),
+            ),
+            /*#__PURE__*/ React.createElement(
+              "span",
+              null,
+              "Página ",
+              paginaAtual,
+              " de ",
+              totalPaginas,
+            ),
+            /*#__PURE__*/ React.createElement(
+              "button",
+              {
+                className: "icon-btn-dark",
+                disabled: paginaAtual >= totalPaginas,
+                onClick: () => setPagina((p) => Math.min(totalPaginas, p + 1)),
+                "aria-label": "Próxima página",
+              },
+              /*#__PURE__*/ React.createElement(ChevronRight, { size: 16 }),
+            ),
+          ),
+      ),
   );
 }
 /* =========================================================================
@@ -17635,6 +17558,8 @@ function GrupoprimaPortal() {
         .company-mini-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
         .company-mini { text-align: left; background: #fff; border: 1px solid var(--cinza-frio); border-radius: 10px; padding: 13px; cursor: pointer; transition: border-color 0.15s; }
         .company-mini:hover { border-color: var(--azul); }
+        .company-mini-corporate { background: var(--azul-claro, #eef4fa); border-style: dashed; }
+        .company-mini-corporate:hover { border-color: var(--azul); border-style: solid; }
         .company-mini-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
         .company-mini-tag { font-size: 11px; font-weight: 800; color: var(--azul); text-transform: uppercase; letter-spacing: 0.03em; }
         .company-mini-name { font-size: 10px; font-weight: 500; color: var(--carvao); text-transform: none; letter-spacing: normal; opacity: 0.7; }
@@ -18069,6 +17994,12 @@ function GrupoprimaPortal() {
         .empty-note { font-size: 11.5px; color: var(--carvao); line-height: 1.5; margin: 10px 0 0; }
         .homolog-form-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 8px; padding-top: 16px; border-top: 1px solid var(--cinza-frio); position: sticky; bottom: 0; background: #fff; }
         .homolog-status-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
+        .homolog-delete-btn { color: var(--vermelho, #b3261e); border-color: rgba(179,38,30,0.35); }
+        .homolog-delete-btn:hover { border-color: var(--vermelho, #b3261e); }
+        .homolog-delete-confirm { max-width: 420px; text-align: left; margin-top: 10px; }
+        .audit-pagination { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin-top: 14px; padding: 10px 4px 0; font-size: 12.5px; color: var(--carvao); }
+        .audit-pagination-nav { display: flex; align-items: center; gap: 8px; }
+        .audit-pagination-nav .icon-btn-dark:disabled { opacity: 0.35; cursor: default; }
         .homolog-credenciais { display: flex; flex-direction: column; gap: 10px; background: var(--branco-frio); border: 1px solid var(--cinza-frio); border-radius: 10px; padding: 14px 16px; }
         .homolog-credenciais-row { display: flex; justify-content: space-between; align-items: center; gap: 10px; font-size: 13px; }
         .homolog-credenciais-row span:first-child { color: var(--carvao); font-weight: 600; flex-shrink: 0; }
