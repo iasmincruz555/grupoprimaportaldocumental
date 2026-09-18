@@ -6453,6 +6453,13 @@ function CompaniesView({
   // clique extra.
   const [drilled, setDrilled] = useState(false);
   const showEstabelecimentos = drilled || search.trim().length > 0;
+  // Pedido explícito da Iasmin, 2026-09-18: na tela única (cartão da
+  // empresa), "Documentações de abrangência empresarial" deixou de aparecer
+  // como um bloco solto embaixo do cartão — agora só existe DENTRO do
+  // próprio "balão" (cartão) da Grupoprima Logística, atrás deste toggle.
+  // Na lista de bases (drilled) o bloco continua aparecendo embaixo das
+  // filiais, sem mudança — só a tela única foi alterada aqui.
+  const [showCorporateBlock, setShowCorporateBlock] = useState(false);
   // "Documentações de abrangência empresarial" (item 3 do pedido de
   // 2026-09-14): painel separado — NÃO é uma nova empresa/Base, só uma área
   // para organizar documentos cuja abrangência é "Empresa — Grupoprima
@@ -6836,16 +6843,34 @@ function CompaniesView({
           ),
         ),
         /*#__PURE__*/ React.createElement(
-          "button",
-          {
-            className: "chat-toggle empresa-card-unica-btn",
-            onClick: () => setDrilled(true),
-          },
-          "Ver bases ",
-          /*#__PURE__*/ React.createElement(ChevronRight, { size: 14 }),
+          "div",
+          { className: "empresa-card-unica-actions" },
+          /*#__PURE__*/ React.createElement(
+            "button",
+            {
+              className: "chat-toggle empresa-card-unica-btn",
+              onClick: () => setDrilled(true),
+            },
+            "Ver bases ",
+            /*#__PURE__*/ React.createElement(ChevronRight, { size: 14 }),
+          ),
+          /*#__PURE__*/ React.createElement(
+            "button",
+            {
+              type: "button",
+              className: "empresa-card-unica-corp-toggle",
+              "aria-expanded": showCorporateBlock,
+              onClick: () => setShowCorporateBlock((v) => !v),
+            },
+            /*#__PURE__*/ React.createElement(FolderArchive, { size: 14 }),
+            " Documentações de abrangência empresarial",
+            showCorporateBlock
+              ? /*#__PURE__*/ React.createElement(ChevronDown, { size: 14 })
+              : /*#__PURE__*/ React.createElement(ChevronRight, { size: 14 }),
+          ),
         ),
+        showCorporateBlock && corporateSectionElement,
       ),
-      corporateSectionElement,
     );
   }
   return /*#__PURE__*/ React.createElement(
@@ -17612,6 +17637,10 @@ function GrupoprimaPortal() {
         .empresa-card-unica-stats strong { font-size: 22px; font-weight: 900; color: var(--azul); }
         .empresa-card-unica-stats span { font-size: 11px; color: var(--carvao); text-transform: uppercase; letter-spacing: 0.03em; }
         .empresa-card-unica-btn { align-self: flex-start; }
+        .empresa-card-unica-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+        .empresa-card-unica-corp-toggle { display: flex; align-items: center; gap: 7px; background: #fff; color: var(--azul); border: 1.5px solid var(--cinza-frio); border-radius: 10px; padding: 10px 14px; font-weight: 700; font-size: 12.5px; cursor: pointer; transition: border-color 0.15s, background 0.15s; }
+        .empresa-card-unica-corp-toggle:hover { border-color: var(--azul); background: var(--branco-frio); }
+        .empresa-card-unica-corp-toggle[aria-expanded="true"] { border-color: var(--verde); background: rgba(107,254,156,0.08); }
         .table-wrap { background: #fff; border: 1px solid var(--cinza-frio); border-radius: 10px; overflow: hidden; }
         .company-table { width: 100%; border-collapse: collapse; font-size: 13px; }
         .company-table th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--carvao); background: var(--branco-frio); padding: 10px 14px; font-weight: 700; }
