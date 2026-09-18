@@ -1177,6 +1177,28 @@ const STATUS_META = {
     ).length,
   };
 }
+/** baseOnlyCurrentDocs: documentos REAIS (agrupados por família, só a
+ *  versão atual) de abrangência ESPECÍFICA de uma base — nunca inclui
+ *  documentos de abrangência empresarial/corporativa (Contratos Sociais,
+ *  Contabilidade, Seguros gerais, Planos/Procedimentos/Manuais), que têm
+ *  contagem e painel próprios ("Bases → Documentações de abrangência
+ *  empresarial"), pra nunca serem contados uma vez por filial. Pedido
+ *  explícito da Iasmin, 2026-09-18: o card de cada base ("33 doc(s)")
+ *  precisa bater com o que ela vê ao abrir a base (que mostrava "13") — a
+ *  causa era exatamente essa, `totalDocs` somava também os documentos
+ *  corporativos (contados por família, então cada ano de Faturamento/DRE/
+ *  Balanço conta à parte — SEM_SUBSTITUICAO_TIPOS — inflando bastante o
+ *  total), enquanto a página da própria base sempre os excluiu de
+ *  propósito. Mesma função usada tanto no total de cada base (`totalDocs`,
+ *  abaixo) quanto no "Resumo documental" da tela de detalhe da base — nunca
+ *  dois cálculos divergentes do mesmo número. */ function baseOnlyCurrentDocs(
+  docs,
+) {
+  const baseOnly = (docs || []).filter(
+    (d) => d.abrangencia !== "empresa" && d.abrangencia !== "corporativa",
+  );
+  return groupDocumentsByFamily(baseOnly).map((f) => f.versions[0]);
+}
 function useDerived(extraDocuments) {
   return useMemo(() => {
     const extras = extraDocuments || [];
@@ -1191,15 +1213,17 @@ function useDerived(extraDocuments) {
       const docs = sortDocumentsByVersion(todosDocumentos).map((d, i) => ({
         ...d,
         id: d.id || `${c.id}-${d.categoria}-${i}`,
-      })); // totalDocs conta DOCUMENTOS REAIS (famílias/tipos documentais), não
-      // cada versão individual — um Contrato Social com 24 alterações
-      // arquivadas ao longo do tempo é 1 documento com histórico, não 24
-      // documentos (pedido explícito da Iasmin, 2026-09-15: o número exibido
-      // deve bater com o que a pessoa vê ao abrir a base, não com a soma de
-      // todas as versões arquivadas de cada tipo). `docs` continua completo
-      // (todas as versões) para a tela de detalhe/histórico — só a CONTAGEM
-      // muda.
-      const totalDocs = groupDocumentsByFamily(docs).length;
+      })); // totalDocs conta DOCUMENTOS REAIS (famílias/tipos documentais) de
+      // abrangência ESPECÍFICA desta base, não cada versão individual — um
+      // Contrato Social com 24 alterações arquivadas ao longo do tempo é 1
+      // documento com histórico, não 24 documentos (pedido explícito da
+      // Iasmin, 2026-09-15); e nunca inclui documentos de abrangência
+      // empresarial/corporativa, que têm seu próprio total e painel (pedido
+      // explícito da Iasmin, 2026-09-18 — ver `baseOnlyCurrentDocs`). O
+      // número exibido deve bater com o que a pessoa vê ao abrir a base.
+      // `docs` continua completo (todas as versões, todas as abrangências)
+      // para a tela de detalhe/histórico — só a CONTAGEM muda.
+      const totalDocs = baseOnlyCurrentDocs(docs).length;
       const flagged = docs.filter(
         (d) => d.flag && d.flag.severity === "warning",
       ).length;
@@ -4545,63 +4569,255 @@ function answerQuery(query, companies, totals) {
   }
   return `Localizei ${company.tipo} ${company.id} (${company.municipio}/${company.uf}), CNPJ ${company.cnpj}, situação ${company.situacao}. Pergunte por CNPJ, endereço, telefone, e-mail, data de abertura, documentos ou versões — ou peça para eu enviar/baixar documentos.`;
 }
-/** fetchHomologacoesTool / fetchHomologacaoStatsTool: leitura pontual (não
- *  uma assinatura contínua) da coleção "homologacoes" na capability "db",
- *  para o assistente conversar sobre esse módulo com dados reais. Nunca lê
- *  nem expõe `acessoPlataforma` (login/senha) — esse campo fica de fora da
- *  resposta mesmo que exista no documento, por segurança. Quando "db" não
- *  está disponível nesta sessão, retorna `disponivel: false` (nunca inventa
- *  homologações). */ async function fetchHomologacoesTool(filtro) {
+/** fetchHomologacoesRaw: única leitura pontual (não uma assinatura contínua)
+ *  da coleção "homologacoes" na capability "db" — usada por
+ *  fetchHomologacoesTool E fetchHomologacaoStatsTool, nunca duas consultas
+ *  paralelas à mesma coleção. Devolve `null` quando "db" não está disponível
+ *  nesta sessão ou a leitura falhou (nunca inventa homologações); os
+ *  registros crus (sem nenhum corte/limite de exibição) — quem usa decide o
+ *  que fazer com eles (filtrar, contar, ou cortar para uma lista curta). */ async function fetchHomologacoesRaw() {
   const db = await getDb();
-  if (!db) return { disponivel: false, homologacoes: [] };
+  if (!db) return null;
   try {
     const snap = await db
       .collection("homologacoes")
       .orderBy("dataSolicitacao", "desc")
       .limit(200)
       .get();
-    let items = snap.docs.map((d) => d.data());
-    if (filtro?.cliente) {
-      const q = normalize(filtro.cliente);
-      items = items.filter((h) => normalize(h.cliente || "").includes(q));
-    }
-    if (filtro?.status) items = items.filter((h) => h.status === filtro.status);
-    if (filtro?.consultor) {
-      const q = normalize(filtro.consultor);
-      items = items.filter((h) =>
-        normalize(h.consultor?.nome || "").includes(q),
-      );
-    }
-    return {
-      disponivel: true,
-      homologacoes: items
-        .slice(0, 30)
-        .map((h) => ({
-          cliente: h.cliente,
-          consultor: h.consultor?.nome || null,
-          status: h.status,
-          dataSolicitacao: h.dataSolicitacao,
-          prazoRetorno: h.prazoRetorno,
-          dataConclusao: h.dataConclusao || null,
-          bases: h.bases || [],
-          atrasada: computePrazoInfo(h.prazoRetorno, h.status).atrasada,
-          linkHomologacao: h.linkHomologacao || null,
-        })),
-    };
+    return snap.docs.map((d) => d.data());
   } catch {
-    return { disponivel: false, homologacoes: [] };
+    return null;
   }
 }
-async function fetchHomologacaoStatsTool() {
-  const { disponivel, homologacoes } = await fetchHomologacoesTool({});
-  if (!disponivel) return { disponivel: false };
+/** fetchHomologacoesTool / fetchHomologacaoStatsTool: leitura pontual, para
+ *  o assistente conversar sobre esse módulo com dados reais. Nunca lê nem
+ *  expõe `acessoPlataforma` (login/senha) — esse campo fica de fora da
+ *  resposta mesmo que exista no documento, por segurança. Quando "db" não
+ *  está disponível nesta sessão, retorna `disponivel: false` (nunca inventa
+ *  homologações).
+ *  `consultorEmail` (pedido explícito da Iasmin, 2026-09-18): além do nome
+ *  do consultor, expõe também o e-mail de quem solicitou — não é dado
+ *  sensível (diferente de `acessoPlataforma`) e é o que permite ao
+ *  assistente reconhecer com segurança quando quem solicitou é a própria
+ *  Iasmin (ver `primeiroNomeSolicitante`), mesmo que o nome tenha sido salvo
+ *  de forma diferente.
+ *  `totalCorrespondente` (mesmo pedido): total de homologações que batem com
+ *  o filtro ANTES do corte de exibição (as 30 mais recentes) — a lista
+ *  (`homologacoes`) continua curta para não sobrecarregar a conversa, mas a
+ *  contagem real nunca fica presa a esse corte. */ async function fetchHomologacoesTool(
+  filtro,
+) {
+  const items0 = await fetchHomologacoesRaw();
+  if (items0 === null) return { disponivel: false, homologacoes: [] };
+  let items = items0;
+  if (filtro?.cliente) {
+    const q = normalize(filtro.cliente);
+    items = items.filter((h) => normalize(h.cliente || "").includes(q));
+  }
+  if (filtro?.status) items = items.filter((h) => h.status === filtro.status);
+  if (filtro?.consultor) {
+    const q = normalize(filtro.consultor);
+    items = items.filter((h) =>
+      normalize(h.consultor?.nome || "").includes(q),
+    );
+  }
+  return {
+    disponivel: true,
+    totalCorrespondente: items.length,
+    homologacoes: items.slice(0, 30).map((h) => ({
+      cliente: h.cliente,
+      consultor: h.consultor?.nome || null,
+      consultorEmail: h.consultor?.email || null,
+      status: h.status,
+      dataSolicitacao: h.dataSolicitacao,
+      prazoRetorno: h.prazoRetorno,
+      dataConclusao: h.dataConclusao || null,
+      bases: h.bases || [],
+      atrasada: computePrazoInfo(h.prazoRetorno, h.status).atrasada,
+      linkHomologacao: h.linkHomologacao || null,
+    })),
+  };
+}
+/** fetchHomologacaoStatsTool: totais REAIS por status — usa
+ *  `fetchHomologacoesRaw` diretamente (nunca a lista já cortada em 30 de
+ *  `fetchHomologacoesTool`, que antes fazia o total/contagem por status
+ *  ficar errado sempre que existissem mais de 30 homologações registradas —
+ *  bug corrigido em 2026-09-18, junto do pedido da Iasmin de o assistente
+ *  informar corretamente "quantas homologações já foram logadas"). */ async function fetchHomologacaoStatsTool() {
+  const items = await fetchHomologacoesRaw();
+  if (items === null) return { disponivel: false };
   const porStatus = {};
   let atrasadas = 0;
-  homologacoes.forEach((h) => {
+  items.forEach((h) => {
     porStatus[h.status] = (porStatus[h.status] || 0) + 1;
-    if (h.atrasada) atrasadas++;
+    if (computePrazoInfo(h.prazoRetorno, h.status).atrasada) atrasadas++;
   });
-  return { disponivel: true, total: homologacoes.length, porStatus, atrasadas };
+  return { disponivel: true, total: items.length, porStatus, atrasadas };
+}
+/* =========================================================================
+   CONSULTAS SOBRE HOMOLOGAÇÕES NO CHAT — motor de regras (nunca IA)
+   ---------------------------------------------------------------------
+   Pedido explícito da Iasmin, 2026-09-18: o assistente precisa dar
+   informações relevantes sobre o módulo Homologação — quais estão em
+   andamento (com quem solicitou e o cliente), e quantas já foram logadas no
+   total/por status (finalizadas, em andamento, canceladas). Antes, isso só
+   era possível via a capability "sample" (Claude conectado dentro do
+   claude.ai) — e o próprio `trySampleAnswer`, mais abaixo, documenta que fora
+   do claude.ai (GitHub Pages, a hospedagem real deste portal) essa
+   capability SEMPRE retorna indisponível. Ou seja, na prática, perguntas
+   sobre homologação nunca eram respondidas na versão publicada do portal.
+   As funções abaixo resolvem isso com o mesmo padrão já usado no resto do
+   motor de regras (ex.: tryAnalyticQuery): reaproveitam as MESMAS
+   ferramentas de dados reais (fetchHomologacoesTool/fetchHomologacaoStatsTool,
+   via capability "db"), nunca uma fonte paralela, e funcionam sempre que
+   houver armazenamento persistente disponível — com ou sem o Claude
+   conectado.
+   ========================================================================= */
+/** HOMOLOGACAO_STATUS_ALIASES: reconhece os 4 status reais do módulo
+ *  (nova/andamento/concluida/cancelada) a partir da linguagem natural usada
+ *  no chat — nunca inventa um status novo, só sinônimos dos já existentes
+ *  (HOMOLOGACAO_STATUS_META). */ const HOMOLOGACAO_STATUS_ALIASES =
+  [
+    { status: "andamento", match: /andamento|em curso|em progresso/ },
+    { status: "concluida", match: /finalizad|conclu[ií]d/ },
+    { status: "cancelada", match: /cancelad/ },
+    { status: "nova", match: /\bnova[s]?\b/ },
+  ];
+function detectHomologacaoStatus(text) {
+  const t = normalize(text);
+  const hit = HOMOLOGACAO_STATUS_ALIASES.find((s) => s.match.test(t));
+  return hit ? hit.status : null;
+}
+/** HOMOLOGACAO_STATUS_VERBO / HOMOLOGACAO_STATUS_LABEL_PLURAL: frases
+ *  naturais para cada status, no formato pedido pela Iasmin (ex.:
+ *  "Homologação de Iasmin, cliente Nestlé está em andamento."). */ const HOMOLOGACAO_STATUS_VERBO =
+  {
+    nova: "é nova",
+    andamento: "está em andamento",
+    concluida: "está finalizada",
+    cancelada: "foi cancelada",
+  };
+const HOMOLOGACAO_STATUS_LABEL_PLURAL = {
+  nova: "nova(s)",
+  andamento: "em andamento",
+  concluida: "finalizada(s)",
+  cancelada: "cancelada(s)",
+};
+/** primeiroNomeSolicitante: nome curto (só o primeiro nome) de quem
+ *  solicitou a homologação, para o assistente falar de forma natural (ex.:
+ *  "Homologação de Iasmin, cliente Nestlé está em andamento" em vez de
+ *  "Homologação de Iasmin Oliveira...") — pedido explícito da Iasmin,
+ *  2026-09-18. Quando o e-mail de quem solicitou é o dela mesma
+ *  (iasmin.oliveira@grupoprimalog.com.br), resolve sempre para "Iasmin",
+ *  garantindo o resultado pedido por ela mesmo que o nome tenha sido salvo
+ *  de outra forma (ex.: só o e-mail, ou um nome digitado diferente). Nunca
+ *  inventa um nome quando não há consultor registrado. */ function primeiroNomeSolicitante(
+  consultor,
+) {
+  const email = (consultor?.email || "").trim().toLowerCase();
+  if (email === "iasmin.oliveira@grupoprimalog.com.br") return "Iasmin";
+  const nome = (consultor?.nome || "").trim();
+  if (!nome) return "alguém não identificado";
+  return nome.split(/\s+/)[0];
+}
+/** formatHomologacaoLinha: uma linha por homologação, no formato exato
+ *  pedido pela Iasmin (2026-09-18): "Homologação de <primeiro nome>,
+ *  cliente <cliente> <status por extenso>." — nunca omite o cliente nem
+ *  quem solicitou quando esses dados existem no registro real. */ function formatHomologacaoLinha(
+  h,
+) {
+  const nome = primeiroNomeSolicitante({
+    nome: h.consultor,
+    email: h.consultorEmail,
+  });
+  const verbo =
+    HOMOLOGACAO_STATUS_VERBO[h.status] || `está com status "${h.status}"`;
+  return `Homologação de ${nome}, cliente ${h.cliente || "não identificado"} ${verbo}.`;
+}
+/** isHomologacaoQuery: reconhece se a pergunta é sobre o módulo Homologação
+ *  — verificada depois de `isHelpQuestion` (perguntas "como/onde" sobre o
+ *  PROCESSO de criar/enviar uma homologação continuam indo para os
+ *  HELP_TOPICS já existentes, nunca para esta busca de dados reais). */ function isHomologacaoQuery(
+  text,
+) {
+  return /homologa[cç][aã]o|homologa[cç][oõ]es/.test(normalize(text));
+}
+/** tryHomologacaoQuery: motor de regras para perguntas sobre o módulo
+ *  Homologação — pedido explícito da Iasmin, 2026-09-18. Duas formas de
+ *  pergunta, nunca confundidas:
+ *   1) CONTAGEM ("quantas"/"total"): devolve só o número — total geral (com
+ *      o detalhamento por status) quando nenhum status é citado, ou a
+ *      contagem de um status específico (ex.: "quantas homologações estão
+ *      canceladas?").
+ *   2) LISTAGEM (qualquer outra forma, ex.: "quais homologações estão em
+ *      andamento?", "homologações em andamento"): quando um status é
+ *      citado, lista cada homologação daquele status numa linha própria,
+ *      com quem solicitou (só o primeiro nome) e o cliente — nunca inventa
+ *      um nome quando o consultor não está registrado. Sem status citado
+ *      (pergunta genérica, ex.: "como estão as homologações?"), devolve o
+ *      mesmo resumo geral da contagem (evita despejar até 30 linhas sem o
+ *      pedido explícito de um status).
+ *  Sempre a partir de dados 100% reais (fetchHomologacoesTool/
+ *  fetchHomologacaoStatsTool, via capability "db") — nunca inventa uma
+ *  homologação, e avisa claramente quando não há armazenamento persistente
+ *  disponível nesta sessão. */ async function tryHomologacaoQuery(
+  text,
+  pushMessage,
+) {
+  const t = normalize(text);
+  const statusFiltro = detectHomologacaoStatus(text);
+  const wantsCount = /\btotal\b|\bquant[ao]s?\b/.test(t);
+  if (!statusFiltro || wantsCount) {
+    const stats = await fetchHomologacaoStatsTool();
+    if (!stats.disponivel) {
+      pushMessage({
+        role: "assistant",
+        type: "text",
+        text: "Não há armazenamento persistente disponível nesta sessão para consultar as homologações agora.",
+      });
+      return true;
+    }
+    if (statusFiltro) {
+      const count = stats.porStatus[statusFiltro] || 0;
+      pushMessage({
+        role: "assistant",
+        type: "text",
+        text: `${count} homologação(ões) ${HOMOLOGACAO_STATUS_LABEL_PLURAL[statusFiltro]}.`,
+      });
+      return true;
+    }
+    pushMessage({
+      role: "assistant",
+      type: "text",
+      text: `Já foram logadas ${stats.total} homologação(ões) no total: ${stats.porStatus.nova || 0} nova(s), ${stats.porStatus.andamento || 0} em andamento, ${stats.porStatus.concluida || 0} finalizada(s) e ${stats.porStatus.cancelada || 0} cancelada(s).`,
+    });
+    return true;
+  }
+  // Listagem detalhada — só quando um status específico foi citado (ver
+  // comentário acima).
+  const result = await fetchHomologacoesTool({ status: statusFiltro });
+  if (!result.disponivel) {
+    pushMessage({
+      role: "assistant",
+      type: "text",
+      text: "Não há armazenamento persistente disponível nesta sessão para consultar as homologações agora.",
+    });
+    return true;
+  }
+  if (result.homologacoes.length === 0) {
+    pushMessage({
+      role: "assistant",
+      type: "text",
+      text: `Não há homologações ${HOMOLOGACAO_STATUS_LABEL_PLURAL[statusFiltro]} no momento.`,
+    });
+    return true;
+  }
+  pushMessage({
+    role: "assistant",
+    type: "text",
+    text: result.homologacoes.map(formatHomologacaoLinha).join("\n"),
+  });
+  return true;
 }
 /** trySampleAnswer: o "cérebro" conversacional do assistente — quando o
  *  motor de regras acima não reconhece a mensagem (ação concreta como
@@ -7823,7 +8039,14 @@ function CompanyDetailView({
         /*#__PURE__*/ React.createElement(KpiCard, {
           icon: FileText,
           label: "Documentos",
-          value: baseOnlyDocs.length,
+          // Mesmo número mostrado no card da base no Dashboard/Empresas
+          // (`company.totalDocs`, via `baseOnlyCurrentDocs`) — nunca um
+          // cálculo separado aqui. Antes, `baseOnlyDocs.length` contava CADA
+          // versão (inclusive arquivadas) sem agrupar por família, o que
+          // podia divergir do card mesmo depois de excluir os documentos
+          // corporativos (pedido explícito da Iasmin, 2026-09-18: o número
+          // do card precisa bater com o que ela vê ao abrir a base).
+          value: company.totalDocs,
         }),
         /*#__PURE__*/ React.createElement(KpiCard, {
           icon: CheckCircle2,
@@ -9110,6 +9333,9 @@ function ChatDrawer({
         text: answerPortalQuestion(text),
       });
       return;
+    }
+    if (isHomologacaoQuery(text)) {
+      if (await tryHomologacaoQuery(text, pushMessage)) return;
     }
     if (tryAnalyticQuery(text, company)) return;
     const parsed = parseIntent(text);
