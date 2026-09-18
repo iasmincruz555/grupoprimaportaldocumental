@@ -3242,10 +3242,13 @@ async function createDocumentPackageMultiBase(entradasPorBase, opts = {}) {
       match: /certifica[c]ao.*(qualidade|iso)/,
     }, // Ambiental
     {
+      // "LO" e "Licença Operacional" são sinônimos de "Licença Ambiental"
+      // (confirmado pela Iasmin em 2026-09-18) — \blo\b é a forma abreviada
+      // real usada em títulos/nomes de arquivo (ex.: "LO Filial 0004.pdf").
       key: "ambiental",
       label: "Licença Ambiental",
       match:
-        /licen[c]a ambiental|licen[c]a de opera[c]ao|licen[c]a operacional/,
+        /licen[c]a ambiental|licen[c]a de opera[c]ao|licen[c]a operacional|\blo\b/,
     },
     {
       key: "ambiental",
@@ -3253,9 +3256,21 @@ async function createDocumentPackageMultiBase(entradasPorBase, opts = {}) {
       match: /autoriza[c]ao ambiental/,
     },
     {
+      // IBAMA é sempre seu próprio tipo — nunca deve ser confundido com
+      // "Licença Ambiental"/LO nem cair no balde genérico "Documento
+      // Ambiental" (regra explícita da Iasmin em 2026-09-18: "ibama vai ser
+      // sempre ibama"). Por isso este bloco vem ANTES de "Documento
+      // Ambiental" no array (DOC_TYPE_KEYWORDS.find usa o primeiro match) e
+      // "Documento Ambiental", logo abaixo, teve \bibama\b removido do seu
+      // regex para não haver disputa entre os dois tipos.
+      key: "ambiental",
+      label: "IBAMA",
+      match: /\bibama\b/,
+    },
+    {
       key: "ambiental",
       label: "Documento Ambiental",
-      match: /\bibama\b|\bcetesb\b|\bimasul\b|\bambiental\b/,
+      match: /\bcetesb\b|\bimasul\b|\bambiental\b/,
     }, // Contabilidade
     {
       key: "contabilidade",
