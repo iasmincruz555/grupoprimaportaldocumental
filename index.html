@@ -2174,6 +2174,37 @@ function findPortalUser(email) {
     },
   };
 }
+/* Sessão persistida no navegador (pedido explícito da Iasmin, 2026-09-18):
+   antes, um simples F5 derrubava o login (o estado `authenticated` vivia só
+   em memória) e obrigava a refazer a autenticação. Guardamos apenas o
+   objeto `user` já retornado por authenticate() (nome/e-mail/perfil — nunca
+   a senha) no localStorage, e restauramos essa sessão ao carregar a página.
+   Não expira sozinha por tempo: só termina quando a própria usuária clica
+   em "Sair" (ver handleLogout). Leitura/escrita falhando (ex.: modo
+   privado do navegador, quota estourada) nunca quebra o login — o portal
+   simplesmente segue funcionando sem persistir entre recarregamentos. */ const PORTAL_SESSION_STORAGE_KEY =
+  "grupoprima_portal_session";
+function loadPortalSession() {
+  try {
+    const raw = localStorage.getItem(PORTAL_SESSION_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return parsed && parsed.email ? parsed : null;
+  } catch (e) {
+    return null;
+  }
+}
+function savePortalSession(user) {
+  try {
+    if (user) {
+      localStorage.setItem(PORTAL_SESSION_STORAGE_KEY, JSON.stringify(user));
+    } else {
+      localStorage.removeItem(PORTAL_SESSION_STORAGE_KEY);
+    }
+  } catch (e) {
+    // localStorage indisponível — segue sem persistir, sem quebrar o login/logout
+  }
+}
 /* =========================================================================
    REGISTRO DE AÇÕES (Auditoria)
    ---------------------------------------------------------------------
@@ -17269,10 +17300,6 @@ function AuditLogView({ companies }) {
     ),
   );
 }
-/* Tempo de inatividade (ms) até o encerramento automático da sessão —
-   proteção básica de segurança para um portal com documentos societários. */ const SESSION_IDLE_LIMIT_MS =
-  15 * 60 * 1000; // 15 minutos
-const SESSION_IDLE_WARNING_MS = 60 * 1000; // avisa 1 minuto antes
 function GrupoprimaPortal() {
   // confirmedDocs: documentos classificados automaticamente na sincronização
   // ou confirmados manualmente na fila de conferência (capability "db",
@@ -17319,8 +17346,11 @@ function GrupoprimaPortal() {
     return [...base, ...extras];
   }, [confirmedDocs, autoDrive.docs]);
   const data = useDerived(allDocuments);
-  const [authenticated, setAuthenticated] = useState(false);
-  const [currentUser, setCurrentUser] = useState(null);
+  // Sessão restaurada do localStorage (pedido explícito da Iasmin,
+  // 2026-09-18) — se havia um login salvo, a usuária já entra autenticada,
+  // sem precisar refazer o login a cada F5.
+  const [authenticated, setAuthenticated] = useState(() => !!loadPortalSession());
+  const [currentUser, setCurrentUser] = useState(() => loadPortalSession());
   const [view, setView] = useState("dashboard");
   const [selectedId, setSelectedId] = useState(null);
   const [search, setSearch] = useState("");
@@ -17341,8 +17371,6 @@ function GrupoprimaPortal() {
   const [docsModalFilter, setDocsModalFilter] = useState(null);
   const [viewer, setViewer] = useState(null); // { url, doc, company, mimeType } | null — ver ViewerModal
   const toastTimer = useRef(null);
-  const idleWarnTimer = useRef(null);
-  const idleLogoutTimer = useRef(null);
   const selectedCompany = data.companies.find((c) => c.id === selectedId);
   const docsModalCompany =
     data.companies.find((c) => c.id === docsModalCompanyId) || null;
@@ -17360,39 +17388,25 @@ function GrupoprimaPortal() {
   function handleLogin(user) {
     setAuthenticated(true);
     setCurrentUser(user || null);
+    savePortalSession(user || null);
   }
   function handleLogout(reason) {
     logDocumentAction("logout", reason ? { motivo: reason } : {});
     setAuditSessionUser(null);
     setAuthenticated(false);
     setCurrentUser(null);
+    savePortalSession(null);
     setView("dashboard");
     setChatOpen(false);
   }
-  /** Encerramento automático por inatividade: qualquer interação do
-   *  usuário (mouse, teclado, toque, rolagem) reinicia os timers. Avisa
-   *  1 minuto antes de deslogar, para não surpreender no meio de uma
-   *  tarefa. */ useEffect(() => {
-    if (!authenticated) return;
-    function resetIdleTimers() {
-      if (idleWarnTimer.current) clearTimeout(idleWarnTimer.current);
-      if (idleLogoutTimer.current) clearTimeout(idleLogoutTimer.current);
-      idleWarnTimer.current = setTimeout(() => {
-        notify("Sua sessão vai expirar em 1 minuto por inatividade.", "info");
-      }, SESSION_IDLE_LIMIT_MS - SESSION_IDLE_WARNING_MS);
-      idleLogoutTimer.current = setTimeout(() => {
-        handleLogout("inatividade");
-      }, SESSION_IDLE_LIMIT_MS);
-    }
-    const events = ["mousemove", "keydown", "click", "scroll", "touchstart"];
-    events.forEach((ev) => window.addEventListener(ev, resetIdleTimers));
-    resetIdleTimers();
-    return () => {
-      events.forEach((ev) => window.removeEventListener(ev, resetIdleTimers));
-      if (idleWarnTimer.current) clearTimeout(idleWarnTimer.current);
-      if (idleLogoutTimer.current) clearTimeout(idleLogoutTimer.current);
-    }; // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authenticated]);
+  // Restaura o nome da usuária na Auditoria quando a sessão é retomada do
+  // localStorage (um F5, por exemplo) — sem isso, currentSessionUser
+  // (variável de módulo, reiniciada a cada carregamento de página) ficaria
+  // no placeholder genérico mesmo com a usuária já autenticada.
+  useEffect(() => {
+    if (currentUser) setAuditSessionUser(currentUser.nome || currentUser.email || null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   function openCompany(id) {
     setSelectedId(id);
     setView("company");
@@ -17522,8 +17536,8 @@ function GrupoprimaPortal() {
 
         .kpi-new-homolog-btn { display: flex; align-items: center; gap: 8px; background: var(--azul); color: var(--verde); border: none; border-radius: 10px; padding: 14px 16px; font-weight: 700; font-size: 13.5px; cursor: pointer; text-align: left; transition: background 0.15s; }
         .kpi-new-homolog-btn:hover { background: var(--azul-2); }
-        .envio-lote-btn { width: 100%; justify-content: center; background: #fff; color: var(--azul); border: 1.5px solid var(--cinza-frio); margin-bottom: 14px; }
-        .envio-lote-btn:hover { border-color: var(--azul); background: var(--branco-frio); }
+        .envio-lote-btn { width: 100%; justify-content: center; background: #fff; color: var(--azul); border: 2px solid var(--verde); margin-top: 22px; margin-bottom: 14px; box-shadow: 0 0 0 3px rgba(107,254,156,0.12); }
+        .envio-lote-btn:hover { border-color: var(--verde); background: rgba(107,254,156,0.08); }
         .kpi-card-hero .kpi-value { font-size: clamp(28px, 6vw, 38px); }
 
         .alert-list { margin-bottom: 30px; display: flex; flex-direction: column; gap: 8px; }
