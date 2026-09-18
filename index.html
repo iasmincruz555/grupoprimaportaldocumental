@@ -752,7 +752,7 @@ const GRUPOPRIMA_LOGO_WHITE =
    Duas dimensões independentes, nunca criadas/expandidas automaticamente a
    partir de documentos recebidos:
    - BASE_CATEGORIES (7): categorias que vivem DENTRO do painel de cada Base
-     (abrangência "Base específica") — CNPJ, Licenças e Autorizações,
+     (abrangência "Base específica") — CNPJ, Licenças e Alvarás,
      Inscrições, Certidões Negativas, Ambiental, Segurança/Qualidade/
      Compliance, Outros — exatamente nesta ordem.
    - EMPRESA_CATEGORIES (4): categorias que vivem só no painel separado
@@ -772,7 +772,7 @@ const GRUPOPRIMA_LOGO_WHITE =
   { key: "cnpj", label: "CNPJ", icon: FileText, escopo: "base" },
   {
     key: "licencas_autorizacoes",
-    label: "Licenças e Autorizações",
+    label: "Licenças e Alvarás",
     icon: Building2,
     escopo: "base",
   },
@@ -803,6 +803,27 @@ const GRUPOPRIMA_LOGO_WHITE =
       label: "Seguros direcionados a clientes específicos",
     },
   ];
+/* CONTABILIDADE_SUBGRUPOS: agrupamento visual pedido pela Iasmin em
+   2026-09-18 ("em contabilidade, organize parecido com o subtitulo de
+   'seguros para clientes específicos'", separando Balanços Patrimoniais,
+   DREs e Faturamento) — ao contrário de SEGUROS_SUBCATEGORIAS, isto NÃO é
+   um campo próprio gravado no documento (nunca editável em
+   DocumentEditModal/confirmarClassificacao): cada tipo documental de
+   Contabilidade (via DOC_TYPE_KEYWORDS) já distingue sozinho a que grupo
+   pertence, então o agrupamento é só de EXIBIÇÃO, calculado a partir do
+   `tipo` na hora de renderizar. "Demonstração Contábil" e "Balancete"
+   entram no grupo "Balanços Patrimoniais" por serem, na prática, peças do
+   mesmo tipo de demonstração (ela só nomeou os 3 rótulos explicitamente;
+   nenhum tipo real de Contabilidade fica de fora dos 3 grupos hoje). */
+const CONTABILIDADE_SUBGRUPOS = [
+  {
+    key: "balancos_patrimoniais",
+    label: "Balanços Patrimoniais",
+    tipos: ["Balanço", "Demonstração Contábil", "Balancete"],
+  },
+  { key: "dres", label: "DREs", tipos: ["DRE"] },
+  { key: "faturamento", label: "Faturamento", tipos: ["Faturamento"] },
+];
 const EMPRESA_CATEGORIES = [
   {
     key: "contratos_sociais",
@@ -3158,6 +3179,17 @@ async function createDocumentPackageMultiBase(entradasPorBase, opts = {}) {
     },
     {
       key: "licencas_autorizacoes",
+      // ANTT/RNTRC adicionado em 2026-09-18 (pedido explícito da Iasmin:
+      // "ANTT, que pode ser ANTT ou RNTRC") — hoje nenhum documento assim
+      // foi indexado ainda (ver ITENS_SEM_PASTA_NO_PORTAL, que mostra o
+      // aviso "emitido no site da ANTT" quando o item pedido bate com um
+      // destes termos e não é encontrado), mas a Camada 2 já reconhece o
+      // tipo, caso um documento real venha a ser indexado.
+      label: "ANTT",
+      match: /\bantt\b|\brntrc\b/,
+    },
+    {
+      key: "licencas_autorizacoes",
       // "alvara sanitario" adicionado em 2026-09-17 (pedido explícito da
       // Iasmin, a partir da planilha de controle real de documentação):
       // é o mesmo documento que "Licença Sanitária", só um sinônimo comum
@@ -3247,13 +3279,20 @@ async function createDocumentPackageMultiBase(entradasPorBase, opts = {}) {
     },
     {
       key: "seguranca_qualidade_compliance",
+      // "certificado de qualidade" adicionado em 2026-09-18 (pedido
+      // explícito da Iasmin) — sinônimo real usado por clientes/consultores
+      // pro SASSMAQ; não colide com "Certificação de Qualidade" abaixo
+      // (aquele exige o substantivo "certificação", nunca "certificado").
       label: "SASSMAQ",
-      match: /sassmaq/,
+      match: /sassmaq|certificado de qualidade/,
     },
     {
       key: "seguranca_qualidade_compliance",
+      // "gerenciamento de risco" (sem o "programa de" na frente) adicionado
+      // em 2026-09-18 (pedido explícito da Iasmin: "PGR, Programa de
+      // Gerenciamento de risco e também só Gerenciamento de risco").
       label: "PGR",
-      match: /\bpgr\b|programa de gerenciamento de risco/,
+      match: /\bpgr\b|(programa de )?gerenciamento de risco/,
     },
     {
       key: "seguranca_qualidade_compliance",
@@ -6601,6 +6640,25 @@ function CompaniesView({
             const segurosClientes = isSeguros
               ? rows.filter((r) => r.doc.subcategoria === "clientes_especificos")
               : [];
+            const isContabilidade = cat.key === "contabilidade";
+            // Ver CONTABILIDADE_SUBGRUPOS: agrupamento só de exibição, pelo
+            // `tipo` de cada documento — "resto" cobre qualquer tipo que não
+            // esteja nomeado em nenhum dos 3 grupos (hoje nenhum; mantido só
+            // pra nunca esconder um documento silenciosamente).
+            const contabilidadeGrupos = isContabilidade
+              ? CONTABILIDADE_SUBGRUPOS.map((g) => ({
+                  ...g,
+                  rows: rows.filter((r) => g.tipos.includes(r.doc.tipo)),
+                }))
+              : [];
+            const contabilidadeResto = isContabilidade
+              ? rows.filter(
+                  (r) =>
+                    !CONTABILIDADE_SUBGRUPOS.some((g) =>
+                      g.tipos.includes(r.doc.tipo),
+                    ),
+                )
+              : [];
             function renderDocRows(docRows) {
               return groupDocumentsByFamily(docRows.map((r) => r.doc)).map(
                 (family) => {
@@ -6720,7 +6778,7 @@ function CompaniesView({
                       { className: "empty-note" },
                       "Nenhum documento nesta categoria ainda.",
                     ),
-                  !isSeguros && renderDocRows(rows),
+                  !isSeguros && !isContabilidade && renderDocRows(rows),
                   isSeguros && [
                     /*#__PURE__*/ React.createElement(
                       "h4",
@@ -6749,6 +6807,36 @@ function CompaniesView({
                           "Nenhum documento nesta subcategoria ainda.",
                         )
                       : renderDocRows(segurosClientes),
+                  ],
+                  isContabilidade && [
+                    ...contabilidadeGrupos.flatMap((g) => [
+                      /*#__PURE__*/ React.createElement(
+                        "h4",
+                        {
+                          key: `h-${g.key}`,
+                          className: "category-subgroup-title",
+                        },
+                        g.label,
+                      ),
+                      g.rows.length === 0
+                        ? /*#__PURE__*/ React.createElement(
+                            "p",
+                            { key: `e-${g.key}`, className: "empty-note" },
+                            "Nenhum documento nesta subcategoria ainda.",
+                          )
+                        : renderDocRows(g.rows),
+                    ]),
+                    contabilidadeResto.length > 0 &&
+                      /*#__PURE__*/ React.createElement(
+                        "h4",
+                        {
+                          key: "h-resto",
+                          className: "category-subgroup-title",
+                        },
+                        "Outros documentos contábeis",
+                      ),
+                    contabilidadeResto.length > 0 &&
+                      renderDocRows(contabilidadeResto),
                   ],
                 ),
             );
@@ -10720,8 +10808,11 @@ function motivoParaTexto(motivo) {
  *  literal — nunca um chute genérico pra item desconhecido. */ const ITENS_SEM_PASTA_NO_PORTAL =
   [
     {
-      match: /\brntrc\b/i,
-      aviso: "O RNTRC não tem pasta no Portal Documental — costuma ser emitido no site da ANTT.",
+      // Estende pra "ANTT" também em 2026-09-18 (pedido explícito da
+      // Iasmin: "ANTT, que pode ser ANTT ou RNTRC") — mesmo aviso serve
+      // pros dois termos, já que é o mesmo documento/órgão emissor.
+      match: /\brntrc\b|\bantt\b/i,
+      aviso: "O RNTRC (ANTT) não tem pasta no Portal Documental — costuma ser emitido no site da ANTT.",
     },
     {
       match: /\bvisa\b/i,
