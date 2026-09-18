@@ -4069,29 +4069,17 @@ function detectRequestedCategories(text) {
   wantedTypeKeys.forEach((t) => {
     let matches = company.documentos.filter((d) => d.tipo === t.label);
     const semSubstituicao = SEM_SUBSTITUICAO_TIPOS.has(t.label);
-    let notFoundLabel = t.label;
-
-    if (t.label === "AFE" && afeAtividade) {
-      matches = matches.filter((d) => afeDocMatchesAtividade(d, afeAtividade));
-      notFoundLabel = `AFE ${afeAtividade}`;
-    }
-    if (t.label === "Apólice RCTR-C" || t.label === "Apólice RC-DC") {
-      // Mesmo filtro de cliente já usado pro pedido de categoria "seguros"
-      // inteira, abaixo — sem isso, "RCTR-C da Nestlé" (que bate um tipo
-      // específico, não a categoria) ignorava seguroCliente e podia
-      // devolver a apólice geral da empresa junto com a da Nestlé.
-      const clientePrefix = seguroCliente
-        ? `seguro_cliente_${slugifyDocFamily(seguroCliente)}`
-        : null;
-      matches = clientePrefix
-        ? matches.filter((d) => (d.docFamily || "").startsWith(clientePrefix))
-        : matches.filter((d) => (d.subcategoria || "geral") !== "clientes_especificos");
-      if (seguroCliente) notFoundLabel = `${t.label} ${seguroCliente}`;
-    }
-    if (semSubstituicao && anoDocumento) {
-      matches = matches.filter((d) => docTextMentionsAno(d, anoDocumento));
-      notFoundLabel = `${notFoundLabel} ${anoDocumento}`;
-    }
+    // Refinamento de AFE/seguro-cliente/ano — mesma regra reaproveitada pelo
+    // "Envio de documentações em lote" (`matchChecklistItemToCompany`), via
+    // `refinarMatchesPorRegraDeTipoEspecifico`, para nunca haver duas
+    // implementações divergentes da mesma regra entre o chat e o lote.
+    const refinado = refinarMatchesPorRegraDeTipoEspecifico(matches, t.label, {
+      seguroCliente,
+      afeAtividade,
+      anoDocumento,
+    });
+    matches = refinado.matches;
+    let notFoundLabel = `${t.label}${refinado.sufixo}`;
     if (matches.length === 0) {
       notFoundLabels.push(notFoundLabel);
       return;
@@ -4219,6 +4207,51 @@ function currentDocsFor(docsFiltrados) {
   }
   return docsFiltrados.filter((d) => d.flag !== "versao_anterior");
 }
+/** refinarMatchesPorRegraDeTipoEspecifico: mesma regra de refinamento usada
+ *  tanto pela busca do chat (`searchDocuments`) quanto pelo "Envio de
+ *  documentações em lote" (`matchChecklistItemToCompany`) para os tipos que
+ *  precisam de um critério além do `tipo` puro — nunca duas implementações
+ *  divergentes da mesma regra (bug relatado pela Iasmin, 2026-09-18: "Seguro
+ *  RCDC" no envio em lote virava ambíguo contra o RC-DC da Nestlé porque o
+ *  fluxo em lote não aplicava esse mesmo filtro já usado no chat).
+ *   - AFE: restringe à atividade citada (`afeAtividade`), quando houver;
+ *     sem atividade citada, todas as AFEs continuam valendo.
+ *   - Apólice RCTR-C / Apólice RC-DC: sem cliente citado, exclui os
+ *     direcionados a um cliente específico (ex.: Nestlé) — nunca ambíguo
+ *     contra o geral da empresa; com um cliente conhecido citado, inverte e
+ *     traz só os documentos daquele cliente.
+ *   - Qualquer tipo de SEM_SUBSTITUICAO_TIPOS (Faturamento, DRE, Balanço,
+ *     Balancete, Demonstração Contábil): quando um ano é citado (ex.:
+ *     "Faturamento 2025"), filtra só os documentos daquele ano — sem ano
+ *     citado, todos os anos continuam valendo.
+ *  Devolve os matches já refinados e um sufixo para compor o rótulo de "não
+ *  encontrado" (ex.: "Apólice RC-DC Nestlé", "Faturamento 2025"). */
+function refinarMatchesPorRegraDeTipoEspecifico(
+  matches,
+  tipoLabel,
+  { seguroCliente = null, afeAtividade = null, anoDocumento = null } = {},
+) {
+  let out = matches;
+  let sufixo = "";
+  if (tipoLabel === "AFE" && afeAtividade) {
+    out = out.filter((d) => afeDocMatchesAtividade(d, afeAtividade));
+    sufixo += ` ${afeAtividade}`;
+  }
+  if (tipoLabel === "Apólice RCTR-C" || tipoLabel === "Apólice RC-DC") {
+    const clientePrefix = seguroCliente
+      ? `seguro_cliente_${slugifyDocFamily(seguroCliente)}`
+      : null;
+    out = clientePrefix
+      ? out.filter((d) => (d.docFamily || "").startsWith(clientePrefix))
+      : out.filter((d) => (d.subcategoria || "geral") !== "clientes_especificos");
+    if (seguroCliente) sufixo += ` ${seguroCliente}`;
+  }
+  if (SEM_SUBSTITUICAO_TIPOS.has(tipoLabel) && anoDocumento) {
+    out = out.filter((d) => docTextMentionsAno(d, anoDocumento));
+    sufixo += ` ${anoDocumento}`;
+  }
+  return { matches: out, sufixo };
+}
 /** matchChecklistItemToCompany: resolve um item da checklist a documento(s)
  *  real(is) de UMA empresa, em camadas — nunca "chuta" quando há mais de
  *  uma possibilidade real (pedido explícito da Iasmin: "cada documento é
@@ -4242,7 +4275,41 @@ function matchChecklistItemToCompany(item, company) {
   if (!company) return { status: "sem_base", candidatos: [] };
   const docs = company.documentos || [];
   if (item.tipoSugerido) {
-    const brutos = docs.filter((d) => d.tipo === item.tipoSugerido);
+    // "Contrato Social" é o rótulo GENÉRICO que a checklist reconhece a
+    // partir do texto do pedido (ex.: "Contrato social mais recente") — mas
+    // o `tipo` REAL gravado em cada alteração é sempre "Alteração
+    // Contratual" (ver generateDocumentTitle/docTituloExibido), nunca
+    // literalmente "Contrato Social". Filtrar por `d.tipo === "Contrato
+    // Social"` nunca batia com nada (bug relatado pela Iasmin, 2026-09-18:
+    // "Contrato social mais recente" voltava "não encontrado nesta base"
+    // mesmo havendo 23 alterações reais). Aqui, esse rótulo genérico busca
+    // pela CATEGORIA "contratos_sociais" inteira e reaproveita o mesmo
+    // colapso de `currentDocsFor` (abaixo, já usado por
+    // DOWNLOAD_ALL_DOCUMENTS/chat) para devolver só a alteração vigente —
+    // "a análise de qual o contrato social atual", nunca as arquivadas
+    // junto.
+    const brutosIniciais =
+      item.tipoSugerido === "Contrato Social"
+        ? docs.filter((d) => d.categoria === "contratos_sociais")
+        : docs.filter((d) => d.tipo === item.tipoSugerido);
+    // Mesmo refinamento já usado pelo chat (searchDocuments) — sem isso, um
+    // item de checklist com tipo específico reconhecido (ex.: "Seguro
+    // RCDC" → "Apólice RC-DC") batia com TODOS os documentos daquele tipo,
+    // inclusive os direcionados a um cliente específico (ex.: a Apólice
+    // RC-DC da Nestlé), virando "ambíguo" por engano contra o geral da
+    // empresa (bug relatado pela Iasmin, 2026-09-18). Mesma lógica para AFE
+    // por atividade e Contabilidade/Seguros por ano (ex.: "Faturamento
+    // 2025").
+    const seguroCliente = detectSeguroClienteEspecificoNome(
+      item.descricaoOriginal || "",
+    );
+    const afeAtividade = detectAfeAtividade(item.descricaoOriginal || "");
+    const anoDocumento = detectAnoDocumento(item.descricaoOriginal || "");
+    const brutos = refinarMatchesPorRegraDeTipoEspecifico(
+      brutosIniciais,
+      item.tipoSugerido,
+      { seguroCliente, afeAtividade, anoDocumento },
+    ).matches;
     const atuais = currentDocsFor(brutos);
     if (atuais.length === 0) return { status: "nao_localizado", candidatos: [] };
     if (atuais.length === 1)
