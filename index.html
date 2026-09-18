@@ -6901,7 +6901,6 @@ function CompaniesView({
               { style: { textAlign: "right" } },
               "Documentos",
             ),
-            /*#__PURE__*/ React.createElement("th", null, "Status"),
             /*#__PURE__*/ React.createElement("th", null),
           ),
         ),
@@ -6960,18 +6959,6 @@ function CompaniesView({
                 "td",
                 { style: { textAlign: "right" } },
                 c.totalDocs,
-              ),
-              /*#__PURE__*/ React.createElement(
-                "td",
-                null,
-                /*#__PURE__*/ React.createElement(
-                  "span",
-                  {
-                    className:
-                      "status-badge " + companyStatusMeta(c.status).className,
-                  },
-                  c.status,
-                ),
               ),
               /*#__PURE__*/ React.createElement(
                 "td",
