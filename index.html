@@ -3282,8 +3282,15 @@ async function createDocumentPackageMultiBase(entradasPorBase, opts = {}) {
     },
     {
       key: "contabilidade",
-      label: "Declaração de Faturamento",
-      match: /declara[c]ao de faturamento/,
+      // Rótulo generalizado de "Declaração de Faturamento" para
+      // "Faturamento" em 2026-09-18 (pedido explícito da Iasmin, mesma
+      // grafia do exemplo dela: "Faturamento 2025") — os arquivos reais
+      // (ex.: "FATURAMENTO 2024.pdf") nunca dizem literalmente "declaração
+      // de", só "faturamento"; o regex mais amplo continua cobrindo quem
+      // realmente diz "declaração de faturamento" também (a palavra
+      // "faturamento" está contida nela).
+      label: "Faturamento",
+      match: /faturamento/,
     }, // Planos, Procedimentos e Manuais — tipicamente corporativos, mas a
     // abrangência nunca é presumida daqui (regra explícita item 23).
     {
@@ -3481,6 +3488,25 @@ async function createDocumentPackageMultiBase(entradasPorBase, opts = {}) {
     [d.titulo, d.arquivo?.nomeOriginal, d.descricao].filter(Boolean).join(" "),
   );
   return atividade.match.test(texto);
+}
+/** detectAnoDocumento: extrai um ano de 4 dígitos (20xx) citado num pedido do
+ *  CHAT — usado pra diferenciar documentos de tipos em
+ *  SEM_SUBSTITUICAO_TIPOS que se repetem ano a ano sem se substituir (ex.:
+ *  "DRE de 2024", "Balanço de 2023"), pedido explícito da Iasmin,
+ *  2026-09-18. Sem ano citado, fica null — o pedido genérico do tipo (ex.:
+ *  "me manda o DRE") deve trazer TODOS os anos disponíveis, nunca só o mais
+ *  recente (nenhum é "o atual"). */ function detectAnoDocumento(text) {
+  const m = String(text || "").match(/\b20\d{2}\b/);
+  return m ? m[0] : null;
+}
+/** docTextMentionsAno: testa se UM DOCUMENTO (título/nome do arquivo/
+ *  descrição) cita um ano específico — usado junto com detectAnoDocumento
+ *  pra filtrar documentos de Contabilidade (e, quando aplicável, Seguros)
+ *  pelo ano pedido no chat. */ function docTextMentionsAno(d, ano) {
+  const texto = [d.titulo, d.arquivo?.nomeOriginal, d.descricao]
+    .filter(Boolean)
+    .join(" ");
+  return texto.includes(ano);
 }
 /* COMPANY_HISTORICAL_NAMES — evolução histórica REAL da razão social do
  * grupo (Cortez & Andrade → Global Logística → Rodoprima → Gprima, razão
@@ -4010,35 +4036,59 @@ function detectRequestedCategories(text) {
  *  ideia aplicada à AFE — "AFE" sozinho no pedido pega TODAS as AFEs válidas
  *  (nenhuma é "a mais atual", todas continuam valendo); quando uma atividade
  *  conhecida é citada (ex.: "AFE de saneantes"), filtra só a(s) AFE(s)
- *  daquela atividade. */ function searchDocuments({
+ *  daquela atividade. `anoDocumento` (opcional, mesmo pedido): idem para
+ *  Contabilidade — "DRE" sozinho traz todos os anos; "DRE de 2024" filtra só
+ *  aquele ano. Tipos de Seguros sem substituição (Apólice RCTR-C/RC-DC)
+ *  reaproveitam `seguroCliente` aqui também (o mesmo filtro já aplicado
+ *  abaixo pro pedido de categoria "seguros" inteira). */ function searchDocuments({
   company,
   wantedTypeKeys = [],
   wantedCategoryKeys = [],
   seguroCliente = null,
   afeAtividade = null,
+  anoDocumento = null,
 }) {
   const found = [];
   const notFoundLabels = [];
   const seenIds = new Set();
   wantedTypeKeys.forEach((t) => {
     let matches = company.documentos.filter((d) => d.tipo === t.label);
+    const semSubstituicao = SEM_SUBSTITUICAO_TIPOS.has(t.label);
+    let notFoundLabel = t.label;
+
     if (t.label === "AFE" && afeAtividade) {
       matches = matches.filter((d) => afeDocMatchesAtividade(d, afeAtividade));
+      notFoundLabel = `AFE ${afeAtividade}`;
+    }
+    if (t.label === "Apólice RCTR-C" || t.label === "Apólice RC-DC") {
+      // Mesmo filtro de cliente já usado pro pedido de categoria "seguros"
+      // inteira, abaixo — sem isso, "RCTR-C da Nestlé" (que bate um tipo
+      // específico, não a categoria) ignorava seguroCliente e podia
+      // devolver a apólice geral da empresa junto com a da Nestlé.
+      const clientePrefix = seguroCliente
+        ? `seguro_cliente_${slugifyDocFamily(seguroCliente)}`
+        : null;
+      matches = clientePrefix
+        ? matches.filter((d) => (d.docFamily || "").startsWith(clientePrefix))
+        : matches.filter((d) => (d.subcategoria || "geral") !== "clientes_especificos");
+      if (seguroCliente) notFoundLabel = `${t.label} ${seguroCliente}`;
+    }
+    if (semSubstituicao && anoDocumento) {
+      matches = matches.filter((d) => docTextMentionsAno(d, anoDocumento));
+      notFoundLabel = `${notFoundLabel} ${anoDocumento}`;
     }
     if (matches.length === 0) {
-      notFoundLabels.push(
-        t.label === "AFE" && afeAtividade ? `AFE ${afeAtividade}` : t.label,
-      );
+      notFoundLabels.push(notFoundLabel);
       return;
     }
-    if (t.label === "AFE") {
-      // AFE não tem "versão mais atual que substitui as outras" (pedido
-      // explícito da Iasmin, 2026-09-18) — ao contrário dos demais tipos
-      // abaixo, aqui NUNCA se pega só sortDocumentsByVersion(matches)[0]:
-      // traz todas as AFEs que bateram (uma só, se a atividade foi
-      // reconhecida e é única; todas as cadastradas, se o pedido foi
-      // genérico) — nunca "escolhe a melhor" como se uma arquivasse a
-      // outra.
+    if (semSubstituicao) {
+      // Ver SEM_SUBSTITUICAO_TIPOS: nenhum documento desses tipos "arquiva"
+      // outro do mesmo tipo (pedido explícito da Iasmin, 2026-09-18) — ao
+      // contrário dos demais tipos abaixo, aqui NUNCA se pega só
+      // sortDocumentsByVersion(matches)[0]: traz todos os que bateram nos
+      // filtros acima (um só, quando atividade/cliente/ano restringiu a
+      // exatamente um; todos, se o pedido foi genérico) — nunca "escolhe o
+      // mais recente" como se um substituísse o outro.
       matches.forEach((d) => {
         if (!seenIds.has(d.id)) {
           found.push(d);
@@ -4538,7 +4588,7 @@ async function fetchHomologacaoStatsTool() {
           tipo_ou_categoria: {
             type: "string",
             description:
-              "tipo ou categoria do documento pedido, nas mesmas palavras usadas pela pessoa (ex.: 'CNPJ', 'contrato social', 'alvará', 'apólice de seguro'). Importante para seguros: RCTR-C e RC-DC são apólices diferentes — mantenha a sigla se a pessoa a citou. Um pedido genérico de 'seguro' (sem citar cliente) traz só as apólices gerais da empresa; se a pessoa citar um cliente específico (ex.: 'seguro da Nestlé'), inclua o nome do cliente neste campo, nunca omita.",
+              "tipo ou categoria do documento pedido, nas mesmas palavras usadas pela pessoa (ex.: 'CNPJ', 'contrato social', 'alvará', 'apólice de seguro'). Importante para seguros: RCTR-C e RC-DC são apólices diferentes — mantenha a sigla se a pessoa a citou. Um pedido genérico de 'seguro' (sem citar cliente) traz só as apólices gerais da empresa; se a pessoa citar um cliente específico (ex.: 'seguro da Nestlé'), inclua o nome do cliente neste campo, nunca omita. Importante para AFE: cada uma autoriza uma atividade diferente (ex.: 'AFE de saneantes' x 'AFE de cosméticos') — mantenha a atividade citada, nunca omita. Importante para Contabilidade (DRE, Balanço, Balancete, Faturamento): documentos de anos diferentes NÃO se substituem — se a pessoa citar um ano (ex.: 'DRE de 2024'), mantenha o ano neste campo; um pedido sem ano (ex.: 'me manda o DRE') deve trazer todos os anos disponíveis, nunca só o mais recente.",
           },
         },
         required: ["referencia", "tipo_ou_categoria"],
@@ -4863,6 +4913,11 @@ function parseIntent(text) {
   // de produto ("AFE de saneantes" x "AFE de cosméticos") — sem atividade
   // citada, fica null (searchDocuments então traz todas as AFEs válidas).
   const afeAtividade = detectAfeAtividade(text);
+  // anoDocumento (pedido explícito da Iasmin, 2026-09-18): mesma lógica,
+  // pra diferenciar documentos de Contabilidade por ano ("DRE de 2024" x
+  // "DRE de 2025") — sem ano citado, fica null (searchDocuments então traz
+  // todos os anos disponíveis daquele tipo).
+  const anoDocumento = detectAnoDocumento(text);
   const wantsAll =
     /toda\s?a?\s?documentacao|todos os documentos|documentacao completa|tudo que tiver|documentacao dessa (filial|empresa)/.test(
       t,
@@ -4884,34 +4939,34 @@ function parseIntent(text) {
       t,
     );
   if (wantsAll)
-    return { intent: "DOWNLOAD_ALL_DOCUMENTS", types, categories, seguroCliente, afeAtividade };
+    return { intent: "DOWNLOAD_ALL_DOCUMENTS", types, categories, seguroCliente, afeAtividade, anoDocumento };
   if (wantsList)
-    return { intent: "LIST_COMPANY_DOCUMENTS", types, categories, seguroCliente, afeAtividade };
+    return { intent: "LIST_COMPANY_DOCUMENTS", types, categories, seguroCliente, afeAtividade, anoDocumento };
   if (wantsCategories)
-    return { intent: "LIST_DOCUMENT_CATEGORIES", types, categories, seguroCliente, afeAtividade };
+    return { intent: "LIST_DOCUMENT_CATEGORIES", types, categories, seguroCliente, afeAtividade, anoDocumento };
   if (
     (types.length > 1 ||
       categories.length > 1 ||
       types.length + categories.length > 1) &&
     (wantsDownload || wantsZip || wantsFind)
   ) {
-    return { intent: "DOWNLOAD_MULTIPLE_DOCUMENTS", types, categories, seguroCliente, afeAtividade };
+    return { intent: "DOWNLOAD_MULTIPLE_DOCUMENTS", types, categories, seguroCliente, afeAtividade, anoDocumento };
   }
   if (
     (types.length === 1 || categories.length === 1) &&
     wantsFind &&
     !wantsDownload
   ) {
-    return { intent: "SEARCH_DOCUMENT", types, categories, seguroCliente, afeAtividade };
+    return { intent: "SEARCH_DOCUMENT", types, categories, seguroCliente, afeAtividade, anoDocumento };
   }
   if (
     (types.length === 1 || categories.length === 1) &&
     (wantsDownload || wantsZip)
   ) {
-    return { intent: "DOWNLOAD_DOCUMENT", types, categories, seguroCliente, afeAtividade };
+    return { intent: "DOWNLOAD_DOCUMENT", types, categories, seguroCliente, afeAtividade, anoDocumento };
   }
   if (wantsZip && types.length === 0 && categories.length === 0) {
-    return { intent: "CREATE_ZIP", types, categories, seguroCliente, afeAtividade };
+    return { intent: "CREATE_ZIP", types, categories, seguroCliente, afeAtividade, anoDocumento };
   } // Integração do Assistente Documental ao Portal (regra explícita, seção 3
   // do prompt): quando a pessoa cita um tipo/categoria específico junto de
   // uma empresa, mesmo sem verbo de ação ("CNPJ de PE", "alvará de MG"), a
@@ -4919,9 +4974,9 @@ function parseIntent(text) {
   // texto. Só não entrega quando a pergunta pede claramente o valor
   // (wantsValueOnly).
   if (!wantsValueOnly && (types.length === 1 || categories.length === 1)) {
-    return { intent: "DOWNLOAD_DOCUMENT", types, categories, seguroCliente, afeAtividade };
+    return { intent: "DOWNLOAD_DOCUMENT", types, categories, seguroCliente, afeAtividade, anoDocumento };
   }
-  return { intent: "SEARCH_INFO", types, categories, seguroCliente, afeAtividade };
+  return { intent: "SEARCH_INFO", types, categories, seguroCliente, afeAtividade, anoDocumento };
 }
 /* =========================================================================
    COMPONENTES DE APOIO
@@ -8515,6 +8570,7 @@ function ChatDrawer({
       wantedCategoryKeys: parsed.categories,
       seguroCliente: parsed.seguroCliente || null,
       afeAtividade: parsed.afeAtividade || null,
+      anoDocumento: parsed.anoDocumento || null,
     });
     if (found.length === 0) {
       pushMessage({
@@ -9083,9 +9139,12 @@ function ChatDrawer({
         // afeAtividade: mesma regra, mas pra diferenciar AFE por
         // atividade/categoria de produto (ex.: "AFE de saneantes").
         const afeAtividade = detectAfeAtividade(tipoOuCategoria);
+        // anoDocumento: mesma regra, mas pra diferenciar Contabilidade por
+        // ano (ex.: "DRE de 2024").
+        const anoDocumento = detectAnoDocumento(tipoOuCategoria);
         const result = handleDocumentIntent(
           tipoOuCategoria,
-          { types: wantedTypes, categories: wantedCategories, seguroCliente, afeAtividade },
+          { types: wantedTypes, categories: wantedCategories, seguroCliente, afeAtividade, anoDocumento },
           c,
         );
         const found = result?.found || [];
@@ -14409,10 +14468,42 @@ const TIPO_LABEL_TO_DOC_FAMILY = {
   // compartilhada; sem isso, uma virava "versão arquivada" da outra na
   // timeline, e um pedido de "seguro" no chat só entregava a mais recente
   // das duas, descartando a outra silenciosamente.
-  "Apólice RCTR-C": "apolice_rctrc",
-  "Apólice RC-DC": "apolice_rcdc",
+  // "Apólice RCTR-C"/"Apólice RC-DC" removidas deste mapa em 2026-09-18
+  // (pedido explícito da Iasmin: a mesma lógica de "um arquivo mais novo não
+  // substitui o outro" — já aplicada à AFE — também vale pra seguros; cada
+  // vigência/endosso, de qualquer ano, continua sendo prova de cobertura
+  // válida, nunca "arquivada" pela renovação seguinte). Ver
+  // SEM_SUBSTITUICAO_TIPOS, abaixo, e o caso especial em docFamilyFor.
   "Plano de Contingência": "plano_contingencia",
 };
+/** SEM_SUBSTITUICAO_TIPOS: tipos documentais em que um documento mais novo
+ *  NUNCA substitui/arquiva um mais antigo do mesmo tipo — cada um continua
+ *  sendo um registro oficial próprio e independente, ao contrário do
+ *  Contrato Social (que tem uma linha de versões de verdade). Pedido
+ *  explícito da Iasmin, 2026-09-18:
+ *  - AFE: cada uma autoriza uma atividade/categoria de produto diferente
+ *    ("as AFEs não há nenhuma arquivada, ambas são importantes").
+ *  - Contabilidade (Balanço, DRE, Demonstração Contábil, Balancete,
+ *    Faturamento): cada ano/período é um registro contábil oficial daquele
+ *    ano — o DRE de 2025 não "substitui" o de 2024.
+ *  - Seguros (Apólice RCTR-C, Apólice RC-DC), tanto gerais da empresa
+ *    quanto de cliente específico (ex.: Nestlé): "essa lógica... também se
+ *    aplica nesse caso dos arquivos de seguro" — cada vigência/endosso
+ *    continua sendo prova de cobertura válida daquele período.
+ *  Cada documento com um desses tipos ganha SUA PRÓPRIA família (nunca
+ *  compartilhada com outro do mesmo tipo), usando um identificador estável
+ *  do documento (`opts.docKey`, normalmente id/driveFileId) — mesmo
+ *  mecanismo já usado antes só pra AFE, agora generalizado. */ const SEM_SUBSTITUICAO_TIPOS =
+  new Set([
+    "AFE",
+    "Balanço",
+    "DRE",
+    "Demonstração Contábil",
+    "Balancete",
+    "Faturamento",
+    "Apólice RCTR-C",
+    "Apólice RC-DC",
+  ]);
 function slugifyDocFamily(label) {
   return normalize(label)
     .replace(/[^a-z0-9]+/g, "_")
@@ -14444,26 +14535,29 @@ function slugifyDocFamily(label) {
   opts = {},
 ) {
   if (categoria === "contratos_sociais") return "societaria_contrato_social";
+  const semSubstituicao = SEM_SUBSTITUICAO_TIPOS.has(tipoFinal);
+  const chaveDoc = opts.docKey ? slugifyDocFamily(String(opts.docKey)) : null;
   if (categoria === "seguros" && opts.subcategoria === "clientes_especificos") {
     const cliente = opts.clienteNome
       ? slugifyDocFamily(opts.clienteNome)
       : "nao_identificado";
-    return `seguro_cliente_${cliente}__${slugifyDocFamily(tipoFinal)}`;
+    const base = `seguro_cliente_${cliente}__${slugifyDocFamily(tipoFinal)}`;
+    // RCTR-C/RC-DC de cliente específico também estão em
+    // SEM_SUBSTITUICAO_TIPOS: sem o docKey aqui, o endosso deste ano
+    // continuaria "arquivando" o do ano passado DENTRO da família do
+    // cliente — exatamente o bug que essa mudança corrige.
+    return semSubstituicao ? `${base}__${chaveDoc || "sem_identificador"}` : base;
   }
   if (tipoFinal === "Tipo específico não identificado")
     return `${categoria || "sem_categoria"}__tipo_nao_identificado`;
-  // AFE (Autorização de Funcionamento Especial): cada uma autoriza uma
-  // atividade/categoria de produto diferente (ex.: "Cosméticos, Correlatos"
-  // vs "Saneantes") e todas continuam válidas ao mesmo tempo — não existe
-  // "AFE mais recente que substitui a anterior" como no Contrato Social
-  // (pedido explícito da Iasmin, 2026-09-18). Por isso cada AFE é a sua
-  // PRÓPRIA família (nunca compartilhada com outra AFE), usando um
-  // identificador estável do documento (id/driveFileId) quando disponível;
-  // sem isso, cai no nome do arquivo/título como último recurso — nunca
-  // funde duas AFEs diferentes na mesma linha de "atual vs arquivada".
-  if (tipoFinal === "AFE") {
-    const chave = opts.docKey ? slugifyDocFamily(String(opts.docKey)) : null;
-    return `afe__${chave || "sem_identificador"}`;
+  // Ver SEM_SUBSTITUICAO_TIPOS, acima: cada documento desses tipos é a sua
+  // PRÓPRIA família (nunca compartilhada com outro do mesmo tipo), usando
+  // um identificador estável do documento (id/driveFileId) quando
+  // disponível; sem isso, cai no nome do arquivo/título como último
+  // recurso — nunca funde dois documentos diferentes na mesma linha de
+  // "atual vs arquivada".
+  if (semSubstituicao) {
+    return `${slugifyDocFamily(tipoFinal)}__${chaveDoc || "sem_identificador"}`;
   }
   return TIPO_LABEL_TO_DOC_FAMILY[tipoFinal] || slugifyDocFamily(tipoFinal);
 }
@@ -14524,9 +14618,9 @@ function buildConfirmedDocRecord({
   const docFamily = docFamilyFor(categoria, tipoFinal, {
     subcategoria,
     clienteNome: clienteEspecificoNome,
-    // docKey: só usado pelo caso especial "AFE" (cada AFE é sua própria
-    // família) — mesma lógica do id final do registro, pra ficar estável
-    // entre reprocessamentos do mesmo arquivo.
+    // docKey: usado pelos tipos de SEM_SUBSTITUICAO_TIPOS (cada documento é
+    // sua própria família) — mesma lógica do id final do registro, pra
+    // ficar estável entre reprocessamentos do mesmo arquivo.
     docKey: id || driveFileId || nomeOriginal || null,
   }); // abrangência/estabelecimentos relacionados: quando não vierem explícitos
   // (ex.: chamadores antigos que só conheciam "companyId"), deriva de
