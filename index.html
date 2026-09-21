@@ -3096,7 +3096,20 @@ async function createDocumentPackageMultiBase(entradasPorBase, opts = {}) {
     {
       key: "fiscal_tributaria",
       label: "CND Federal",
-      match: /certid\w* negativ\w*.*(federal|receita federal)|cnd federal/,
+      // "regularidade fiscal"/"certidao conjunta" incorporados em 2026-09-21
+      // (bug real relatado pela Iasmin: "CND Federal está escrita, temos
+      // disponível e não foi enviada") — os 2 documentos federais REAIS já
+      // indexados (Matriz e Filial 0007) foram confirmados com o tipo
+      // "Certidão de Regularidade Fiscal", nunca literalmente "CND Federal"
+      // — é o MESMO documento (a certidão conjunta PGFN/Receita Federal de
+      // débitos federais), só com o nome que a própria Receita usa no
+      // arquivo. Antes disso existia uma entrada SEPARADA com esse rótulo
+      // (removida abaixo) — mantinha os dois como tipos diferentes por
+      // engano, então um pedido por "CND Federal" nunca batia com o
+      // documento real (que a classificação automática rotulava só como
+      // "Certidão de Regularidade Fiscal"). Consolidado num único tipo aqui.
+      match:
+        /certid\w* negativ\w*.*(federal|receita federal)|cnd federal|regularidade fiscal|certidao conjunta/,
     },
     {
       key: "fiscal_tributaria",
@@ -3132,11 +3145,7 @@ async function createDocumentPackageMultiBase(entradasPorBase, opts = {}) {
       match:
         /\bcndt\b|certid\w* negativ\w* de debitos trabalhistas|certid\w* negativ\w*.*trabalhista/,
     },
-    {
-      key: "fiscal_tributaria",
-      label: "Certidão de Regularidade Fiscal",
-      match: /regularidade fiscal|certidao conjunta/,
-    }, // Licenças e Autorizações — tipo específico dentro da categoria (regra
+    // Licenças e Autorizações — tipo específico dentro da categoria (regra
     // explícita: AFE não é uma categoria própria, é um TIPO aqui dentro).
     {
       key: "licencas_autorizacoes",
@@ -4352,10 +4361,26 @@ function matchChecklistItemToCompany(item, company) {
     // DOWNLOAD_ALL_DOCUMENTS/chat) para devolver só a alteração vigente —
     // "a análise de qual o contrato social atual", nunca as arquivadas
     // junto.
+    // "Cartão CNPJ" tem o mesmo problema estrutural do Contrato Social
+    // acima, mas por um motivo diferente: não é um rótulo genérico —  é o
+    // rótulo certo — só que documentos REAIS de CNPJ às vezes chegam ao
+    // banco com o campo `tipo` fora do padrão ("CNPJ" sem "Cartão", ou até
+    // "Tipo específico não identificado" quando a classificação automática
+    // não reconheceu o arquivo) mesmo já estando na categoria certa
+    // (`categoria: "cnpj"`) — bug relatado pela Iasmin, 2026-09-21: "Faltando
+    // o CNPJ da Matriz! [...] Mas reconhecendo os demais cnpjs corretamente"
+    // (Matriz/Filial 0010/Filial 0011 nunca tiveram o tipo reconhecido;
+    // Filial 0005/0007 foram salvos como só "CNPJ"). Também corrigido nos
+    // registros já salvos (ver editarDocumentoConfirmado), mas esta busca por
+    // categoria é a rede de segurança pra qualquer novo CNPJ sincronizado que
+    // a classificação automática não rotule perfeitamente — mesmo raciocínio
+    // do Contrato Social: nunca depender só do `tipo` bater exatamente.
     const brutosIniciais =
       item.tipoSugerido === "Contrato Social"
         ? docs.filter((d) => d.categoria === "contratos_sociais")
-        : docs.filter((d) => d.tipo === item.tipoSugerido);
+        : item.tipoSugerido === "Cartão CNPJ"
+          ? docs.filter((d) => d.categoria === "cnpj" || d.tipo === "Cartão CNPJ")
+          : docs.filter((d) => d.tipo === item.tipoSugerido);
     // Mesmo refinamento já usado pelo chat (searchDocuments) — sem isso, um
     // item de checklist com tipo específico reconhecido (ex.: "Seguro
     // RCDC" → "Apólice RC-DC") batia com TODOS os documentos daquele tipo,
