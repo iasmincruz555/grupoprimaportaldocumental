@@ -2433,6 +2433,16 @@ async function excluirDocumentoConfirmado(doc, company, { onNotify } = {}) {
     onNotify?.("Não foi possível excluir este documento agora.", "error");
     return false;
   }
+  // Registra o driveFileId como excluído (pedido explícito da Iasmin,
+  // 2026-09-21: nunca mais reaparecer numa sincronização futura) — só
+  // quando o documento veio de um arquivo real do Drive; um registro
+  // manual sem arquivo associado não tem o que bloquear numa sync futura.
+  // Best-effort: nunca impede a exclusão em si de ter acontecido.
+  if (doc.arquivo?.driveFileId) {
+    await registrarArquivoExcluido(db, doc.arquivo.driveFileId, {
+      tituloOriginal: doc.arquivo?.nomeOriginal || doc.titulo || null,
+    });
+  }
   const categoriaLabel =
     CATEGORIES.find((c) => c.key === doc.categoria)?.label ||
     doc.categoria ||
@@ -3008,6 +3018,27 @@ async function createDocumentPackageMultiBase(entradasPorBase, opts = {}) {
 }
 /* ---- Intenção + busca de documentos (preservado) ---- */ const DOC_TYPE_KEYWORDS =
   [
+    {
+      // IBAMA é sempre seu próprio tipo — nunca deve ser confundido com
+      // "Licença Ambiental"/LO nem cair no balde genérico "Documento
+      // Ambiental" (regra explícita da Iasmin em 2026-09-18: "ibama vai ser
+      // sempre ibama"). Movido para o TOPO do array em 2026-09-21 (era só
+      // "antes de Documento Ambiental", mas ficava DEPOIS de "Licenças e
+      // Autorizações" — inclusive "Alvará de Localização e Funcionamento",
+      // cujo regex `alvar[a]` é bem solto): um certificado real do IBAMA
+      // que mencione "alvará" em qualquer trecho do conteúdo (ex.: exigindo
+      // alvará municipal em conjunto) fazia `docTypeLabelFor` (primeiro
+      // match do array) devolver "Alvará de Localização e Funcionamento"
+      // em vez de IBAMA — bug relatado pela Iasmin ao incluir um novo
+      // certificado real via Drive. `\bibama\b` é específico o bastante
+      // (a palavra "ibama" não aparece por acaso em nenhum outro tipo de
+      // documento da Grupoprima) para sempre vencer qualquer outro match,
+      // então fica em primeiro lugar, sem risco de "roubar" um tipo que
+      // deveria genuinamente vencer.
+      key: "ambiental",
+      label: "IBAMA",
+      match: /\bibama\b/,
+    },
     // "\bcnpj\b" sozinho foi removido daqui de propósito: quase todo
     // documento brasileiro imprime um CNPJ em algum lugar (é só um dado do
     // documento, não o TIPO dele) — usar a palavra isolada como sinal fazia
@@ -3257,18 +3288,6 @@ async function createDocumentPackageMultiBase(entradasPorBase, opts = {}) {
       key: "ambiental",
       label: "Autorização Ambiental",
       match: /autoriza[c]ao ambiental/,
-    },
-    {
-      // IBAMA é sempre seu próprio tipo — nunca deve ser confundido com
-      // "Licença Ambiental"/LO nem cair no balde genérico "Documento
-      // Ambiental" (regra explícita da Iasmin em 2026-09-18: "ibama vai ser
-      // sempre ibama"). Por isso este bloco vem ANTES de "Documento
-      // Ambiental" no array (DOC_TYPE_KEYWORDS.find usa o primeiro match) e
-      // "Documento Ambiental", logo abaixo, teve \bibama\b removido do seu
-      // regex para não haver disputa entre os dois tipos.
-      key: "ambiental",
-      label: "IBAMA",
-      match: /\bibama\b/,
     },
     {
       key: "ambiental",
@@ -14614,8 +14633,20 @@ async function analyzeContent(bytes, mimeType, companies) {
       filenameEv.categoriaAmbigua); // Tipo específico do documento (ex.: "Cartão CNPJ", "AVCB / Segurança e
   // Qualidade") — mesma hierarquia de confiança da categoria: conteúdo lido
   // vale mais que o nome do arquivo; a pasta não indica tipo específico.
+  // Exceção deliberada: IBAMA (regra explícita, "ibama vai ser sempre
+  // ibama") nunca é sobreposto por um tipo diferente vindo da outra fonte —
+  // nem um "Alvará"/"Documento Ambiental" pego por acaso no conteúdo
+  // (menção incidental, ex.: "válido em conjunto com o alvará municipal")
+  // sobre um nome de arquivo que já dizia IBAMA, nem o inverso (conteúdo
+  // legível confirma IBAMA mas o nome do arquivo, por algum motivo, não).
+  // Bug relatado pela Iasmin, 2026-09-21: um certificado real do IBAMA foi
+  // classificado como "Alvará Matriz" na sincronização.
   const tipoSugerido =
-    contentLegivel && contentEv.tipo ? contentEv.tipo : filenameEv.tipo || null; // ABRANGÊNCIA — dimensão independente da categoria (item 8/23: nunca
+    filenameEv.tipo === "IBAMA" || contentEv.tipo === "IBAMA"
+      ? "IBAMA"
+      : contentLegivel && contentEv.tipo
+        ? contentEv.tipo
+        : filenameEv.tipo || null; // ABRANGÊNCIA — dimensão independente da categoria (item 8/23: nunca
   // presumida pela categoria do documento). Determinada só por evidência
   // REAL no próprio documento: (1) mais de um CNPJ oficial citado no
   // conteúdo/nome → "Múltiplos estabelecimentos", documento único
@@ -15435,6 +15466,43 @@ function isArquivoDeHomologacao(arquivo) {
     ARQUIVOS_HOMOLOGACAO_FOLDER_NAME,
   );
 }
+/** ARQUIVOS_EXCLUIDOS_COLLECTION: registra, pelo `driveFileId`, todo
+ *  documento que a usuária excluiu manualmente do portal
+ *  (`excluirDocumentoConfirmado`) — pedido explícito da Iasmin, 2026-09-21:
+ *  "após um arquivo ser excluído, ele não deve retornar mais quando houver
+ *  sincronização com o drive". Tratamento igual ao dado a "Enviados pelo
+ *  Portal" acima: um arquivo aqui nunca reentra na classificação, na fila
+ *  de conferência nem nos totais — nem pela sincronização administrativa
+ *  (SyncView), nem pela reclassificação automática que roda sozinha em
+ *  TODA carga de página (`useAutoSyncedDriveDocuments`, que sem isso
+ *  faria o arquivo reaparecer na hora, sem nem precisar de uma
+ *  sincronização explícita, já que ela reclassifica tudo do zero e só
+ *  ignora o que já está em `documentos_confirmados` — de onde o arquivo
+ *  acabou de ser removido). O arquivo original no Google Drive nunca é
+ *  alterado — só para de ser indexado aqui; excluir de novo um arquivo já
+ *  presente nesta lista é inofensivo (mesmo id, sobrescreve). */
+const ARQUIVOS_EXCLUIDOS_COLLECTION = "arquivos_excluidos_drive";
+async function registrarArquivoExcluido(db, driveFileId, info = {}) {
+  if (!db || !driveFileId) return;
+  await db
+    .collection(ARQUIVOS_EXCLUIDOS_COLLECTION)
+    .doc(driveFileId)
+    .set({
+      driveFileId,
+      excluidoEm: new Date().toISOString(),
+      tituloOriginal: info.tituloOriginal || null,
+    })
+    .catch(() => {});
+}
+async function fetchArquivosExcluidosIds(db) {
+  if (!db) return new Set();
+  try {
+    const snap = await db.collection(ARQUIVOS_EXCLUIDOS_COLLECTION).get();
+    return new Set(snap.docs.map((d) => d.id));
+  } catch (e) {
+    return new Set();
+  }
+}
 /** listDriveFilesViaProxy: lista, via o backend próprio, todos os
  *  documentos reais dentro da pasta oficial (já navegando recursivamente
  *  por dentro das subpastas — ver GET /files no backend) — no MESMO
@@ -15604,6 +15672,15 @@ function SyncView({ companies, onNotify }) {
       // alternativo via crawlDriveFolder/mcp, que não passa por aquela
       // função e por isso não seria filtrado sem esta linha.
       files = (files || []).filter((f) => !isArquivoDeHomologacao(f));
+      // Arquivos excluídos manualmente do portal (ver
+      // ARQUIVOS_EXCLUIDOS_COLLECTION/registrarArquivoExcluido) nunca
+      // voltam numa sincronização futura — pedido explícito da Iasmin,
+      // 2026-09-21.
+      const dbParaExclusoes = await getDb().catch(() => null);
+      const excluidosIds = await fetchArquivosExcluidosIds(dbParaExclusoes);
+      if (excluidosIds.size > 0) {
+        files = files.filter((f) => !excluidosIds.has(f.id));
+      }
       const novos = files.filter((f) => !knownDriveIds.has(f.id)); // atualizados: arquivo já indexado antes, mas cujo `modifiedTime` real no
       // Drive é diferente do salvo na última sincronização — sinal real de
       // conteúdo alterado (nunca presumido só pela passagem do tempo).
@@ -16053,7 +16130,17 @@ function SyncView({ companies, onNotify }) {
     let cancelled = false;
     (async () => {
       try {
-        const arquivos = await listDriveFilesViaProxy();
+        let arquivos = await listDriveFilesViaProxy();
+        // Mesma exclusão permanente aplicada em SyncView — sem isso, um
+        // documento excluído manualmente do portal reaparecia aqui
+        // sozinho, em TODA carga de página, mesmo sem uma sincronização
+        // administrativa explícita (pedido explícito da Iasmin,
+        // 2026-09-21).
+        const dbParaExclusoes = await getDb().catch(() => null);
+        const excluidosIds = await fetchArquivosExcluidosIds(dbParaExclusoes);
+        if (excluidosIds.size > 0) {
+          arquivos = arquivos.filter((f) => !excluidosIds.has(f.id));
+        }
         const proxyMcp = createProxyMcpAdapter();
         const docs = [];
         for (const f of arquivos) {
