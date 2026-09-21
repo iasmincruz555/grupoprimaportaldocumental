@@ -3154,20 +3154,27 @@ async function createDocumentPackageMultiBase(entradasPorBase, opts = {}) {
       // ser ANTT ou RNTRC" continua valendo pros dois) — o extrato normal
       // e a variante "Relação de Frotas", pedido explícito, 2026-09-21:
       // "Caso peça só ANTT/RNTRC você manda esse normal. Caso fale
-      // relação de frotas, ou 'com frotas' você manda o outro." Por isso
-      // esta entrada (a variante mais específica) vem ANTES da genérica
-      // "ANTT/RNTRC" logo abaixo, e a genérica exclui explicitamente
-      // qualquer menção a "frota(s)" no próprio match — nunca as duas
-      // batendo juntas na mesma pergunta/linha.
+      // relação de frotas, ou 'com frotas' você manda o outro." Ajustado no
+      // mesmo dia após a Iasmin reportar que "Extrato do RNTRC com relação
+      // de veículos" ainda caía no tipo normal: "veículos"/"placas" são
+      // sinônimos reais que ela usa pra pedir a mesma variante (a lista de
+      // veículos/frota vinculada ao RNTRC), não só a palavra "frota(s)"
+      // literal — por isso o match cobre as duas palavras. Esta entrada (a
+      // variante mais específica) vem ANTES da genérica "ANTT/RNTRC" logo
+      // abaixo, e a genérica exclui explicitamente qualquer menção a
+      // "frota(s)"/"veiculo(s)" no próprio match — nunca as duas batendo
+      // juntas na mesma pergunta/linha.
       key: "planos_procedimentos_manuais",
       label: "ANTT/RNTRC - Relação de Frotas",
-      match: /relacao de frotas?|com frotas?/,
+      match: /relacao de (frotas?|veiculos?|placas?)|com (frotas?|veiculos?)/,
     },
     {
       key: "planos_procedimentos_manuais",
       label: "ANTT/RNTRC",
       match: {
-        test: (t) => /\bantt\b|\brntrc\b/.test(t) && !/\bfrotas?\b/.test(t),
+        test: (t) =>
+          /\bantt\b|\brntrc\b/.test(t) &&
+          !/\bfrotas?\b|\bveiculos?\b|relacao de placas?/.test(t),
       },
     },
     {
@@ -5276,6 +5283,18 @@ function gerarChecklistViaRegras(texto) {
     // detectSeguroClienteEspecificoNome/detectAfeAtividade/
     // detectAnoDocumento e extraKeywordsFromChecklistItem continuam
     // funcionando normalmente).
+    // valePorTodasAsBases: calculado por LINHA (nunca pelo texto colado
+    // inteiro) — pedido explícito da Iasmin, 2026-09-21, corrigindo um bug
+    // real: antes, `textoPedeTodasAsBases` era checado contra o TEXTO
+    // INTEIRO colado no modal, então uma única linha dizendo "Cartão CNPJ
+    // da matriz e filiais" fazia TODOS os itens (contrato social, seguros,
+    // certidões etc.) serem buscados em TODAS as bases cadastradas, não só
+    // o CNPJ. "é necessário perceber qual a única documentação que irá
+    // contemplar todas as bases. O restante seguirá sendo da única
+    // alternativa marcada." — por isso essa flag fica presa ao ITEM (linha)
+    // que de fato menciona "matriz e filiais"/"todas as bases", nunca
+    // contamina os demais itens da mesma checklist.
+    const linhaValeTodasAsBases = textoPedeTodasAsBases(linha);
     if (tipos.length > 1) {
       tipos.forEach((tipo, j) => {
         itens.push({
@@ -5284,6 +5303,7 @@ function gerarChecklistViaRegras(texto) {
           tipoSugerido: tipo.label,
           categoriaSugerida: null,
           editadoManualmente: false,
+          valePorTodasAsBases: linhaValeTodasAsBases,
         });
       });
       return;
@@ -5311,6 +5331,7 @@ function gerarChecklistViaRegras(texto) {
       tipoSugerido,
       categoriaSugerida,
       editadoManualmente: false,
+      valePorTodasAsBases: linhaValeTodasAsBases,
     });
   });
   return { ok: true, itens };
@@ -11139,29 +11160,7 @@ function EnvioDocumentacaoLoteModal({ companies, onNotify, onView, onClose }) {
       }
       texto = extraido.text;
     }
-    // Regra explícita da Iasmin, 2026-09-21: quando o texto pede o
-    // documento "da matriz e filiais" (ou frase equivalente, ex.
-    // "documentação de filial e outras bases"), não é necessário marcar
-    // manualmente cada checkbox de base/filial — o pedido em si já deixa
-    // claro que é para TODAS as bases cadastradas. Some com o que já
-    // estava marcado (nunca reduz uma seleção manual mais específica que
-    // já cobrisse todas de qualquer forma).
-    let baseIdsEfetivo = baseIds;
-    if (textoPedeTodasAsBases(texto) && companies.length > 0) {
-      const todasAsBaseIds = companies.map((c) => c.id);
-      const jaEraTodas =
-        baseIds.length === todasAsBaseIds.length &&
-        todasAsBaseIds.every((id) => baseIds.includes(id));
-      baseIdsEfetivo = todasAsBaseIds;
-      setBaseIds(todasAsBaseIds);
-      if (!jaEraTodas && onNotify) {
-        onNotify(
-          "Identifiquei um pedido para \"matriz e filiais\" — selecionei todas as bases automaticamente.",
-          "info",
-        );
-      }
-    }
-    if (baseIdsEfetivo.length === 0) {
+    if (baseIds.length === 0) {
       setProcessando(false);
       setErro("Selecione ao menos uma filial/base.");
       return;
@@ -11171,6 +11170,25 @@ function EnvioDocumentacaoLoteModal({ companies, onNotify, onView, onClose }) {
     if (!gerado.ok) {
       setErro(motivoParaTexto(gerado.motivo));
       return;
+    }
+    // Regra explícita da Iasmin, 2026-09-21: cada ITEM que mencionar "matriz
+    // e filiais" (ou frase equivalente) na própria linha vale para TODAS as
+    // bases cadastradas automaticamente — sem exigir marcar cada checkbox
+    // manualmente — mas SÓ aquele item; os demais itens da mesma checklist
+    // continuam restritos à(s) base(s) realmente marcada(s) ("a única
+    // alternativa marcada"). Isso é aplicado mais abaixo em `planosPorBase`;
+    // aqui só avisa o que foi identificado, sem mexer na seleção de bases.
+    const itensParaTodasAsBases = gerado.itens.filter(
+      (it) => it.valePorTodasAsBases,
+    );
+    if (itensParaTodasAsBases.length > 0 && companies.length > 0 && onNotify) {
+      const rotulos = itensParaTodasAsBases
+        .map((it) => it.tipoSugerido || it.descricaoOriginal)
+        .join(", ");
+      onNotify(
+        `Identifiquei que ${itensParaTodasAsBases.length === 1 ? "este item vale" : "estes itens valem"} para todas as bases cadastradas: ${rotulos}. Os demais itens seguem restritos à(s) base(s) marcada(s).`,
+        "info",
+      );
     }
     setItens(gerado.itens);
   }
@@ -11182,11 +11200,30 @@ function EnvioDocumentacaoLoteModal({ companies, onNotify, onView, onClose }) {
       ),
     [itens],
   );
+  // basesExtrasTodasAsBases: bases que a Iasmin NÃO marcou manualmente, mas
+  // que precisam entrar mesmo assim porque pelo menos um item da checklist
+  // (ex.: "Cartão CNPJ da matriz e filiais") vale para todas as bases
+  // cadastradas. Cada uma dessas bases extras só recebe ESSES itens — nunca
+  // o restante da checklist, que segue restrito à(s) base(s) realmente
+  // marcada(s) (pedido explícito da Iasmin, 2026-09-21: "o restante seguirá
+  // sendo da única alternativa marcada").
+  const basesExtrasTodasAsBases = useMemo(() => {
+    if (!itens || !itens.some((it) => it.valePorTodasAsBases)) return [];
+    return companies.filter((c) => !baseIds.includes(c.id));
+  }, [itens, companies, baseIds]);
   const planosPorBase = useMemo(() => {
     if (!itens) return [];
-    return basesSelecionadas.map((company) => {
+    const marcadasManualmente = basesSelecionadas.map((company) => ({
+      company,
+      itensDaBase: itens,
+    }));
+    const extras = basesExtrasTodasAsBases.map((company) => ({
+      company,
+      itensDaBase: itens.filter((it) => it.valePorTodasAsBases),
+    }));
+    return [...marcadasManualmente, ...extras].map(({ company, itensDaBase }) => {
       const plano = buildResumoZipPlan(
-        itens,
+        itensDaBase,
         company,
         exclusoesPorBase[company.id] || {},
       );
@@ -11198,7 +11235,7 @@ function EnvioDocumentacaoLoteModal({ companies, onNotify, onView, onClose }) {
         ),
       };
     });
-  }, [itens, basesSelecionadas, exclusoesPorBase]);
+  }, [itens, basesSelecionadas, basesExtrasTodasAsBases, exclusoesPorBase]);
   function alternarExclusao(companyId, itemId, docId) {
     const chave = `${itemId}:${docId}`;
     setExclusoesPorBase((prev) => ({
@@ -11253,7 +11290,7 @@ function EnvioDocumentacaoLoteModal({ companies, onNotify, onView, onClose }) {
     }
     logDocumentAction("gerou_zip_envio_lote", {
       cliente: clienteNome,
-      bases: basesSelecionadas.map((c) => baseLabel(c)),
+      bases: planosPorBase.map((p) => baseLabel(p.company)),
       quantidade: pkg.files.length,
     });
     setGerandoZip(false);
