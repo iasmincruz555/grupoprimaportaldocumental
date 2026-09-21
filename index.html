@@ -17814,13 +17814,25 @@ function GrupoprimaPortal() {
           width: 220px; flex-shrink: 0; background: var(--azul); color: var(--branco-frio);
           padding: 22px 16px; display: flex; flex-direction: column; gap: 4px;
         }
+        .sidebar-logo-btn {
+          display: block;
+          width: 100%;
+          background: transparent;
+          border: none;
+          padding: 0;
+          margin: 0 0 26px;
+          cursor: pointer;
+          border-radius: 8px;
+          opacity: 1;
+          transition: opacity 0.15s;
+        }
+        .sidebar-logo-btn:hover, .sidebar-logo-btn:focus-visible { opacity: 0.85; }
         .sidebar-logo {
           display: block;
           width: 100%;
           height: auto;
           max-height: 40px;
           object-fit: contain;
-          margin: 0 0 26px;
           padding: 0 4px;
         }
         .nav-item {
@@ -18562,11 +18574,20 @@ function GrupoprimaPortal() {
     /*#__PURE__*/ React.createElement(
       "aside",
       { className: "sidebar" + (mobileNavOpen ? " open" : "") },
-      /*#__PURE__*/ React.createElement("img", {
-        className: "sidebar-logo",
-        src: GRUPOPRIMA_LOGO_WHITE,
-        alt: "Grupoprima",
-      }),
+      /*#__PURE__*/ React.createElement(
+        "button",
+        {
+          type: "button",
+          className: "sidebar-logo-btn",
+          onClick: () => goTo("dashboard"),
+          "aria-label": "Ir para o Dashboard",
+        },
+        /*#__PURE__*/ React.createElement("img", {
+          className: "sidebar-logo",
+          src: GRUPOPRIMA_LOGO_WHITE,
+          alt: "Grupoprima",
+        }),
+      ),
       /*#__PURE__*/ React.createElement(
         "button",
         {
