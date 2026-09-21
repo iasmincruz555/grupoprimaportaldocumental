@@ -2818,7 +2818,17 @@ function crc32(bytes) {
   return (crc ^ 0xffffffff) >>> 0;
 }
 /** createZip: empacota { name, data(Uint8Array) }[] em um Blob .zip válido
- *  (método "store" — sem compressão, sem dependências externas). */ function createZip(
+ *  (método "store" — sem compressão, sem dependências externas).
+ *
+ *  UTF8_FLAG (bit 11 do "general purpose bit flag", 0x0800 — "Language
+ *  encoding flag (EFS)" na especificação do ZIP): marca que o nome do
+ *  arquivo está em UTF-8. Sem esse bit ligado, o Explorer do Windows (que
+ *  não assume UTF-8 por padrão) decodifica o nome usando a codepage OEM do
+ *  sistema, e todo caractere acentuado vira lixo — bug relatado pela
+ *  Iasmin, 2026-09-21, com nomes como "Ap│lice" em vez de "Apólice" depois
+ *  de extrair o ZIP. `encoder.encode` já gera os bytes em UTF-8; faltava só
+ *  avisar isso no cabeçalho. */ const ZIP_UTF8_FLAG = 0x0800;
+function createZip(
   files,
 ) {
   const encoder = new TextEncoder();
@@ -2845,7 +2855,7 @@ function crc32(bytes) {
     const dv = new DataView(local.buffer);
     dv.setUint32(0, 0x04034b50, true);
     dv.setUint16(4, 20, true);
-    dv.setUint16(6, 0, true);
+    dv.setUint16(6, ZIP_UTF8_FLAG, true);
     dv.setUint16(8, 0, true);
     dv.setUint16(10, dosTime, true);
     dv.setUint16(12, dosDate, true);
@@ -2863,7 +2873,7 @@ function crc32(bytes) {
     dvc.setUint32(0, 0x02014b50, true);
     dvc.setUint16(4, 20, true);
     dvc.setUint16(6, 20, true);
-    dvc.setUint16(8, 0, true);
+    dvc.setUint16(8, ZIP_UTF8_FLAG, true);
     dvc.setUint16(10, 0, true);
     dvc.setUint16(12, dosTime, true);
     dvc.setUint16(14, dosDate, true);
@@ -2987,7 +2997,16 @@ async function createDocumentPackageMultiBase(entradasPorBase, opts = {}) {
       try {
         const { bytes, filename } = await fetchDocumentFile(num.doc);
         const ext = (filename || "").split(".").pop();
-        const nomeBase = `${num.numero} - ${docTituloExibido(num.doc)}`;
+        // sanitizeClientNameForFilename (não safeFileSlug — esse tira
+        // acento/vira snake_case, ilegível pra um nome de arquivo que a
+        // Iasmin vai ler) tira só os caracteres realmente inválidos em
+        // nome de arquivo/pasta. Essencial aqui porque alguns rótulos de
+        // tipo documental têm "/" no nome (ex.: "ANTT/RNTRC", "ANTT/RNTRC -
+        // Relação de Frotas") — sem isso, o "/" virava separador de pasta
+        // DENTRO do zip, e o item aparecia como uma PASTA vazia em vez de
+        // um arquivo (bug relatado pela Iasmin, 2026-09-21, com prints do
+        // Explorer mostrando "1 - ANTT" e "8 - ANTT" como pastas).
+        const nomeBase = `${num.numero} - ${sanitizeClientNameForFilename(docTituloExibido(num.doc))}`;
         const nomeArquivo =
           ext && ext !== filename ? `${nomeBase}.${ext}` : nomeBase;
         files.push({
