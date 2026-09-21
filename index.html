@@ -3055,25 +3055,51 @@ async function createDocumentPackageMultiBase(entradasPorBase, opts = {}) {
     { key: "societaria", label: "Ata Societária", match: /\bata\b/ },
     { key: "societaria", label: "Procuração", match: /procura[c]ao/ }, // Fiscal e Tributária — CNDs por esfera, sempre com o nome específico
     // (nunca genérico "certidão"), para não colidir com outras certidões.
+    // "certid\w* negativ\w*" (em vez do antigo "certidao negativa" fixo, só
+    // singular) corrigido em 2026-09-21: uma checklist real da Iasmin
+    // ("Certidões negativas federal, estadual, municipal...", no PLURAL)
+    // não batia com NENHUM destes tipos — "certidao" normalizado
+    // (certid-a-o) não é substring de "certidoes" normalizado
+    // (certid-o-e-s), então o prefixo exigia singular exato. \w* aceita as
+    // duas formas sem exigir lista de variações.
     {
       key: "fiscal_tributaria",
       label: "CND Federal",
-      match: /certidao negativa.*(federal|receita federal)|cnd federal/,
+      match: /certid\w* negativ\w*.*(federal|receita federal)|cnd federal/,
     },
     {
       key: "fiscal_tributaria",
       label: "CND Estadual",
-      match: /certidao negativa.*estadual|cnd estadual|\bsefaz\b|\bicms\b/,
+      match: /certid\w* negativ\w*.*estadual|cnd estadual|\bsefaz\b|\bicms\b/,
     },
     {
       key: "fiscal_tributaria",
       label: "CND Municipal",
-      match: /certidao negativa.*municipal|cnd municipal/,
+      match: /certid\w* negativ\w*.*municipal|cnd municipal/,
+    },
+    {
+      // CND FGTS adicionada em 2026-09-21 (pedido explícito da Iasmin: uma
+      // checklist listando "certidões negativas federal, estadual,
+      // municipal, FGTS e trabalhista" pede 5 documentos diferentes, não
+      // um só) — hoje nenhum documento real desse tipo foi indexado ainda
+      // no portal (mesmo caso de ANTT/RNTRC, ver comentário abaixo), então
+      // um pedido por ela aparece corretamente como "não localizado" até
+      // que um real venha a ser sincronizado. Nome oficial mais comum é
+      // "Certificado de Regularidade do FGTS" (CRF), daí o segundo ramo.
+      key: "fiscal_tributaria",
+      label: "CND FGTS",
+      match:
+        /certid\w* negativ\w*.*fgts|cnd (do )?fgts|regularidade.*fgts|\bcrf\b.*fgts|fgts.*\bcrf\b/,
     },
     {
       key: "fiscal_tributaria",
       label: "CNDT",
-      match: /\bcndt\b|certidao negativa de debitos trabalhistas/,
+      // "certid\w* negativ\w*.*trabalhista" adicionado em 2026-09-21: mesma
+      // correção de plural acima, mas também cobre a forma curta usada em
+      // listas ("...municipal, FGTS e trabalhista"), que antes só era
+      // reconhecida citando a sigla "CNDT" ou o nome completo por extenso.
+      match:
+        /\bcndt\b|certid\w* negativ\w* de debitos trabalhistas|certid\w* negativ\w*.*trabalhista/,
     },
     {
       key: "fiscal_tributaria",
@@ -3167,7 +3193,12 @@ async function createDocumentPackageMultiBase(entradasPorBase, opts = {}) {
     {
       key: "seguros",
       label: "Apólice RC-DC",
-      match: /rc[\s-]?dc/,
+      // "f?" opcional adicionado em 2026-09-21 (pedido explícito da Iasmin,
+      // citando "Apólices RCTR-C e RCF-DC vigentes"): "RCF-DC" é a mesma
+      // apólice de RC-DC (Responsabilidade Civil — Desvio de Carga), só
+      // escrita com o "F" extra — sem isso, essa variação de grafia caía
+      // como "tipo não identificado".
+      match: /rc[\s-]?f?[\s-]?dc/,
     },
     { key: "seguros", label: "Apólice", match: /ap[oó]lice/ },
     { key: "seguros", label: "Endosso", match: /endosso/ },
@@ -5118,6 +5149,65 @@ const HOMOLOGACAO_STATUS_LABEL_PLURAL = {
  *  os dois campos ficam null — a tela mostra isso como "necessita de
  *  conferência" (pendência explícita), nunca uma adivinhação. Síncrona:
  *  sem chamada de rede, sem timeout, sem resposta cortada para recuperar. */
+/** textoPedeTodasAsBases: reconhece frases como "matriz e filiais",
+ *  "matriz e todas as bases" ou "filial e outras bases" — pedido explícito
+ *  da Iasmin, 2026-09-21, pro "Envio de documentações em lote": quando o
+ *  texto colado/enviado já diz isso, o item correspondente é entendido
+ *  como valendo para TODAS as bases cadastradas, sem exigir que cada
+ *  checkbox de filial seja marcado manualmente na tela. Escopo
+ *  propositalmente amplo o bastante para cobrir variações comuns de
+ *  redação, mas sempre exigindo as DUAS pontas (uma menção a
+ *  matriz/filial(is) e uma menção a "todas"/"outras bases") — nunca uma
+ *  palavra solta como "filial" sozinha, que não implica "todas". */
+function textoPedeTodasAsBases(texto) {
+  const t = normalize(texto || "");
+  return /matriz\s+e\s+filiai?s|filiai?s\s+e\s+matriz|matriz\s+e\s+(todas\s+as\s+)?bases|filial\s+e\s+outras\s+bases|(filial|filiais)\s+e\s+(as\s+)?outras\s+bases|todas\s+as\s+(filiais|bases)/.test(
+    t,
+  );
+}
+/** CHECKLIST_MULTI_TIPO_GRUPOS: só DENTRO destes grupos explicitamente
+ *  cadastrados é que uma linha batendo em vários tipos vira mais de um
+ *  item de checklist (pedido explícito da Iasmin, 2026-09-21: "certidões
+ *  negativas federal, estadual, municipal, FGTS e trabalhista" são 5
+ *  documentos numa linha só; "apólices RCTR-C e RCF-DC" são 2). Uma linha
+ *  pode bater em vários tipos por pura ambiguidade de regex sem que isso
+ *  signifique um segundo documento de verdade (ex.: "Alvará Sanitário"
+ *  também bate no padrão genérico `alvar[a]` de "Alvará de Localização e
+ *  Funcionamento"; "Licença Ambiental" também bate no genérico
+ *  `\bambiental\b` de "Documento Ambiental") — para esses casos (fora dos
+ *  grupos abaixo), `tiposDistintosParaChecklist` preserva o comportamento
+ *  de sempre desta função (só o primeiro/mais específico vira item, nunca
+ *  um item extra por ambiguidade). Uma whitelist explícita aqui é
+ *  proposital: mais seguro que tentar adivinhar "genérico x específico"
+ *  por heurística — nunca quebra uma linha que já funcionava. */
+const CHECKLIST_MULTI_TIPO_GRUPOS = [
+  new Set(["CND Federal", "CND Estadual", "CND Municipal", "CND FGTS", "CNDT"]),
+  new Set(["Apólice RCTR-C", "Apólice RC-DC"]),
+];
+const CHECKLIST_MULTI_TIPO_LABELS = new Set(
+  CHECKLIST_MULTI_TIPO_GRUPOS.flatMap((g) => [...g]),
+);
+/** tiposDistintosParaChecklist: decide quantos itens de checklist uma linha
+ *  realmente representa — usado só pela geração de checklist em lote (ver
+ *  `gerarChecklistViaRegras` abaixo). Quando 2+ dos tipos batidos na linha
+ *  pertencem a um dos CHECKLIST_MULTI_TIPO_GRUPOS acima, devolve todos
+ *  eles (um item por tipo); caso contrário devolve só o primeiro
+ *  (`detectRequestedTypes` já retorna na ordem de prioridade do array —
+ *  o mesmo `tipos[0]` que esta função sempre usou). */
+function tiposDistintosParaChecklist(linha) {
+  const tipos = detectRequestedTypes(linha);
+  if (tipos.length <= 1) return tipos;
+  const doGrupo = tipos.filter((t) => CHECKLIST_MULTI_TIPO_LABELS.has(t.label));
+  if (doGrupo.length <= 1) return tipos.length > 0 ? [tipos[0]] : [];
+  const vistos = new Set();
+  const out = [];
+  for (const tipo of doGrupo) {
+    if (vistos.has(tipo.label)) continue;
+    vistos.add(tipo.label);
+    out.push(tipo);
+  }
+  return out;
+}
 function gerarChecklistViaRegras(texto) {
   const linhasBrutas = (texto || "")
     .split(/\r?\n/)
@@ -5135,8 +5225,34 @@ function gerarChecklistViaRegras(texto) {
     (l) => !/^[:#=\-_\s]*$/.test(l) && l.length <= 300,
   );
   if (linhas.length === 0) return { ok: false, motivo: "nenhum_item_identificado" };
-  const itens = linhas.map((linha, i) => {
-    const tipos = detectRequestedTypes(linha);
+  const itens = [];
+  linhas.forEach((linha, i) => {
+    const tipos = tiposDistintosParaChecklist(linha);
+    // Uma linha só pode pedir várias documentações distintas de uma vez
+    // (pedido explícito da Iasmin, 2026-09-21: "Certidões negativas
+    // federal, estadual, municipal, FGTS e trabalhista" são 5 documentos
+    // diferentes numa fila só, não um; o mesmo vale para "Apólices RCTR-C
+    // e RCF-DC vigentes", que são 2) — antes só o primeiro tipo
+    // reconhecido (`tipos[0]`) virava item, descartando os demais em
+    // silêncio. Cada tipo detectado agora vira seu PRÓPRIO item, com o
+    // rótulo do tipo prefixado na descrição só para diferenciar itens
+    // "não localizados" que, de outra forma, mostrariam a mesma linha
+    // repetida (a linha original continua preservada por inteiro, então
+    // detectSeguroClienteEspecificoNome/detectAfeAtividade/
+    // detectAnoDocumento e extraKeywordsFromChecklistItem continuam
+    // funcionando normalmente).
+    if (tipos.length > 1) {
+      tipos.forEach((tipo, j) => {
+        itens.push({
+          id: `chk-${Date.now().toString(36)}-${i}-${j}-${Math.random().toString(36).slice(2, 6)}`,
+          descricaoOriginal: `${tipo.label} — ${linha}`.slice(0, 300),
+          tipoSugerido: tipo.label,
+          categoriaSugerida: null,
+          editadoManualmente: false,
+        });
+      });
+      return;
+    }
     const tipoSugerido = tipos.length > 0 ? tipos[0].label : null;
     let categoriaSugerida = null;
     if (!tipoSugerido) {
@@ -5154,13 +5270,13 @@ function gerarChecklistViaRegras(texto) {
         if (catExata) categoriaSugerida = catExata.key;
       }
     }
-    return {
+    itens.push({
       id: `chk-${Date.now().toString(36)}-${i}-${Math.random().toString(36).slice(2, 6)}`,
       descricaoOriginal: linha.slice(0, 300),
       tipoSugerido,
       categoriaSugerida,
       editadoManualmente: false,
-    };
+    });
   });
   return { ok: true, itens };
 }
@@ -10958,10 +11074,6 @@ function EnvioDocumentacaoLoteModal({ companies, onNotify, onView, onClose }) {
       setErro("Informe o nome do cliente.");
       return;
     }
-    if (baseIds.length === 0) {
-      setErro("Selecione ao menos uma filial/base.");
-      return;
-    }
     let texto = "";
     if (modoEntrada === "texto") {
       texto = textoChecklist;
@@ -10991,6 +11103,33 @@ function EnvioDocumentacaoLoteModal({ companies, onNotify, onView, onClose }) {
         return;
       }
       texto = extraido.text;
+    }
+    // Regra explícita da Iasmin, 2026-09-21: quando o texto pede o
+    // documento "da matriz e filiais" (ou frase equivalente, ex.
+    // "documentação de filial e outras bases"), não é necessário marcar
+    // manualmente cada checkbox de base/filial — o pedido em si já deixa
+    // claro que é para TODAS as bases cadastradas. Some com o que já
+    // estava marcado (nunca reduz uma seleção manual mais específica que
+    // já cobrisse todas de qualquer forma).
+    let baseIdsEfetivo = baseIds;
+    if (textoPedeTodasAsBases(texto) && companies.length > 0) {
+      const todasAsBaseIds = companies.map((c) => c.id);
+      const jaEraTodas =
+        baseIds.length === todasAsBaseIds.length &&
+        todasAsBaseIds.every((id) => baseIds.includes(id));
+      baseIdsEfetivo = todasAsBaseIds;
+      setBaseIds(todasAsBaseIds);
+      if (!jaEraTodas && onNotify) {
+        onNotify(
+          "Identifiquei um pedido para \"matriz e filiais\" — selecionei todas as bases automaticamente.",
+          "info",
+        );
+      }
+    }
+    if (baseIdsEfetivo.length === 0) {
+      setProcessando(false);
+      setErro("Selecione ao menos uma filial/base.");
+      return;
     }
     const gerado = gerarChecklistViaRegras(texto);
     setProcessando(false);
@@ -15270,13 +15409,41 @@ function buildConfirmedDocRecord({
     },
   };
 }
+/** ARQUIVOS_HOMOLOGACAO_FOLDER_NAME: nome exato da pasta do Drive alimentada
+ *  pelo fluxo de Homologação ("Enviados pelo Portal") — pedido explícito da
+ *  Iasmin, 2026-09-21 ("ignorar completamente qualquer arquivo que esteja
+ *  dentro da pasta 'Enviados pelo Portal' — nem entra na classificação, nem
+ *  na fila de conferência, nem conta nos totais da tela de sincronização.
+ *  Meu entendimento é que essa pasta é alimentada pelo fluxo de Homologação
+ *  e nada dali deveria nunca aparecer nas documentações das bases. APENAS
+ *  nas homologações, estando disponível pra visualização e para download
+ *  conforme já funciona atualmente"). Verificado ao vivo em produção antes
+ *  desta mudança: os únicos arquivos hoje presos em "ignorado" na fila de
+ *  conferência (nunca reconhecidos como já conhecidos em nenhuma sync
+ *  futura) são exatamente estes — cada novo sync reprocessava-os do zero
+ *  para sempre. A própria pasta às vezes também aparece listada como se
+ *  fosse um arquivo (lacuna de filtragem no backend) — por isso o segundo
+ *  critério abaixo, pelo título exato. Esse filtro NUNCA afeta o módulo de
+ *  Homologações em si (fetchHomologAnexoFile/tryPersistUploadedFile etc.
+ *  usam outra fonte de dados, não `listDriveFilesViaProxy`) — visualização
+ *  e download por lá continuam funcionando exatamente como hoje. */
+const ARQUIVOS_HOMOLOGACAO_FOLDER_NAME = "Enviados pelo Portal";
+function isArquivoDeHomologacao(arquivo) {
+  if (!arquivo) return false;
+  if (arquivo.title === ARQUIVOS_HOMOLOGACAO_FOLDER_NAME) return true;
+  return (arquivo.folderPath || []).includes(
+    ARQUIVOS_HOMOLOGACAO_FOLDER_NAME,
+  );
+}
 /** listDriveFilesViaProxy: lista, via o backend próprio, todos os
  *  documentos reais dentro da pasta oficial (já navegando recursivamente
  *  por dentro das subpastas — ver GET /files no backend) — no MESMO
  *  formato que `crawlDriveFolder` produz a partir do conector "mcp"
  *  (`id`,`title`,`mimeType`,`fileSize`,`folderPath`), para que
  *  `classificarArquivo` e o restante da pipeline funcionem sem distinguir
- *  a origem dos dados. */ async function listDriveFilesViaProxy() {
+ *  a origem dos dados. Arquivos (e a própria pasta, quando listada por
+ *  engano como arquivo) dentro de "Enviados pelo Portal" nunca entram aqui
+ *  — ver ARQUIVOS_HOMOLOGACAO_FOLDER_NAME/isArquivoDeHomologacao acima. */ async function listDriveFilesViaProxy() {
   const resp = await fetch(`${DRIVE_PROXY_URL}/files?t=${Date.now()}`, {
     headers: DRIVE_PROXY_KEY ? { "X-Portal-Key": DRIVE_PROXY_KEY } : {},
     cache: "no-store",
@@ -15287,13 +15454,15 @@ function buildConfirmedDocRecord({
     );
   const data = await resp.json();
   const arquivos = (data && data.arquivos) || [];
-  return arquivos.map((a) => ({
-    id: a.driveFileId,
-    title: a.nomeOriginal,
-    mimeType: a.mimeType,
-    fileSize: a.tamanho || null,
-    folderPath: a.pasta ? a.pasta.split(" / ") : [],
-  }));
+  return arquivos
+    .map((a) => ({
+      id: a.driveFileId,
+      title: a.nomeOriginal,
+      mimeType: a.mimeType,
+      fileSize: a.tamanho || null,
+      folderPath: a.pasta ? a.pasta.split(" / ") : [],
+    }))
+    .filter((a) => !isArquivoDeHomologacao(a));
 }
 /** renderPdfFirstPageToBlob: renderiza a 1ª página do PDF (bytes reais) num
  *  canvas e devolve um PNG — usado só pelo botão manual "Analisar com IA"
@@ -15430,6 +15599,11 @@ function SyncView({ companies, onNotify }) {
     }
     try {
       if (!files) files = await crawlDriveFolder(mcp, DRIVE_ROOT_FOLDER_ID);
+      // Redundante com o filtro já aplicado dentro de listDriveFilesViaProxy
+      // quando `files` veio de lá (idempotente) — mas essencial pro caminho
+      // alternativo via crawlDriveFolder/mcp, que não passa por aquela
+      // função e por isso não seria filtrado sem esta linha.
+      files = (files || []).filter((f) => !isArquivoDeHomologacao(f));
       const novos = files.filter((f) => !knownDriveIds.has(f.id)); // atualizados: arquivo já indexado antes, mas cujo `modifiedTime` real no
       // Drive é diferente do salvo na última sincronização — sinal real de
       // conteúdo alterado (nunca presumido só pela passagem do tempo).
