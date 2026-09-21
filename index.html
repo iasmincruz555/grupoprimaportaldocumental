@@ -3144,15 +3144,31 @@ async function createDocumentPackageMultiBase(entradasPorBase, opts = {}) {
       match: /\bafe\b|autorizacao de funcionamento especial/,
     },
     {
-      key: "licencas_autorizacoes",
-      // ANTT/RNTRC adicionado em 2026-09-18 (pedido explícito da Iasmin:
-      // "ANTT, que pode ser ANTT ou RNTRC") — hoje nenhum documento assim
-      // foi indexado ainda (ver ITENS_SEM_PASTA_NO_PORTAL, que mostra o
-      // aviso "emitido no site da ANTT" quando o item pedido bate com um
-      // destes termos e não é encontrado), mas a Camada 2 já reconhece o
-      // tipo, caso um documento real venha a ser indexado.
-      label: "ANTT",
-      match: /\bantt\b|\brntrc\b/,
+      // ANTT/RNTRC — recategorizado em 2026-09-21 (pedido explícito da
+      // Iasmin) de "Licenças e Autorizações" para "Planos, Procedimentos e
+      // Manuais": é onde os dois documentos REAIS já indexados hoje de
+      // fato vivem (confirmado ao vivo em produção antes desta mudança —
+      // quando este tipo foi criado em 2026-09-18 ainda não havia nenhum
+      // documento real, só a Camada 2 pronta pra reconhecer o termo).
+      // Também deixou de ser um tipo só: agora são DOIS ("ANTT, que pode
+      // ser ANTT ou RNTRC" continua valendo pros dois) — o extrato normal
+      // e a variante "Relação de Frotas", pedido explícito, 2026-09-21:
+      // "Caso peça só ANTT/RNTRC você manda esse normal. Caso fale
+      // relação de frotas, ou 'com frotas' você manda o outro." Por isso
+      // esta entrada (a variante mais específica) vem ANTES da genérica
+      // "ANTT/RNTRC" logo abaixo, e a genérica exclui explicitamente
+      // qualquer menção a "frota(s)" no próprio match — nunca as duas
+      // batendo juntas na mesma pergunta/linha.
+      key: "planos_procedimentos_manuais",
+      label: "ANTT/RNTRC - Relação de Frotas",
+      match: /relacao de frotas?|com frotas?/,
+    },
+    {
+      key: "planos_procedimentos_manuais",
+      label: "ANTT/RNTRC",
+      match: {
+        test: (t) => /\bantt\b|\brntrc\b/.test(t) && !/\bfrotas?\b/.test(t),
+      },
     },
     {
       key: "licencas_autorizacoes",
@@ -18031,8 +18047,19 @@ function GrupoprimaPortal() {
         .spin { animation: spin 0.8s linear infinite; }
         @keyframes spin { to { transform: rotate(360deg); } }
 
-        .chat-suggestions { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 14px 10px; flex-shrink: 0; }
-        .chip { background: var(--branco-frio); border: 1px solid var(--cinza-frio); color: var(--azul); font-size: 11px; padding: 5px 9px; border-radius: 999px; cursor: pointer; }
+        .chat-suggestions {
+          display: flex;
+          flex-wrap: nowrap;
+          overflow-x: auto;
+          gap: 6px;
+          padding: 6px 14px;
+          flex-shrink: 0;
+          scrollbar-width: thin;
+        }
+        .chat-suggestions::-webkit-scrollbar { height: 4px; }
+        .chat-suggestions::-webkit-scrollbar-track { background: transparent; }
+        .chat-suggestions::-webkit-scrollbar-thumb { background: var(--cinza-frio); border-radius: 999px; }
+        .chip { background: var(--branco-frio); border: 1px solid var(--cinza-frio); color: var(--azul); font-size: 11px; padding: 5px 9px; border-radius: 999px; cursor: pointer; flex-shrink: 0; white-space: nowrap; }
         .chip:hover { border-color: var(--azul); }
         .chat-input-row { display: flex; gap: 8px; padding: 12px 14px; border-top: 1px solid var(--cinza-frio); flex-shrink: 0; }
         .chat-input-row input { flex: 1; border: 1px solid var(--cinza-frio); border-radius: 8px; padding: 9px 11px; font-size: 12.5px; outline: none; min-width: 0; }
