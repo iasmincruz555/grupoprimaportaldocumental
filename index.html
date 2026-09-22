@@ -2242,6 +2242,8 @@ const AUDIT_ACTION_LABELS = {
   alterou_status_homologacao: "Alterou status de homologação",
   revelou_credenciais_homologacao: "Revelou credenciais (homologação)",
   excluiu_homologacao: "Excluiu homologação",
+  solicitou_analise_clausulas: "Solicitou análise documental de cliente",
+  gerou_pdf_analise_clausulas: "Gerou PDF da análise documental",
 };
 /** RESTDB_POLL_INTERVAL_MS: fora do Artifact não existe um canal de tempo
  *  real (onSnapshot de verdade) sem adicionar uma dependência nova
@@ -3161,8 +3163,18 @@ async function createDocumentPackageMultiBase(entradasPorBase, opts = {}) {
       // correção de plural acima, mas também cobre a forma curta usada em
       // listas ("...municipal, FGTS e trabalhista"), que antes só era
       // reconhecida citando a sigla "CNDT" ou o nome completo por extenso.
+      // "cnd (do )?trabalhista|cnd trabalhista" adicionado em 2026-09-22 (bug
+      // real relatado pela Iasmin: pedir "CND trabalhista" — a mesma forma
+      // curta "CND <esfera>" já usada pra Federal/Estadual/Municipal/FGTS —
+      // não batia com NENHUM tipo específico, porque "certid\w*" acima exige
+      // o prefixo "certid...", nunca a sigla curta "cnd". Sem nenhum tipo
+      // específico reconhecido, o pedido caía só no alias de CATEGORIA
+      // "certidoes_negativas" (que reconhece `\bcnd\b` sozinho), trazendo
+      // TODAS as certidões negativas da base junto — nunca só a Trabalhista
+      // pedida. Mesmo padrão "cnd <esfera>" já usado pelos outros 4 tipos
+      // (ver CND Federal/Estadual/Municipal/FGTS acima) agora replicado aqui.
       match:
-        /\bcndt\b|certid\w* negativ\w* de debitos trabalhistas|certid\w* negativ\w*.*trabalhista/,
+        /\bcndt\b|certid\w* negativ\w* de debitos trabalhistas|certid\w* negativ\w*.*trabalhista|cnd trabalhista/,
     },
     // Licenças e Autorizações — tipo específico dentro da categoria (regra
     // explícita: AFE não é uma categoria própria, é um TIPO aqui dentro).
@@ -4149,6 +4161,67 @@ function detectRequestedCategories(text) {
   }
   return null;
 }
+/** findCompaniesInQuery: versão em LOTE de `findCompanyInQuery` — reconhece,
+ *  numa única pergunta, TODAS as bases citadas (não só a primeira/mais
+ *  prioritária), pedido explícito da Iasmin, 2026-09-22: "Cnpj matriz e
+ *  filiais também deve causar efeito similar ao de envio em lote de
+ *  documentações. Assim como caso seja dito só uma filial + matriz, ou
+ *  afins, deve haver reconhecimento e envio dos documentos respectivos
+ *  solicitados." Antes disso, só existia `findCompanyInQuery` (singular,
+ *  usada em todo o resto do chat/contexto — preservada sem nenhuma
+ *  alteração, continua a única fonte pra "empresa atual da conversa"), que
+ *  para "CNPJ matriz e filiais" resolvia só a Matriz (primeira prioridade:
+ *  a palavra "matriz") e ignorava "e filiais" por completo.
+ *  Reconhece:
+ *   - "matriz" citada → inclui a Matriz;
+ *   - cada filial citada individualmente por id, município, CNPJ ou UF
+ *     (mesmos critérios de `findCompanyInQuery`, mas aplicados a TODAS as
+ *     empresas, não só a primeira que bater) → inclui cada uma;
+ *   - "todas as filiais"/"todas as bases"/"todos os estabelecimentos"
+ *     (explícito) → inclui todas as filiais, mesmo sem nenhuma citada por
+ *     nome;
+ *   - "filiais" no plural, genérico, sem nenhuma filial específica
+ *     reconhecida junto (ex.: "matriz e filiais") → mesmo efeito acima,
+ *     entendendo que "filiais" ali quer dizer "todas elas", não uma
+ *     ambiguidade sem resposta.
+ *  Devolve uma lista (nunca duplica a mesma empresa). Lista com 0 ou 1
+ *  empresa não é tratada como "múltiplas bases" por quem chama esta função
+ *  — o fluxo de uma empresa só (já existente, via `findCompanyInQuery`)
+ *  continua valendo normalmente nesses casos, sem nenhuma mudança de
+ *  comportamento. */
+function findCompaniesInQuery(q, companies) {
+  const nq = normalize(q);
+  const matriz = companies.find((c) => c.tipo === "Matriz") || null;
+  const filiais = companies.filter((c) => c.tipo !== "Matriz");
+  const found = [];
+  const addUnique = (c) => {
+    if (c && !found.includes(c)) found.push(c);
+  };
+  const pediuTodasAsFiliais =
+    /todas?\s+as\s+filiais|todas?\s+as\s+bases|todos\s+os\s+estabelecimentos/.test(
+      nq,
+    );
+  if (nq.includes("matriz")) addUnique(matriz);
+  if (pediuTodasAsFiliais) filiais.forEach(addUnique);
+  for (const c of filiais) {
+    if (found.includes(c)) continue;
+    if (nq.includes(c.id)) addUnique(c);
+    else if (nq.includes(normalize(c.municipio))) addUnique(c);
+    else if (nq.includes(normalize(c.cnpj.replace(/\D/g, "")))) addUnique(c);
+  }
+  for (const c of filiais) {
+    if (found.includes(c)) continue;
+    const re = new RegExp(`\\b${normalize(c.uf)}\\b`);
+    if (re.test(nq)) addUnique(c);
+  }
+  // "filiais" no plural, sem nenhuma filial específica reconhecida acima —
+  // "matriz e filiais"/"cnpj das filiais" quer dizer todas, não nenhuma.
+  const nenhumaFilialEspecificaCitada = found.every((c) => c === matriz);
+  if (!pediuTodasAsFiliais && nenhumaFilialEspecificaCitada && /\bfiliais\b/.test(nq)) {
+    filiais.forEach(addUnique);
+  }
+  return found;
+}
 /** searchDocuments: localiza documentos de uma empresa por tipo/categoria.
  *  Pedido de TIPO específico (`wantedTypeKeys`, ex.: "CND municipal") filtra
  *  por `d.tipo === t.label` — o tipo específico, nunca a categoria inteira
@@ -4186,6 +4259,33 @@ function detectRequestedCategories(text) {
   const found = [];
   const notFoundLabels = [];
   const seenIds = new Set();
+  // 2026-09-22 (bug real relatado pela Iasmin: pedir "CND FGTS"/"CND
+  // trabalhista" devolvia TODAS as certidões negativas juntas; pedir "Ibama"
+  // devolvia também a Licença Ambiental e duplicava o próprio IBAMA) — o
+  // texto de um pedido de TIPO específico quase sempre também bate,
+  // incidentalmente, com o alias mais genérico da CATEGORIA daquele mesmo
+  // tipo (ex.: "CND FGTS" contém a palavra "cnd", que sozinha já é alias da
+  // categoria inteira "Certidões Negativas"; "Ibama" contém "ibama", que
+  // também é alias da categoria "Ambiental", onde mora a Licença Ambiental).
+  // Isso fazia `wantedCategoryKeys` vir preenchido JUNTO com
+  // `wantedTypeKeys` mesmo quando a pessoa nunca pediu a categoria inteira —
+  // e o laço de categoria abaixo, que traz TODOS os documentos daquela
+  // categoria (proposital pra um pedido genuíno de categoria, ex.: "toda a
+  // documentação de seguros"), sem nenhuma seleção de "mais recente",
+  // acabava se somando ao resultado do tipo específico: documentos de
+  // outros tipos da mesma categoria entravam junto, e até uma versão mais
+  // antiga do MESMO tipo (que o laço de tipo já tinha escolhido só a mais
+  // recente) podia entrar de novo pelo laço de categoria, com um id
+  // diferente. Mesma regra já documentada acima ("tipo específico ... nunca
+  // a categoria inteira") e já aplicada no envio em lote
+  // (`matchChecklistItemToCompany`, item 1: tipo específico é sempre o
+  // critério primário) — aqui só passa a valer também pro chat: quando pelo
+  // menos um TIPO específico foi reconhecido no pedido, a expansão por
+  // categoria inteira é ignorada nesta busca (a categoria só volta a valer
+  // quando NENHUM tipo específico foi identificado — pedido de categoria de
+  // verdade, ex.: "quais licenças temos", "toda a documentação de seguros").
+  const categoryKeysEfetivos =
+    wantedTypeKeys.length > 0 ? [] : wantedCategoryKeys;
   wantedTypeKeys.forEach((t) => {
     let matches = company.documentos.filter((d) => d.tipo === t.label);
     const semSubstituicao = SEM_SUBSTITUICAO_TIPOS.has(t.label);
@@ -4227,7 +4327,7 @@ function detectRequestedCategories(text) {
       seenIds.add(best.id);
     }
   });
-  wantedCategoryKeys.forEach((catKey) => {
+  categoryKeysEfetivos.forEach((catKey) => {
     let matches = company.documentos.filter((d) => d.categoria === catKey);
     let notFoundLabel = CATEGORIES.find((c) => c.key === catKey)?.label || catKey;
     if (catKey === "seguros") {
@@ -9723,6 +9823,36 @@ function ChatDrawer({
     }
     if (tryAnalyticQuery(text, company)) return;
     const parsed = parseIntent(text);
+    // Reconhecimento de MÚLTIPLAS bases na mesma pergunta (pedido explícito
+    // da Iasmin, 2026-09-22: "Cnpj matriz e filiais também deve causar
+    // efeito similar ao de envio em lote de documentações. Assim como caso
+    // seja dito só uma filial + matriz, ou afins, deve haver reconhecimento
+    // e envio dos documentos respectivos solicitados"). `findCompanyInQuery`
+    // (singular, usada acima pra "empresa atual da conversa") só resolve UMA
+    // base — pra "CNPJ matriz e filiais" ela achava só a Matriz e ignorava
+    // "e filiais" por completo. `findCompaniesInQuery` reconhece TODAS as
+    // bases citadas; só entra em ação quando reconhece mais de uma (uma base
+    // só continua seguindo o fluxo de sempre, abaixo, sem nenhuma mudança de
+    // comportamento) e quando o pedido é claramente de entrega de
+    // documento(s) — reaproveita a MESMA `handleDocumentIntent`/
+    // `handleAllDocumentsIntent` já usada pra uma base, uma vez por base
+    // encontrada, nunca uma lógica paralela (mesmo princípio já seguido em
+    // todo o resto do motor de regras).
+    const multiCompanies = findCompaniesInQuery(text, companies);
+    if (multiCompanies.length > 1) {
+      if (
+        parsed.intent === "DOWNLOAD_DOCUMENT" ||
+        parsed.intent === "DOWNLOAD_MULTIPLE_DOCUMENTS" ||
+        parsed.intent === "SEARCH_DOCUMENT"
+      ) {
+        multiCompanies.forEach((c) => handleDocumentIntent(text, parsed, c));
+        return;
+      }
+      if (parsed.intent === "DOWNLOAD_ALL_DOCUMENTS") {
+        multiCompanies.forEach((c) => handleAllDocumentsIntent(c));
+        return;
+      }
+    }
     if (
       parsed.intent === "LIST_COMPANY_DOCUMENTS" ||
       parsed.intent === "LIST_DOCUMENT_CATEGORIES"
@@ -17131,6 +17261,1410 @@ function AddDocumentView({ companies, onNotify }) {
   );
 }
 /* =========================================================================
+   ANÁLISE DOCUMENTAL DE CLIENTES (nome exibido na tela; renomeada de
+   "Análise de Cláusulas" em 2026-09-22, pedido explícito da Iasmin — só o
+   nome mudou, nenhum comportamento) — nova aba (pedido da Iasmin,
+   2026-09-22): recebe documentos de clientes (contratos, anexos comerciais,
+   manuais de fornecedor, planilhas de tarifa) e devolve um resumo
+   estruturado dos pontos que a Grupoprima precisa conferir antes de
+   aceitar/assinar/operar de acordo com aquela documentação — obrigações,
+   riscos, prazos, valores, seguros, exigências documentais.
+
+   FASE 1 (esta sessão): frontend completo + Firestore + extração de texto
+   REAL no navegador + geração de PDF REAL — a chamada de IA usa um MOCK
+   claramente identificado (mockClientAnalysis) no lugar do endpoint real,
+   porque o motor de IA definido pela Iasmin (Claude via API da Anthropic)
+   só pode ser chamado pelo backend Cloud Run, nunca no navegador (a chave
+   nunca pode ser exposta no GitHub Pages) — mesma linha de proteção que
+   motivou a desativação total do Gemini em 2026-09-17 ("não quero uma IA
+   decidindo livremente quais documentos utilizar"): aqui a IA real (Fase 2)
+   só vai ler e resumir o que foi enviado, nunca decidir sozinha o que
+   entregar, com disciplina anti-alucinação embutida no prompt do backend.
+
+   FASE 2 (fora do alcance desta sessão — ver especificação entregue à
+   parte): endpoint novo POST /api/client-analysis no mesmo Cloud Run que já
+   serve o resto do portal, chamando de fato a API da Anthropic.
+
+   Reaproveita, sem alterar nenhuma linha: tryPersistUploadedFile (upload
+   real pro Drive), extractTextForResumoSolicitacao (extração de texto —
+   mesmas bibliotecas já usadas na classificação automática: pdf.js,
+   Tesseract OCR em português, mammoth, SheetJS), viewHomologAnexo /
+   downloadHomologAnexo (visualização/download — os documentos do cliente
+   usam exatamente o mesmo formato de anexo já usado em Homologação),
+   logDocumentAction (auditoria), motivoParaTexto (mensagens de falha de
+   extração) e o padrão de coleção Firestore em tempo real já usado em
+   HomologacaoView/AuditLogView (getDb().collection(x).onSnapshot/doc.set).
+   ========================================================================= */
+const CLIENT_ANALYSIS_STATUS_META = {
+  processando: { label: "Processando", className: "status-andamento" },
+  concluido: { label: "Concluído", className: "status-ok" },
+  necessita_conferencia: {
+    label: "Necessita de conferência",
+    className: "status-conferencia",
+  },
+  erro: { label: "Erro no processamento", className: "status-vencido" },
+};
+const CLIENT_ANALYSIS_MAX_ANEXOS = 10;
+const CLIENT_ANALYSIS_MAX_ANEXOS_BYTES = 200 * 1024 * 1024; // 200 MB no total — contratos/anexos comerciais, não precisa do teto de 10GB da Homologação
+const CLIENT_ANALYSIS_ACCEPTED_EXT = ["pdf", "doc", "docx", "xls", "xlsx"];
+let clientAnalysisSeq = 0;
+function generateClientAnalysisId() {
+  clientAnalysisSeq += 1;
+  return `analise-clausulas-${Date.now().toString(36)}-${clientAnalysisSeq}`;
+}
+/** mockClientAnalysis: placeholder CLARAMENTE identificado (campo `mock:
+ *  true`, sempre exibido na tela via banner) no lugar da chamada real ao
+ *  endpoint /api/client-analysis (Fase 2 — Cloud Run → API da Anthropic).
+ *  Devolve o MESMO formato de dados que o endpoint real vai devolver, para
+ *  que a tela de resultado, a geração de PDF e o histórico já funcionem de
+ *  ponta a ponta hoje e não precisem de nenhuma mudança quando a Fase 2
+ *  entrar no ar — só a origem do `resultado` muda. Nunca finge ter lido o
+ *  conteúdo real dos documentos (por isso relaciona só os nomes recebidos,
+ *  nunca um conteúdo específico inventado). */
+function mockClientAnalysis({ cliente, documentos }) {
+  const nomes = (documentos || []).map((d) => d.nome).join(", ") || "nenhum documento";
+  const qtd = (documentos || []).length;
+  return {
+    mock: true,
+    geradoEm: new Date().toISOString(),
+    resumoExecutivo: `Resultado de exemplo (mock) para "${cliente}", com base em ${qtd} documento(s) enviado(s): ${nomes}. Este conteúdo ainda não foi gerado por uma IA real — aguardando o endpoint do backend (Fase 2). Use apenas como referência do FORMATO da análise final.`,
+    principaisPontos: [
+      "Ponto de exemplo — será substituído pelo conteúdo real assim que o endpoint de IA (Fase 2) estiver ativo.",
+    ],
+    pontosDeAtencao: [
+      {
+        titulo: "Exemplo de ponto de atenção",
+        classificacao: "Atenção",
+        confianca: 0.5,
+        referencia: "Cláusula/página de exemplo",
+        descricao:
+          "Descrição de exemplo de um ponto de atenção identificado no documento — conteúdo real só existe depois da Fase 2.",
+      },
+    ],
+    obrigacoesGrupoprima: ["Exemplo de obrigação da Grupoprima perante o cliente."],
+    obrigacoesCliente: ["Exemplo de obrigação do cliente perante a Grupoprima."],
+    condicoesComerciais: ["Exemplo de condição comercial identificada."],
+    prazosEVigencias: ["Exemplo de prazo/vigência identificado."],
+    segurosEGerenciamentoRisco: [
+      "Exemplo de exigência de seguro/gerenciamento de risco identificada.",
+    ],
+    documentacoesExigidas: ["Exemplo de documentação exigida pelo cliente."],
+    recomendacoesDeConferencia: [
+      "Revisar manualmente antes de aceitar — este resultado é apenas um exemplo (mock).",
+    ],
+  };
+}
+/** processarAnaliseClausulas: pipeline real da Fase 1 — extrai o texto de
+ *  CADA documento enviado (mesmo motor já usado em "Envio de documentações
+ *  em lote", extractTextForResumoSolicitacao) a partir do File ainda em
+ *  memória nesta sessão (`_localFile`, preenchido pelo
+ *  ClientAnalysisFilePicker) e só então chama mockClientAnalysis. Nunca
+ *  finge ter lido um documento cujo texto não pôde ser extraído: cada item
+ *  guarda `extraido`/`motivoFalhaExtracao`, e o status final reflete isso —
+ *  "erro" quando NENHUM documento pôde ser lido, "necessita_conferencia"
+ *  quando pelo menos um falhou, "concluido" só quando todos foram lidos. */
+async function processarAnaliseClausulas(item, { onDone }) {
+  const documentosAtualizados = [];
+  for (const docMeta of item.documentos || []) {
+    const base = {
+      id: docMeta.id,
+      nome: docMeta.nome,
+      tamanho: docMeta.tamanho,
+      tipo: docMeta.tipo,
+      driveFileId: docMeta.driveFileId,
+      assetId: docMeta.assetId,
+      _localFile: docMeta._localFile,
+      _localUrl: docMeta._localUrl,
+    };
+    const file = docMeta._localFile;
+    if (!file) {
+      documentosAtualizados.push({
+        ...base,
+        extraido: false,
+        motivoFalhaExtracao: "erro_ao_ler_arquivo",
+      });
+      continue;
+    }
+    try {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const extraido = await extractTextForResumoSolicitacao(bytes, file.type, file.name);
+      documentosAtualizados.push(
+        extraido.ok
+          ? { ...base, extraido: true, textoExtraidoChars: extraido.text.length }
+          : { ...base, extraido: false, motivoFalhaExtracao: extraido.motivo },
+      );
+    } catch (e) {
+      documentosAtualizados.push({
+        ...base,
+        extraido: false,
+        motivoFalhaExtracao: "erro_ao_ler_arquivo",
+      });
+    }
+  }
+  const algumExtraido = documentosAtualizados.some((d) => d.extraido);
+  const todosExtraidos = documentosAtualizados.every((d) => d.extraido);
+  if (!algumExtraido) {
+    onDone({
+      ...item,
+      documentos: documentosAtualizados,
+      status: "erro",
+      erro:
+        "Não foi possível extrair o conteúdo de nenhum dos documentos enviados — confira os formatos (PDF, DOC, DOCX, XLS ou XLSX) e tente novamente.",
+      dataConclusao: new Date().toISOString(),
+    });
+    return;
+  }
+  const resultado = mockClientAnalysis({ cliente: item.cliente, documentos: documentosAtualizados });
+  onDone({
+    ...item,
+    documentos: documentosAtualizados,
+    resultado,
+    status: todosExtraidos ? "concluido" : "necessita_conferencia",
+    dataConclusao: new Date().toISOString(),
+  });
+}
+/** gerarPdfAnaliseClausulas: monta um PDF novo do zero via pdf-lib —
+ *  primeira vez que o código usa a biblioteca para CRIAR um PDF (até aqui,
+ *  mergePdfDocuments só MESCLA PDFs existentes). Cabeçalho com o logo já
+ *  usado no restante do portal (GRUPOPRIMA_LOGO) + cliente/data/usuário,
+ *  corpo nas mesmas seções da tela de resultado, rodapé com paginação real
+ *  ("Página X de Y") e o aviso de que o conteúdo não substitui revisão
+ *  humana. O layout usa o logo disponível hoje; será ajustado assim que o
+ *  arquivo oficial de papel timbrado chegar (pendência conhecida, não
+ *  bloqueia esta fase). */
+async function gerarPdfAnaliseClausulas(analise) {
+  if (!(window.PDFLib && window.PDFLib.PDFDocument)) {
+    throw new DocumentFileError(
+      "A geração de PDF não está disponível neste ambiente (biblioteca de PDF não carregada).",
+    );
+  }
+  const { PDFDocument, StandardFonts, rgb } = window.PDFLib;
+  const doc = await PDFDocument.create();
+  const fontRegular = await doc.embedFont(StandardFonts.Helvetica);
+  const fontBold = await doc.embedFont(StandardFonts.HelveticaBold);
+  let logoImg = null;
+  try {
+    logoImg = await doc.embedPng(base64ToBytes(GRUPOPRIMA_LOGO.split(",")[1]));
+  } catch (e) {
+    logoImg = null; // segue sem logo se a imagem não puder ser embutida — nunca trava a geração do PDF
+  }
+  const PAGE_W = 595.28,
+    PAGE_H = 841.89; // A4
+  const MARGIN = 48;
+  const CONTENT_W = PAGE_W - MARGIN * 2;
+  const HEADER_H = 96;
+  const FOOTER_H = 58;
+  const pages = [];
+  let pg = null;
+  let y = 0;
+  function drawHeader(p) {
+    const textX = MARGIN + (logoImg ? 106 : 0);
+    if (logoImg) {
+      const logoW = 90;
+      const logoH = (logoImg.height / logoImg.width) * logoW;
+      p.drawImage(logoImg, { x: MARGIN, y: PAGE_H - 34 - logoH, width: logoW, height: logoH });
+    }
+    p.drawText("Análise Documental de Cliente", {
+      x: textX,
+      y: PAGE_H - 46,
+      size: 15,
+      font: fontBold,
+      color: rgb(0, 0.216, 0.325),
+    });
+    p.drawText(`Cliente: ${analise.cliente || "—"}`, {
+      x: textX,
+      y: PAGE_H - 64,
+      size: 10,
+      font: fontRegular,
+      color: rgb(0.22, 0.22, 0.22),
+    });
+    p.drawText(
+      `Gerado em ${new Date().toLocaleString("pt-BR")} · solicitado por ${analise.usuario?.nome || "—"}`,
+      { x: textX, y: PAGE_H - 78, size: 9, font: fontRegular, color: rgb(0.35, 0.35, 0.35) },
+    );
+    p.drawLine({
+      start: { x: MARGIN, y: PAGE_H - HEADER_H },
+      end: { x: PAGE_W - MARGIN, y: PAGE_H - HEADER_H },
+      thickness: 0.75,
+      color: rgb(0.85, 0.85, 0.85),
+    });
+  }
+  function newPage() {
+    pg = doc.addPage([PAGE_W, PAGE_H]);
+    pages.push(pg);
+    y = PAGE_H - HEADER_H - 20;
+    if (pages.length === 1) drawHeader(pg);
+  }
+  function wrapText(text, font, size, maxWidth) {
+    const words = String(text || "").split(/\s+/).filter(Boolean);
+    const lines = [];
+    let cur = "";
+    for (const w of words) {
+      const test = cur ? cur + " " + w : w;
+      if (font.widthOfTextAtSize(test, size) > maxWidth && cur) {
+        lines.push(cur);
+        cur = w;
+      } else {
+        cur = test;
+      }
+    }
+    if (cur) lines.push(cur);
+    return lines.length ? lines : [""];
+  }
+  function ensureSpace(h) {
+    if (y - h < MARGIN + FOOTER_H) newPage();
+  }
+  function drawSectionTitle(title) {
+    ensureSpace(26);
+    y -= 4;
+    pg.drawText(title, { x: MARGIN, y, size: 12, font: fontBold, color: rgb(0, 0.216, 0.325) });
+    y -= 16;
+  }
+  function drawParagraph(text, { bold = false, size = 10 } = {}) {
+    const lines = wrapText(text, bold ? fontBold : fontRegular, size, CONTENT_W);
+    for (const line of lines) {
+      ensureSpace(size + 4);
+      pg.drawText(line, {
+        x: MARGIN,
+        y,
+        size,
+        font: bold ? fontBold : fontRegular,
+        color: rgb(0.15, 0.15, 0.15),
+      });
+      y -= size + 4;
+    }
+    y -= 4;
+  }
+  function drawBulletList(items) {
+    (items || []).forEach((it) => {
+      const lines = wrapText(`•  ${it}`, fontRegular, 10, CONTENT_W - 10);
+      lines.forEach((line, i) => {
+        ensureSpace(14);
+        pg.drawText(line, {
+          x: MARGIN + (i === 0 ? 0 : 12),
+          y,
+          size: 10,
+          font: fontRegular,
+          color: rgb(0.15, 0.15, 0.15),
+        });
+        y -= 14;
+      });
+    });
+    y -= 6;
+  }
+  newPage();
+  const r = analise.resultado || {};
+  drawSectionTitle("Resumo executivo");
+  drawParagraph(r.resumoExecutivo || "—");
+  drawSectionTitle("Principais pontos");
+  drawBulletList(r.principaisPontos);
+  drawSectionTitle("Pontos de atenção");
+  (r.pontosDeAtencao || []).forEach((pt) => {
+    drawParagraph(
+      `[${pt.classificacao || "—"}] ${pt.titulo || ""} (confiança: ${
+        typeof pt.confianca === "number" ? Math.round(pt.confianca * 100) + "%" : "—"
+      }${pt.referencia ? " · ref.: " + pt.referencia : ""})`,
+      { bold: true },
+    );
+    drawParagraph(pt.descricao || "");
+  });
+  drawSectionTitle("Obrigações da Grupoprima");
+  drawBulletList(r.obrigacoesGrupoprima);
+  drawSectionTitle("Obrigações do cliente");
+  drawBulletList(r.obrigacoesCliente);
+  drawSectionTitle("Condições comerciais");
+  drawBulletList(r.condicoesComerciais);
+  drawSectionTitle("Prazos e vigências");
+  drawBulletList(r.prazosEVigencias);
+  drawSectionTitle("Seguros e gerenciamento de risco");
+  drawBulletList(r.segurosEGerenciamentoRisco);
+  drawSectionTitle("Documentações exigidas");
+  drawBulletList(r.documentacoesExigidas);
+  drawSectionTitle("Recomendações de conferência");
+  drawBulletList(r.recomendacoesDeConferencia);
+  const avisoObrigatorio =
+    "Este documento é gerado a partir de uma análise automatizada e não substitui a revisão jurídica/comercial humana antes de qualquer aceite, assinatura ou início de operação.";
+  pages.forEach((p, i) => {
+    p.drawLine({
+      start: { x: MARGIN, y: FOOTER_H - 14 },
+      end: { x: PAGE_W - MARGIN, y: FOOTER_H - 14 },
+      thickness: 0.75,
+      color: rgb(0.85, 0.85, 0.85),
+    });
+    wrapText(avisoObrigatorio, fontRegular, 7.5, CONTENT_W).forEach((line, li) => {
+      p.drawText(line, {
+        x: MARGIN,
+        y: FOOTER_H - 26 - li * 10,
+        size: 7.5,
+        font: fontRegular,
+        color: rgb(0.45, 0.45, 0.45),
+      });
+    });
+    p.drawText(`Página ${i + 1} de ${pages.length}`, {
+      x: PAGE_W - MARGIN - 70,
+      y: FOOTER_H - 26,
+      size: 8,
+      font: fontRegular,
+      color: rgb(0.4, 0.4, 0.4),
+    });
+  });
+  const bytes = await doc.save();
+  return new Blob([bytes], { type: "application/pdf" });
+}
+function ClientAnalysisStatusBadge({ status }) {
+  const meta = CLIENT_ANALYSIS_STATUS_META[status] || { label: status, className: "status-ok" };
+  return /*#__PURE__*/ React.createElement(
+    "span",
+    { className: "status-badge " + meta.className },
+    meta.label,
+  );
+}
+/** ClientAnalysisStyles: bloco de CSS próprio da aba (mesmo padrão do
+ *  LoginScreen — um <style> autocontido, namespaced com o prefixo
+ *  "client-analysis-", em vez de mexer no bloco de estilos global
+ *  compartilhado por todo o resto do portal). Usa as mesmas variáveis de
+ *  cor já definidas em .portal-root (--azul/--carvao/--cinza-frio etc.). */
+function ClientAnalysisStyles() {
+  return /*#__PURE__*/ React.createElement(
+    "style",
+    null,
+    `
+      .client-analysis-mock-banner { display:flex; gap:8px; align-items:flex-start; background: rgba(255,214,10,0.16); color:#7a5400; border:1px solid rgba(255,214,10,0.4); border-radius:8px; padding:10px 12px; font-size:12px; line-height:1.5; margin-bottom:16px; }
+      .client-analysis-section { margin-bottom: 18px; }
+      .client-analysis-section h3 { font-size: 12.5px; font-weight: 800; color: var(--azul); text-transform: uppercase; letter-spacing: 0.03em; margin: 0 0 8px; }
+      .client-analysis-section p { font-size: 13px; color: #333; line-height: 1.6; margin: 0; }
+      .client-analysis-list { margin: 0; padding-left: 18px; font-size: 13px; color: #333; line-height: 1.7; }
+      .client-analysis-point { border: 1px solid var(--cinza-frio); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; }
+      .client-analysis-point-head { display:flex; align-items:center; gap:8px; margin-bottom: 4px; flex-wrap: wrap; }
+      .client-analysis-point-tag { font-size: 10.5px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.03em; padding: 2px 8px; border-radius: 999px; }
+      .client-analysis-point-tag-informativo { background: rgba(46,125,166,0.14); color: #1d5a7a; }
+      .client-analysis-point-tag-atencao { background: rgba(255,214,10,0.20); color: #7a5400; }
+      .client-analysis-point-tag-critico { background: rgba(214,69,69,0.14); color: #a13333; }
+      .client-analysis-point-conf { font-size: 10.5px; color: var(--carvao); }
+      .client-analysis-docs-list { list-style:none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+      .client-analysis-empty-status { display:flex; align-items:center; gap:10px; padding: 30px 10px; color: var(--carvao); font-size: 13px; }
+    `,
+  );
+}
+/** ClientAnalysisFilePicker: mesmo padrão de seleção com drag-and-drop de
+ *  HomologacaoAnexosPicker (upload real em paralelo via
+ *  tryPersistUploadedFile — nenhuma lógica de upload duplicada), restrito
+ *  aos formatos que o motor de extração de texto sabe ler (PDF/DOC/DOCX/
+ *  XLS/XLSX — ver extractTextForResumoSolicitacao). */
+function ClientAnalysisFilePicker({ anexos, setAnexos, onNotify }) {
+  const inputRef = useRef(null);
+  const totalBytes = anexos.reduce((s, a) => s + (a.tamanho || 0), 0);
+  function handleFiles(fileList) {
+    const incoming = Array.from(fileList || []);
+    if (incoming.length === 0) return;
+    const aceitos = [];
+    let totalProjetado = anexos.reduce((s, a) => s + (a.tamanho || 0), 0);
+    let vagas = CLIENT_ANALYSIS_MAX_ANEXOS - anexos.length;
+    for (const file of incoming) {
+      if (vagas <= 0) {
+        onNotify?.(`Máximo de ${CLIENT_ANALYSIS_MAX_ANEXOS} documentos por análise.`, "info");
+        break;
+      }
+      const ext = (file.name || "").toLowerCase().split(".").pop();
+      if (!CLIENT_ANALYSIS_ACCEPTED_EXT.includes(ext)) {
+        onNotify?.(
+          `"${file.name}" não é um formato aceito (PDF, DOC, DOCX, XLS ou XLSX).`,
+          "info",
+        );
+        continue;
+      }
+      totalProjetado += file.size;
+      if (totalProjetado > CLIENT_ANALYSIS_MAX_ANEXOS_BYTES) {
+        onNotify?.(
+          `O total de documentos não pode passar de ${formatBytes(CLIENT_ANALYSIS_MAX_ANEXOS_BYTES)}.`,
+          "info",
+        );
+        break;
+      }
+      vagas--;
+      aceitos.push(file);
+    }
+    if (aceitos.length === 0) return;
+    const novosItens = aceitos.map((file) => ({
+      id: `doc-cliente-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
+      nome: file.name,
+      tamanho: file.size,
+      tipo: file.type || "application/octet-stream",
+      driveFileId: null,
+      assetId: null,
+      armazenamentoPendente: true,
+      enviando: true,
+      _localFile: file,
+      _localUrl: URL.createObjectURL(file),
+    }));
+    setAnexos((prev) => [...prev, ...novosItens]);
+    novosItens.forEach((item) => {
+      tryPersistUploadedFile(item._localFile).then((res) => {
+        setAnexos((prev) =>
+          prev.map((a) =>
+            a.id !== item.id
+              ? a
+              : {
+                  ...a,
+                  enviando: false,
+                  driveFileId: res.ok ? res.driveFileId || null : null,
+                  assetId: res.ok ? res.assetId || null : null,
+                  armazenamentoPendente: !(res.ok && (res.driveFileId || res.assetId)),
+                  assetIssue: res.ok ? null : res.reason,
+                },
+          ),
+        );
+      });
+    });
+  }
+  function handleRemove(id) {
+    setAnexos(
+      anexos.filter((a) => {
+        if (a.id === id && a._localUrl) URL.revokeObjectURL(a._localUrl);
+        return a.id !== id;
+      }),
+    );
+  }
+  return /*#__PURE__*/ React.createElement(
+    "div",
+    { className: "homolog-field" },
+    /*#__PURE__*/ React.createElement(
+      "label",
+      null,
+      "Documentos do cliente ",
+      /*#__PURE__*/ React.createElement(
+        "span",
+        { className: "homolog-field-hint" },
+        "(até ",
+        CLIENT_ANALYSIS_MAX_ANEXOS,
+        " arquivos — PDF, DOC, DOCX, XLS ou XLSX, ",
+        formatBytes(CLIENT_ANALYSIS_MAX_ANEXOS_BYTES),
+        " no total)",
+      ),
+    ),
+    /*#__PURE__*/ React.createElement(
+      "div",
+      {
+        className: "homolog-dropzone",
+        onDragOver: (e) => e.preventDefault(),
+        onDrop: (e) => {
+          e.preventDefault();
+          handleFiles(e.dataTransfer.files);
+        },
+        onClick: () => inputRef.current?.click(),
+        role: "button",
+        tabIndex: 0,
+      },
+      /*#__PURE__*/ React.createElement(UploadCloud, { size: 20 }),
+      /*#__PURE__*/ React.createElement(
+        "span",
+        null,
+        "Arraste os documentos aqui ou clique para selecionar",
+      ),
+      /*#__PURE__*/ React.createElement("input", {
+        ref: inputRef,
+        type: "file",
+        multiple: true,
+        accept: ".pdf,.doc,.docx,.xls,.xlsx",
+        hidden: true,
+        onChange: (e) => {
+          handleFiles(e.target.files);
+          e.target.value = "";
+        },
+      }),
+    ),
+    anexos.length > 0 &&
+      /*#__PURE__*/ React.createElement(
+        "ul",
+        { className: "homolog-anexos-list" },
+        anexos.map((a) =>
+          /*#__PURE__*/ React.createElement(
+            "li",
+            { key: a.id, className: "homolog-anexo-item" },
+            /*#__PURE__*/ React.createElement(FileText, { size: 14 }),
+            /*#__PURE__*/ React.createElement("span", { className: "homolog-anexo-nome" }, a.nome),
+            /*#__PURE__*/ React.createElement(
+              "span",
+              { className: "homolog-anexo-tamanho" },
+              formatBytes(a.tamanho),
+            ),
+            a.enviando &&
+              /*#__PURE__*/ React.createElement(
+                "span",
+                { className: "homolog-anexo-tamanho", title: "Enviando para o repositório real..." },
+                /*#__PURE__*/ React.createElement(Loader2, { size: 12 }),
+                " enviando...",
+              ),
+            !a.enviando &&
+              a.armazenamentoPendente &&
+              /*#__PURE__*/ React.createElement(
+                "span",
+                {
+                  className: "homolog-anexo-tamanho",
+                  style: { color: "#b45309" },
+                  title: assetIssueMessage(a.assetIssue),
+                },
+                /*#__PURE__*/ React.createElement(AlertTriangle, { size: 12 }),
+                " não salvo",
+              ),
+            /*#__PURE__*/ React.createElement(
+              "button",
+              {
+                type: "button",
+                className: "icon-btn-dark",
+                onClick: () => handleRemove(a.id),
+                "aria-label": `Remover ${a.nome}`,
+              },
+              /*#__PURE__*/ React.createElement(X, { size: 14 }),
+            ),
+          ),
+        ),
+      ),
+    anexos.length > 0 &&
+      /*#__PURE__*/ React.createElement(
+        "p",
+        { className: "homolog-anexos-total" },
+        anexos.length,
+        " arquivo(s) · ",
+        formatBytes(totalBytes),
+        " no total",
+      ),
+  );
+}
+/** NovaAnaliseClausulasModal: formulário de solicitação — mesmo molde de
+ *  NovaHomologacaoModal (mesmas classes CSS: docs-modal-*, homolog-field,
+ *  homolog-form-actions). Solicitante preenchido automaticamente a partir
+ *  de quem está logada, nunca um campo manual. */
+function NovaAnaliseClausulasModal({ onClose, onCreate, currentUser }) {
+  const [cliente, setCliente] = useState("");
+  const [anexos, setAnexos] = useState([]);
+  const [erro, setErro] = useState(null);
+  function handleSubmit(e) {
+    e.preventDefault();
+    if (!cliente.trim()) {
+      setErro("Informe o nome do cliente.");
+      return;
+    }
+    if (anexos.length === 0) {
+      setErro("Envie ao menos um documento do cliente.");
+      return;
+    }
+    if (anexos.some((a) => a.enviando)) {
+      setErro(
+        "Aguarde o envio dos documentos terminar antes de enviar para análise (evita iniciar a análise antes do arquivo real ser confirmado).",
+      );
+      return;
+    }
+    setErro(null);
+    onCreate({ cliente: cliente.trim(), anexos });
+  }
+  return /*#__PURE__*/ React.createElement(
+    "div",
+    { className: "docs-modal-overlay", onClick: onClose },
+    /*#__PURE__*/ React.createElement(
+      "div",
+      { className: "docs-modal homolog-form-modal", onClick: (e) => e.stopPropagation() },
+      /*#__PURE__*/ React.createElement(
+        "div",
+        { className: "docs-modal-head" },
+        /*#__PURE__*/ React.createElement(
+          "div",
+          null,
+          /*#__PURE__*/ React.createElement(
+            "div",
+            { className: "docs-modal-title" },
+            /*#__PURE__*/ React.createElement(Sparkles, { size: 16 }),
+            " Nova análise documental de cliente",
+          ),
+          /*#__PURE__*/ React.createElement(
+            "div",
+            { className: "docs-modal-sub" },
+            "Solicitante: ",
+            currentUser?.nome,
+            " · ",
+            new Date().toLocaleDateString("pt-BR"),
+          ),
+        ),
+        /*#__PURE__*/ React.createElement(
+          "button",
+          { className: "icon-btn-dark", onClick: onClose, "aria-label": "Fechar" },
+          /*#__PURE__*/ React.createElement(X, { size: 18 }),
+        ),
+      ),
+      /*#__PURE__*/ React.createElement(
+        "form",
+        { className: "docs-modal-body", onSubmit: handleSubmit },
+        erro &&
+          /*#__PURE__*/ React.createElement(
+            "div",
+            { className: "login-error" },
+            /*#__PURE__*/ React.createElement(AlertTriangle, { size: 14 }),
+            " ",
+            erro,
+          ),
+        /*#__PURE__*/ React.createElement(
+          "div",
+          { className: "homolog-field" },
+          /*#__PURE__*/ React.createElement("label", null, "Cliente"),
+          /*#__PURE__*/ React.createElement("input", {
+            type: "text",
+            value: cliente,
+            onChange: (e) => setCliente(e.target.value),
+            placeholder: "Razão social ou nome fantasia do cliente",
+            autoFocus: true,
+          }),
+        ),
+        /*#__PURE__*/ React.createElement(ClientAnalysisFilePicker, {
+          anexos: anexos,
+          setAnexos: setAnexos,
+          onNotify: (msg) => setErro(msg),
+        }),
+        /*#__PURE__*/ React.createElement(
+          "div",
+          { className: "homolog-form-actions" },
+          /*#__PURE__*/ React.createElement(
+            "button",
+            { type: "button", className: "filters-clear-btn", onClick: onClose, style: { flex: "none" } },
+            "Cancelar",
+          ),
+          /*#__PURE__*/ React.createElement(
+            "button",
+            {
+              type: "submit",
+              className: "doc-download-btn",
+              disabled: anexos.some((a) => a.enviando),
+            },
+            anexos.some((a) => a.enviando)
+              ? "Enviando documentos..."
+              : "Enviar documentação para análise",
+          ),
+        ),
+      ),
+    ),
+  );
+}
+function ClientAnalysisTextSection({ titulo, texto }) {
+  if (!texto) return null;
+  return /*#__PURE__*/ React.createElement(
+    "div",
+    { className: "client-analysis-section" },
+    /*#__PURE__*/ React.createElement("h3", null, titulo),
+    /*#__PURE__*/ React.createElement("p", null, texto),
+  );
+}
+function ClientAnalysisListSection({ titulo, itens }) {
+  if (!itens || itens.length === 0) return null;
+  return /*#__PURE__*/ React.createElement(
+    "div",
+    { className: "client-analysis-section" },
+    /*#__PURE__*/ React.createElement("h3", null, titulo),
+    /*#__PURE__*/ React.createElement(
+      "ul",
+      { className: "client-analysis-list" },
+      itens.map((t, i) => /*#__PURE__*/ React.createElement("li", { key: i }, t)),
+    ),
+  );
+}
+function clientAnalysisPointTagClass(classificacao) {
+  const n = normalize(classificacao || "");
+  if (n === "critico") return "client-analysis-point-tag-critico";
+  if (n === "atencao") return "client-analysis-point-tag-atencao";
+  return "client-analysis-point-tag-informativo";
+}
+function ClientAnalysisPointsSection({ pontos }) {
+  if (!pontos || pontos.length === 0) return null;
+  return /*#__PURE__*/ React.createElement(
+    "div",
+    { className: "client-analysis-section" },
+    /*#__PURE__*/ React.createElement("h3", null, "Pontos de atenção"),
+    pontos.map((pt, i) =>
+      /*#__PURE__*/ React.createElement(
+        "div",
+        { key: i, className: "client-analysis-point" },
+        /*#__PURE__*/ React.createElement(
+          "div",
+          { className: "client-analysis-point-head" },
+          /*#__PURE__*/ React.createElement(
+            "span",
+            { className: "client-analysis-point-tag " + clientAnalysisPointTagClass(pt.classificacao) },
+            pt.classificacao || "—",
+          ),
+          /*#__PURE__*/ React.createElement("strong", null, pt.titulo || ""),
+          typeof pt.confianca === "number" &&
+            /*#__PURE__*/ React.createElement(
+              "span",
+              { className: "client-analysis-point-conf" },
+              "confiança: ",
+              Math.round(pt.confianca * 100),
+              "%",
+            ),
+          pt.referencia &&
+            /*#__PURE__*/ React.createElement(
+              "span",
+              { className: "client-analysis-point-conf" },
+              "· ref.: ",
+              pt.referencia,
+            ),
+        ),
+        /*#__PURE__*/ React.createElement("p", { style: { margin: 0, fontSize: 12.5 } }, pt.descricao || ""),
+      ),
+    ),
+  );
+}
+/** ClientAnalysisDocumentosSection: lista dos documentos ORIGINAIS enviados
+ *  pelo cliente — "Ver"/"Baixar" reaproveitam viewHomologAnexo/
+ *  downloadHomologAnexo sem nenhuma alteração (mesmo formato de anexo:
+ *  {id, nome, tipo, driveFileId, assetId, _localFile}), exatamente a mesma
+ *  visualização/download já usados em Homologação e no restante do portal. */
+function ClientAnalysisDocumentosSection({ documentos, onView, onNotify }) {
+  return /*#__PURE__*/ React.createElement(
+    "div",
+    { className: "client-analysis-section" },
+    /*#__PURE__*/ React.createElement("h3", null, "Documentos enviados"),
+    /*#__PURE__*/ React.createElement(
+      "ul",
+      { className: "client-analysis-docs-list" },
+      (documentos || []).map((d) =>
+        /*#__PURE__*/ React.createElement(
+          "li",
+          { key: d.id, className: "homolog-anexo-item" },
+          /*#__PURE__*/ React.createElement(FileText, { size: 14 }),
+          /*#__PURE__*/ React.createElement("span", { className: "homolog-anexo-nome" }, d.nome),
+          /*#__PURE__*/ React.createElement(
+            "span",
+            { className: "homolog-anexo-tamanho" },
+            formatBytes(d.tamanho),
+          ),
+          d.extraido === false &&
+            /*#__PURE__*/ React.createElement(
+              "span",
+              {
+                className: "homolog-anexo-tamanho",
+                style: { color: "#a13333" },
+                title: motivoParaTexto(d.motivoFalhaExtracao),
+              },
+              /*#__PURE__*/ React.createElement(AlertTriangle, { size: 12 }),
+              " conteúdo não lido",
+            ),
+          /*#__PURE__*/ React.createElement(
+            "button",
+            { className: "mini-download-btn", onClick: () => viewHomologAnexo(d, { onView, onNotify }) },
+            /*#__PURE__*/ React.createElement(Eye, { size: 13 }),
+            " Ver",
+          ),
+          /*#__PURE__*/ React.createElement(
+            "button",
+            { className: "mini-download-btn", onClick: () => downloadHomologAnexo(d, { onNotify }) },
+            /*#__PURE__*/ React.createElement(Download, { size: 13 }),
+            " Baixar",
+          ),
+        ),
+      ),
+    ),
+  );
+}
+/** ClientAnalysisDetailView: tela de resultado de UMA análise — banner de
+ *  mock sempre visível enquanto `resultado.mock` for true, todas as seções
+ *  pedidas, documentos originais e geração/download de PDF. */
+function ClientAnalysisDetailView({ item, onBack, onNotify, onView, onUpdate, onNovaAnalise }) {
+  const [gerandoPdf, setGerandoPdf] = useState(false);
+  async function handleGerarPdf() {
+    if (!item.resultado) return;
+    setGerandoPdf(true);
+    try {
+      const blob = await gerarPdfAnaliseClausulas(item);
+      const filename = `Analise Documental de Cliente - ${item.cliente} - ${new Date().toISOString().slice(0, 10)}.pdf`;
+      const pdfFile = new File([blob], filename, { type: "application/pdf" });
+      const res = await tryPersistUploadedFile(pdfFile);
+      onUpdate({
+        pdfGerado: {
+          id: `pdf-analise-${item.id}`,
+          nome: filename,
+          tipo: "application/pdf",
+          driveFileId: res.ok ? res.driveFileId || null : null,
+          assetId: res.ok ? res.assetId || null : null,
+          _localFile: pdfFile,
+          _localUrl: URL.createObjectURL(pdfFile),
+          geradoEm: new Date().toISOString(),
+        },
+      });
+      logDocumentAction("gerou_pdf_analise_clausulas", { cliente: item.cliente });
+      onNotify?.(
+        res.ok
+          ? `PDF da análise de "${item.cliente}" gerado e salvo.`
+          : `PDF da análise de "${item.cliente}" gerado (disponível apenas nesta sessão — não foi possível salvá-lo no repositório agora).`,
+        "info",
+      );
+    } catch (e) {
+      onNotify?.(
+        e instanceof DocumentFileError ? e.message : "Não foi possível gerar o PDF da análise agora.",
+        "error",
+      );
+    } finally {
+      setGerandoPdf(false);
+    }
+  }
+  const r = item.resultado;
+  return /*#__PURE__*/ React.createElement(
+    "div",
+    { className: "view" },
+    /*#__PURE__*/ React.createElement(ClientAnalysisStyles, null),
+    /*#__PURE__*/ React.createElement(
+      "button",
+      { className: "back-btn", onClick: onBack },
+      /*#__PURE__*/ React.createElement(ArrowLeft, { size: 15 }),
+      " Voltar ao histórico",
+    ),
+    /*#__PURE__*/ React.createElement(
+      "header",
+      { className: "company-header" },
+      /*#__PURE__*/ React.createElement(
+        "div",
+        { className: "company-header-top" },
+        /*#__PURE__*/ React.createElement("span", { className: "company-header-tag" }, "ANÁLISE DOCUMENTAL DE CLIENTE"),
+        /*#__PURE__*/ React.createElement(ClientAnalysisStatusBadge, { status: item.status }),
+      ),
+      /*#__PURE__*/ React.createElement("h1", null, item.cliente),
+      /*#__PURE__*/ React.createElement(
+        "p",
+        { className: "company-header-legal" },
+        "Solicitado por ",
+        item.usuario?.nome,
+        " · em ",
+        formatAuditWhen(new Date(item.dataSolicitacao)),
+        item.dataConclusao ? ` · concluído em ${formatAuditWhen(new Date(item.dataConclusao))}` : "",
+      ),
+    ),
+    item.status === "processando" &&
+      /*#__PURE__*/ React.createElement(
+        "div",
+        { className: "client-analysis-empty-status" },
+        /*#__PURE__*/ React.createElement(Loader2, { size: 18 }),
+        " Processando os documentos enviados...",
+      ),
+    item.status === "erro" &&
+      /*#__PURE__*/ React.createElement(
+        "div",
+        { className: "login-error" },
+        /*#__PURE__*/ React.createElement(AlertTriangle, { size: 14 }),
+        " ",
+        item.erro || "Não foi possível concluir esta análise.",
+      ),
+    (item.status === "concluido" || item.status === "necessita_conferencia") &&
+      r &&
+      /*#__PURE__*/ React.createElement(
+        React.Fragment,
+        null,
+        r.mock &&
+          /*#__PURE__*/ React.createElement(
+            "div",
+            { className: "client-analysis-mock-banner" },
+            /*#__PURE__*/ React.createElement(AlertTriangle, { size: 14 }),
+            /*#__PURE__*/ React.createElement(
+              "span",
+              null,
+              "Resultado de exemplo (mock) — aguardando o endpoint real do backend (Fase 2). Nenhuma IA real gerou este conteúdo ainda.",
+            ),
+          ),
+        item.status === "necessita_conferencia" &&
+          /*#__PURE__*/ React.createElement(
+            "div",
+            { className: "homolog-security-note" },
+            /*#__PURE__*/ React.createElement(AlertTriangle, { size: 13 }),
+            /*#__PURE__*/ React.createElement(
+              "span",
+              null,
+              "Um ou mais documentos enviados não puderam ter o conteúdo lido — revise manualmente os itens marcados abaixo antes de usar esta análise.",
+            ),
+          ),
+        /*#__PURE__*/ React.createElement(ClientAnalysisTextSection, {
+          titulo: "Resumo executivo",
+          texto: r.resumoExecutivo,
+        }),
+        /*#__PURE__*/ React.createElement(ClientAnalysisListSection, {
+          titulo: "Principais pontos",
+          itens: r.principaisPontos,
+        }),
+        /*#__PURE__*/ React.createElement(ClientAnalysisPointsSection, { pontos: r.pontosDeAtencao }),
+        /*#__PURE__*/ React.createElement(ClientAnalysisListSection, {
+          titulo: "Obrigações da Grupoprima",
+          itens: r.obrigacoesGrupoprima,
+        }),
+        /*#__PURE__*/ React.createElement(ClientAnalysisListSection, {
+          titulo: "Obrigações do cliente",
+          itens: r.obrigacoesCliente,
+        }),
+        /*#__PURE__*/ React.createElement(ClientAnalysisListSection, {
+          titulo: "Condições comerciais",
+          itens: r.condicoesComerciais,
+        }),
+        /*#__PURE__*/ React.createElement(ClientAnalysisListSection, {
+          titulo: "Prazos e vigências",
+          itens: r.prazosEVigencias,
+        }),
+        /*#__PURE__*/ React.createElement(ClientAnalysisListSection, {
+          titulo: "Seguros e gerenciamento de risco",
+          itens: r.segurosEGerenciamentoRisco,
+        }),
+        /*#__PURE__*/ React.createElement(ClientAnalysisListSection, {
+          titulo: "Documentações exigidas",
+          itens: r.documentacoesExigidas,
+        }),
+        /*#__PURE__*/ React.createElement(ClientAnalysisListSection, {
+          titulo: "Recomendações de conferência",
+          itens: r.recomendacoesDeConferencia,
+        }),
+        /*#__PURE__*/ React.createElement(ClientAnalysisDocumentosSection, {
+          documentos: item.documentos,
+          onView: onView,
+          onNotify: onNotify,
+        }),
+        /*#__PURE__*/ React.createElement(
+          "div",
+          { className: "homolog-form-actions" },
+          /*#__PURE__*/ React.createElement(
+            "button",
+            {
+              type: "button",
+              className: "doc-download-btn",
+              onClick: handleGerarPdf,
+              disabled: gerandoPdf,
+            },
+            /*#__PURE__*/ React.createElement(FileText, { size: 14 }),
+            " ",
+            gerandoPdf ? "Gerando PDF..." : "Gerar PDF da análise",
+          ),
+          item.pdfGerado &&
+            /*#__PURE__*/ React.createElement(
+              "button",
+              {
+                type: "button",
+                className: "doc-download-btn",
+                onClick: () => downloadHomologAnexo(item.pdfGerado, { onNotify }),
+              },
+              /*#__PURE__*/ React.createElement(Download, { size: 14 }),
+              " Baixar PDF",
+            ),
+          /*#__PURE__*/ React.createElement(
+            "button",
+            { type: "button", className: "filters-clear-btn", style: { flex: "none" }, onClick: onNovaAnalise },
+            /*#__PURE__*/ React.createElement(Plus, { size: 14 }),
+            " Nova análise",
+          ),
+        ),
+      ),
+  );
+}
+/** ClientAnalysisView: ponto de entrada da aba — lista/histórico com
+ *  filtros e paginação (molde: AuditLogView) quando nenhum item está
+ *  selecionado, detalhe (ClientAnalysisDetailView) quando está. Mesmo
+ *  padrão de coleção Firestore em tempo real de HomologacaoView
+ *  (getDb().collection("client_document_analysis").onSnapshot/doc.set),
+ *  com a mesma cópia local (`itemsMemoriaRef`) preservando os arquivos com
+ *  bytes reais desta sessão (_localFile/_localUrl), que "db" nunca guarda. */
+function ClientAnalysisView({ currentUser, onNotify, onView, companies }) {
+  const [items, setItems] = useState([]);
+  const [selectedId, setSelectedId] = useState(null);
+  const [modalOpen, setModalOpen] = useState(false);
+  const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
+  const [filtroCliente, setFiltroCliente] = useState("");
+  const [filtroUsuario, setFiltroUsuario] = useState("");
+  const [filtroStatus, setFiltroStatus] = useState("");
+  const [filtroInicio, setFiltroInicio] = useState("");
+  const [filtroFim, setFiltroFim] = useState("");
+  const [pagina, setPagina] = useState(1);
+  const itemsMemoriaRef = useRef({});
+  useEffect(() => {
+    setPagina(1);
+  }, [filtroCliente, filtroUsuario, filtroStatus, filtroInicio, filtroFim]);
+  useEffect(() => {
+    let unsub = null;
+    let cancelled = false;
+    getDb().then((db) => {
+      if (cancelled || !db) return;
+      const col = db.collection("client_document_analysis");
+      unsub = col.onSnapshot(
+        (snap) => {
+          if (cancelled) return;
+          setItems(
+            snap.docs.map((d) => {
+              const data = d.data();
+              const mem = itemsMemoriaRef.current[data.id];
+              return mem
+                ? { ...data, documentos: mem.documentos || data.documentos, pdfGerado: mem.pdfGerado || data.pdfGerado }
+                : data;
+            }),
+          );
+        },
+        () => {},
+      );
+    });
+    return () => {
+      cancelled = true;
+      if (unsub) unsub();
+    };
+  }, []);
+  function persist(item) {
+    itemsMemoriaRef.current[item.id] = item;
+    setItems((prev) => {
+      const exists = prev.some((it) => it.id === item.id);
+      return exists ? prev.map((it) => (it.id === item.id ? item : it)) : [item, ...prev];
+    });
+    getDb()
+      .then((db) => {
+        if (!db) return;
+        const toSave = { ...item };
+        toSave.documentos = (item.documentos || []).map(({ _localFile, _localUrl, ...meta }) => meta);
+        if (toSave.pdfGerado) {
+          const { _localFile, _localUrl, ...metaPdf } = toSave.pdfGerado;
+          toSave.pdfGerado = metaPdf;
+        }
+        return db.collection("client_document_analysis").doc(item.id).set(toSave).catch(() => {});
+      })
+      .catch(() => {});
+  }
+  function handleUpdate(id, patch) {
+    const atual = items.find((it) => it.id === id) || itemsMemoriaRef.current[id];
+    if (!atual) return;
+    persist({ ...atual, ...patch });
+  }
+  function handleCreate({ cliente, anexos }) {
+    const id = generateClientAnalysisId();
+    const agora = new Date().toISOString();
+    const item = {
+      id,
+      cliente,
+      usuario: { nome: currentUser?.nome || "Usuário do portal", email: currentUser?.email || "" },
+      dataSolicitacao: agora,
+      documentos: anexos.map((a) => ({ ...a })),
+      status: "processando",
+      dataConclusao: null,
+      resultado: null,
+      erro: null,
+      pdfGerado: null,
+    };
+    persist(item);
+    setModalOpen(false);
+    setSelectedId(id);
+    logDocumentAction("solicitou_analise_clausulas", { cliente, documentos: item.documentos.length });
+    onNotify?.(`Análise de "${cliente}" enviada — processando ${item.documentos.length} documento(s).`, "info");
+    processarAnaliseClausulas(item, { onDone: (atualizado) => persist(atualizado) });
+  }
+  const usuarios = useMemo(
+    () => [...new Set(items.map((it) => it.usuario?.nome).filter(Boolean))].sort(),
+    [items],
+  );
+  const filtered = items.filter((it) => {
+    if (filtroCliente && !normalize(it.cliente || "").includes(normalize(filtroCliente))) return false;
+    if (filtroUsuario && it.usuario?.nome !== filtroUsuario) return false;
+    if (filtroStatus && it.status !== filtroStatus) return false;
+    if (filtroInicio && new Date(it.dataSolicitacao) < new Date(filtroInicio + "T00:00:00")) return false;
+    if (filtroFim && new Date(it.dataSolicitacao) > new Date(filtroFim + "T23:59:59")) return false;
+    return true;
+  });
+  function clearFilters() {
+    setFiltroCliente("");
+    setFiltroUsuario("");
+    setFiltroStatus("");
+    setFiltroInicio("");
+    setFiltroFim("");
+  }
+  const totais = useMemo(() => {
+    let processando = 0,
+      concluidas = 0,
+      conferencia = 0;
+    items.forEach((it) => {
+      if (it.status === "processando") processando++;
+      if (it.status === "concluido") concluidas++;
+      if (it.status === "necessita_conferencia") conferencia++;
+    });
+    return { processando, concluidas, conferencia, total: items.length };
+  }, [items]);
+  const CLIENT_ANALYSIS_PAGE_SIZE = 20;
+  const totalPaginas = Math.max(1, Math.ceil(filtered.length / CLIENT_ANALYSIS_PAGE_SIZE));
+  const paginaAtual = Math.min(pagina, totalPaginas);
+  const inicioIntervalo = filtered.length === 0 ? 0 : (paginaAtual - 1) * CLIENT_ANALYSIS_PAGE_SIZE + 1;
+  const fimIntervalo = Math.min(paginaAtual * CLIENT_ANALYSIS_PAGE_SIZE, filtered.length);
+  const filteredPagina = filtered.slice(
+    (paginaAtual - 1) * CLIENT_ANALYSIS_PAGE_SIZE,
+    paginaAtual * CLIENT_ANALYSIS_PAGE_SIZE,
+  );
+  const selected = items.find((it) => it.id === selectedId) || (selectedId ? itemsMemoriaRef.current[selectedId] : null);
+  if (selected) {
+    return /*#__PURE__*/ React.createElement(
+      React.Fragment,
+      null,
+      /*#__PURE__*/ React.createElement(ClientAnalysisStyles, null),
+      /*#__PURE__*/ React.createElement(ClientAnalysisDetailView, {
+        item: selected,
+        onBack: () => setSelectedId(null),
+        onNotify: onNotify,
+        onView: onView,
+        onUpdate: (patch) => handleUpdate(selected.id, patch),
+        onNovaAnalise: () => {
+          setSelectedId(null);
+          setModalOpen(true);
+        },
+      }),
+    );
+  }
+  return /*#__PURE__*/ React.createElement(
+    "div",
+    { className: "view" },
+    /*#__PURE__*/ React.createElement(ClientAnalysisStyles, null),
+    /*#__PURE__*/ React.createElement(
+      "header",
+      { className: "view-header view-header-compact" },
+      /*#__PURE__*/ React.createElement(
+        "div",
+        null,
+        /*#__PURE__*/ React.createElement("p", { className: "eyebrow-pill" }, "Comercial"),
+        /*#__PURE__*/ React.createElement("h1", null, "Análise Documental de Clientes"),
+        /*#__PURE__*/ React.createElement(
+          "p",
+          { className: "lede" },
+          "Envie a documentação de um cliente e receba um resumo estruturado dos pontos que a Grupoprima precisa conferir antes de aceitar, assinar ou operar.",
+        ),
+      ),
+    ),
+    /*#__PURE__*/ React.createElement(
+      "div",
+      { className: "kpi-grid kpi-grid-4" },
+      /*#__PURE__*/ React.createElement(
+        "button",
+        { type: "button", className: "kpi-new-homolog-btn", onClick: () => setModalOpen(true) },
+        /*#__PURE__*/ React.createElement(Plus, { size: 14 }),
+        " Nova análise",
+      ),
+      /*#__PURE__*/ React.createElement(KpiCard, { icon: Loader2, label: "Processando", value: totais.processando }),
+      /*#__PURE__*/ React.createElement(KpiCard, { icon: CheckCircle2, label: "Concluídas", value: totais.concluidas }),
+      /*#__PURE__*/ React.createElement(KpiCard, {
+        icon: AlertTriangle,
+        label: "Necessita conferência",
+        value: totais.conferencia,
+        tone: totais.conferencia > 0 ? "danger" : "default",
+      }),
+    ),
+    /*#__PURE__*/ React.createElement(
+      "button",
+      {
+        type: "button",
+        className: "filters-btn mobile-only",
+        "aria-expanded": mobileFiltersOpen,
+        onClick: () => setMobileFiltersOpen((v) => !v),
+      },
+      /*#__PURE__*/ React.createElement(SlidersHorizontal, { size: 15 }),
+      " Filtros",
+    ),
+    /*#__PURE__*/ React.createElement(
+      "div",
+      { className: "filters-bar homolog-filters-bar" + (mobileFiltersOpen ? " mobile-open" : "") },
+      /*#__PURE__*/ React.createElement(
+        "div",
+        { className: "filters-bar-head" },
+        /*#__PURE__*/ React.createElement(SlidersHorizontal, { size: 15 }),
+        " Filtros",
+      ),
+      /*#__PURE__*/ React.createElement(
+        "div",
+        { className: "filters-bar-fields" },
+        /*#__PURE__*/ React.createElement(
+          "label",
+          { className: "filter-field" },
+          /*#__PURE__*/ React.createElement("span", null, "Cliente"),
+          /*#__PURE__*/ React.createElement("input", {
+            placeholder: "Filtrar por cliente...",
+            value: filtroCliente,
+            onChange: (e) => setFiltroCliente(e.target.value),
+          }),
+        ),
+        /*#__PURE__*/ React.createElement(
+          "label",
+          { className: "filter-field" },
+          /*#__PURE__*/ React.createElement("span", null, "Usuário"),
+          /*#__PURE__*/ React.createElement(
+            "select",
+            { value: filtroUsuario, onChange: (e) => setFiltroUsuario(e.target.value) },
+            /*#__PURE__*/ React.createElement("option", { value: "" }, "Todos"),
+            usuarios.map((u) => /*#__PURE__*/ React.createElement("option", { key: u, value: u }, u)),
+          ),
+        ),
+        /*#__PURE__*/ React.createElement(
+          "label",
+          { className: "filter-field" },
+          /*#__PURE__*/ React.createElement("span", null, "Status"),
+          /*#__PURE__*/ React.createElement(
+            "select",
+            { value: filtroStatus, onChange: (e) => setFiltroStatus(e.target.value) },
+            /*#__PURE__*/ React.createElement("option", { value: "" }, "Todos"),
+            Object.entries(CLIENT_ANALYSIS_STATUS_META).map(([k, m]) =>
+              /*#__PURE__*/ React.createElement("option", { key: k, value: k }, m.label),
+            ),
+          ),
+        ),
+        /*#__PURE__*/ React.createElement(
+          "label",
+          { className: "filter-field filter-field-date" },
+          /*#__PURE__*/ React.createElement("span", null, "Solicitada de"),
+          /*#__PURE__*/ React.createElement("input", {
+            type: "date",
+            value: filtroInicio,
+            onChange: (e) => setFiltroInicio(e.target.value),
+          }),
+        ),
+        /*#__PURE__*/ React.createElement(
+          "label",
+          { className: "filter-field filter-field-date" },
+          /*#__PURE__*/ React.createElement("span", null, "até"),
+          /*#__PURE__*/ React.createElement("input", {
+            type: "date",
+            value: filtroFim,
+            onChange: (e) => setFiltroFim(e.target.value),
+          }),
+        ),
+      ),
+      /*#__PURE__*/ React.createElement(
+        "button",
+        { className: "filters-clear-btn filters-clear-inline", onClick: clearFilters },
+        "Limpar filtros",
+      ),
+    ),
+    /*#__PURE__*/ React.createElement(
+      "div",
+      { className: "table-wrap desktop-only" },
+      /*#__PURE__*/ React.createElement(
+        "table",
+        { className: "company-table" },
+        /*#__PURE__*/ React.createElement(
+          "thead",
+          null,
+          /*#__PURE__*/ React.createElement(
+            "tr",
+            null,
+            /*#__PURE__*/ React.createElement("th", null, "Usuário"),
+            /*#__PURE__*/ React.createElement("th", null, "Data"),
+            /*#__PURE__*/ React.createElement("th", null, "Cliente"),
+            /*#__PURE__*/ React.createElement("th", null, "Documentos"),
+            /*#__PURE__*/ React.createElement("th", null, "Status"),
+            /*#__PURE__*/ React.createElement("th", null, "Ação"),
+          ),
+        ),
+        /*#__PURE__*/ React.createElement(
+          "tbody",
+          null,
+          filteredPagina.map((it) =>
+            /*#__PURE__*/ React.createElement(
+              "tr",
+              { key: it.id, onClick: () => setSelectedId(it.id), style: { cursor: "pointer" } },
+              /*#__PURE__*/ React.createElement("td", null, it.usuario?.nome),
+              /*#__PURE__*/ React.createElement("td", { className: "mono" }, isoDateToBR(it.dataSolicitacao.slice(0, 10))),
+              /*#__PURE__*/ React.createElement("td", null, it.cliente),
+              /*#__PURE__*/ React.createElement("td", null, (it.documentos || []).length),
+              /*#__PURE__*/ React.createElement(
+                "td",
+                null,
+                /*#__PURE__*/ React.createElement(ClientAnalysisStatusBadge, { status: it.status }),
+              ),
+              /*#__PURE__*/ React.createElement(
+                "td",
+                { onClick: (e) => e.stopPropagation() },
+                /*#__PURE__*/ React.createElement(
+                  "button",
+                  { className: "link-btn", onClick: () => setSelectedId(it.id) },
+                  "Ver análise",
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+      filtered.length === 0 &&
+        /*#__PURE__*/ React.createElement(
+          "div",
+          { className: "empty-state" },
+          "Nenhuma análise encontrada para os filtros selecionados.",
+        ),
+    ),
+    /*#__PURE__*/ React.createElement(
+      "div",
+      { className: "company-cards mobile-only" },
+      filteredPagina.map((it) =>
+        /*#__PURE__*/ React.createElement(
+          "div",
+          { key: it.id, className: "company-card-mobile", onClick: () => setSelectedId(it.id) },
+          /*#__PURE__*/ React.createElement(
+            "div",
+            { className: "company-card-mobile-top" },
+            /*#__PURE__*/ React.createElement("span", { className: "company-mini-tag" }, it.cliente),
+            /*#__PURE__*/ React.createElement(ClientAnalysisStatusBadge, { status: it.status }),
+          ),
+          /*#__PURE__*/ React.createElement(
+            "div",
+            { className: "company-card-mobile-row" },
+            /*#__PURE__*/ React.createElement("span", null, "Usuário"),
+            /*#__PURE__*/ React.createElement("span", null, it.usuario?.nome),
+          ),
+          /*#__PURE__*/ React.createElement(
+            "div",
+            { className: "company-card-mobile-row" },
+            /*#__PURE__*/ React.createElement("span", null, "Data"),
+            /*#__PURE__*/ React.createElement("span", null, isoDateToBR(it.dataSolicitacao.slice(0, 10))),
+          ),
+        ),
+      ),
+      filtered.length === 0 &&
+        /*#__PURE__*/ React.createElement("div", { className: "empty-state" }, "Nenhuma análise encontrada."),
+    ),
+    filtered.length > 0 &&
+      /*#__PURE__*/ React.createElement(
+        "div",
+        { className: "audit-pagination" },
+        /*#__PURE__*/ React.createElement(
+          "span",
+          { className: "audit-pagination-info" },
+          inicioIntervalo,
+          " a ",
+          fimIntervalo,
+          " de ",
+          filtered.length,
+          " registro(s)",
+        ),
+        totalPaginas > 1 &&
+          /*#__PURE__*/ React.createElement(
+            "div",
+            { className: "audit-pagination-nav" },
+            /*#__PURE__*/ React.createElement(
+              "button",
+              {
+                className: "icon-btn-dark",
+                disabled: paginaAtual <= 1,
+                onClick: () => setPagina((p) => Math.max(1, p - 1)),
+                "aria-label": "Página anterior",
+              },
+              /*#__PURE__*/ React.createElement(ChevronLeft, { size: 16 }),
+            ),
+            /*#__PURE__*/ React.createElement("span", null, "Página ", paginaAtual, " de ", totalPaginas),
+            /*#__PURE__*/ React.createElement(
+              "button",
+              {
+                className: "icon-btn-dark",
+                disabled: paginaAtual >= totalPaginas,
+                onClick: () => setPagina((p) => Math.min(totalPaginas, p + 1)),
+                "aria-label": "Próxima página",
+              },
+              /*#__PURE__*/ React.createElement(ChevronRight, { size: 16 }),
+            ),
+          ),
+      ),
+    modalOpen &&
+      /*#__PURE__*/ React.createElement(NovaAnaliseClausulasModal, {
+        onClose: () => setModalOpen(false),
+        onCreate: handleCreate,
+        currentUser: currentUser,
+      }),
+  );
+}
+/* =========================================================================
    APP
    ========================================================================= */ /* =========================================================================
    AUDITORIA — consulta ao log de ações (login, visualização, download,
@@ -17160,6 +18694,7 @@ function auditEntryDetails(entry) {
   if (entry.arquivo) parts.push(entry.arquivo);
   if (entry.homologacao) parts.push(entry.homologacao);
   if (entry.consultor) parts.push(entry.consultor);
+  if (entry.cliente) parts.push(entry.cliente);
   if (entry.de && entry.para) parts.push(`${entry.de} → ${entry.para}`);
   if (entry.motivo === "inatividade")
     parts.push("sessão encerrada por inatividade");
@@ -18743,6 +20278,16 @@ function GrupoprimaPortal() {
       /*#__PURE__*/ React.createElement(
         "button",
         {
+          className: "nav-item" + (view === "analise_clausulas" ? " active" : ""),
+          onClick: () => goTo("analise_clausulas"),
+        },
+        /*#__PURE__*/ React.createElement(Sparkles, { size: 16 }),
+        " ",
+        /*#__PURE__*/ React.createElement("span", null, "Análise Documental de Clientes"),
+      ),
+      /*#__PURE__*/ React.createElement(
+        "button",
+        {
           className: "nav-item",
           onClick: () => {
             setChatOpen(true);
@@ -18919,6 +20464,13 @@ function GrupoprimaPortal() {
           }),
         view === "homologacao" &&
           /*#__PURE__*/ React.createElement(HomologacaoView, {
+            currentUser: currentUser,
+            onNotify: notify,
+            onView: setViewer,
+            companies: data.companies,
+          }),
+        view === "analise_clausulas" &&
+          /*#__PURE__*/ React.createElement(ClientAnalysisView, {
             currentUser: currentUser,
             onNotify: notify,
             onView: setViewer,
