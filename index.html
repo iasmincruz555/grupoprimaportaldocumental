@@ -3303,10 +3303,16 @@ async function createDocumentPackageMultiBase(entradasPorBase, opts = {}) {
       key: "seguranca_qualidade_compliance",
       // "certificado de qualidade" adicionado em 2026-09-18 (pedido
       // explícito da Iasmin) — sinônimo real usado por clientes/consultores
-      // pro SASSMAQ; não colide com "Certificação de Qualidade" abaixo
-      // (aquele exige o substantivo "certificação", nunca "certificado").
+      // pro SASSMAQ. "certificacao...qualidade/iso" e "\biso\b" soltos
+      // incorporados em 2026-09-22 (pedido explícito da Iasmin: "caso
+      // peçam qualquer ISO/certificado ISO, envie SASSMAQ") — existia uma
+      // entrada SEPARADA "Certificação de Qualidade" (removida abaixo, ver
+      // comentário) tratando pedidos de ISO como um tipo diferente por
+      // engano; na Grupoprima o SASSMAQ É o certificado de qualidade do
+      // grupo, então qualquer pedido de ISO/certificado ISO deve resolver
+      // pra ele, nunca ficar sem tipo reconhecido.
       label: "SASSMAQ",
-      match: /sassmaq|certificado de qualidade/,
+      match: /sassmaq|certificado de qualidade|certifica[c]ao.*(qualidade|iso)|\biso\b/,
     },
     {
       key: "seguranca_qualidade_compliance",
@@ -3321,11 +3327,14 @@ async function createDocumentPackageMultiBase(entradasPorBase, opts = {}) {
       label: "PAE",
       match: /\bpae\b|plano de a[cç][aã]o de emerg[eê]ncia/,
     },
-    {
-      key: "seguranca_qualidade_compliance",
-      label: "Certificação de Qualidade",
-      match: /certifica[c]ao.*(qualidade|iso)/,
-    }, // Ambiental
+    // "Certificação de Qualidade" removida daqui em 2026-09-22 (pedido
+    // explícito da Iasmin: "SASSMAQ é certificado de qualidade... caso
+    // peçam qualquer ISO/certificado ISO, envie SASSMAQ") — era uma
+    // entrada SEPARADA tratando "certificação de qualidade"/ISO como um
+    // tipo diferente do SASSMAQ por engano (mesmo bug da fusão CND
+    // Federal/Certidão de Regularidade Fiscal, 2026-09-21): unificada
+    // dentro do SASSMAQ acima, que é o único documento real desse tipo já
+    // indexado no portal. // Ambiental
     {
       // "LO" e "Licença Operacional" são sinônimos de "Licença Ambiental"
       // (confirmado pela Iasmin em 2026-09-18) — \blo\b é a forma abreviada
@@ -3392,9 +3401,28 @@ async function createDocumentPackageMultiBase(entradasPorBase, opts = {}) {
       match: /procedimento operacional|\bpop\b/,
     },
     {
+      // "Código de Conduta" adicionada em 2026-09-22 (pedido explícito da
+      // Iasmin: "ensine... a enviar 'Código de conduta' mesmo com essa
+      // nomenclatura, ou 'código de ética' 'manual de ética' 'manual de
+      // conduta'") — o documento real já indexado no portal tem tipo
+      // literal "Código de Conduta", mas antes não existia NENHUMA entrada
+      // reconhecendo esse tipo no checklist (só o genérico "Manual"
+      // abaixo, que não bate com "código de..."). Vem ANTES do "Manual"
+      // genérico, e o "Manual" abaixo exclui explicitamente "de
+      // conduta"/"de ética" pra nunca bater os dois tipos juntos na mesma
+      // pergunta/linha (mesmo padrão já usado pra ANTT/RNTRC vs a variante
+      // de frotas).
+      key: "planos_procedimentos_manuais",
+      label: "Código de Conduta",
+      match: /codigo de (conduta|etica)|manual de (conduta|etica)/,
+    },
+    {
       key: "planos_procedimentos_manuais",
       label: "Manual",
-      match: /\bmanual\b/,
+      match: {
+        test: (t) =>
+          /\bmanual\b/.test(t) && !/manual de (conduta|etica)/.test(t),
+      },
     },
     {
       key: "planos_procedimentos_manuais",
@@ -8569,6 +8597,8 @@ function CompanyDetailView({
           isAdmin: isAdmin,
         }),
       ),
+      " ",
+      /*#__PURE__*/ React.createElement(DocScopeBadge, { doc: doc }),
     ),
     /*#__PURE__*/ React.createElement(
       "div",
@@ -8587,7 +8617,20 @@ function CompanyDetailView({
       /*#__PURE__*/ React.createElement(
         "span",
         null,
-        company.tipo === "Matriz" ? "Matriz" : company.id,
+        // 2026-09-22 (pedido explícito da Iasmin, caso real do SASSMAQ: "é
+        // de abrangência geral, não é da matriz, ou da filial PE, é geral,
+        // não vale apenas para uma filial") — antes mostrava sempre a
+        // Base consultada (ex.: "Matriz"), mesmo quando o documento
+        // encontrado é corporativo (abrangência empresa/corporativa) e só
+        // apareceu ali por já vir mesclado em toda Base — dava a entender
+        // que o documento pertence só àquela Base. Documentos corporativos
+        // mostram "Empresa — Grupoprima Logística" (mesmo texto usado no
+        // resto do portal via docScopeLabel), nunca a Base consultada.
+        doc.abrangencia === "empresa" || doc.abrangencia === "corporativa"
+          ? "Empresa — Grupoprima Logística"
+          : company.tipo === "Matriz"
+            ? "Matriz"
+            : company.id,
       ),
       /*#__PURE__*/ React.createElement("span", null, "Categoria"),
       /*#__PURE__*/ React.createElement(
@@ -8867,6 +8910,8 @@ function ChatMessage({
             /*#__PURE__*/ React.createElement(CheckCircle2, { size: 13 }),
             " ",
             d.tipo,
+            " ",
+            /*#__PURE__*/ React.createElement(DocScopeBadge, { doc: d }),
           ),
         ),
         msg.notFound.map((label) =>
@@ -9205,10 +9250,29 @@ function ChatDrawer({
       });
       return { found, notFoundLabels };
     }
-    const intro =
-      found.length === 1
-        ? `Encontrei o documento solicitado para ${company.tipo === "Matriz" ? "a Matriz" : `a Filial ${company.id}`}:`
-        : `Encontrei ${found.length} de ${found.length + notFoundLabels.length} documentos solicitados para ${company.tipo === "Matriz" ? "a Matriz" : `a Filial ${company.id}`}:`;
+    // 2026-09-22 (pedido explícito da Iasmin, caso real do SASSMAQ: "é de
+    // abrangência geral, não é da matriz, ou da filial PE, é geral, não
+    // vale apenas para uma filial") — quando TODOS os documentos
+    // encontrados são de abrangência empresa/corporativa (mesclados na
+    // Base consultada, nunca duplicados de verdade), a introdução não deve
+    // dizer "para a Matriz"/"para a Filial X": o card/lista já mostra
+    // "Empresa — Grupoprima Logística" via DocScopeBadge, mas a frase
+    // também precisa deixar isso claro. Base mista (alguns corporativos,
+    // outros específicos da Base) mantém a frase de sempre — o selo por
+    // item já diferencia cada um.
+    const localLabel = company.tipo === "Matriz" ? "a Matriz" : `a Filial ${company.id}`;
+    const todosCorporativos =
+      found.length > 0 &&
+      found.every(
+        (d) => d.abrangencia === "empresa" || d.abrangencia === "corporativa",
+      );
+    const intro = todosCorporativos
+      ? found.length === 1
+        ? `Encontrei o documento solicitado — é de abrangência corporativa (Empresa — Grupoprima Logística), aplica-se a todas as Bases, não só ${localLabel}:`
+        : `Encontrei ${found.length} de ${found.length + notFoundLabels.length} documentos solicitados — são de abrangência corporativa (Empresa — Grupoprima Logística), aplicam-se a todas as Bases, não só ${localLabel}:`
+      : found.length === 1
+        ? `Encontrei o documento solicitado para ${localLabel}:`
+        : `Encontrei ${found.length} de ${found.length + notFoundLabels.length} documentos solicitados para ${localLabel}:`;
     if (found.length === 1 && notFoundLabels.length === 0) {
       pushMessage({
         role: "assistant",
@@ -11667,6 +11731,18 @@ function EnvioDocumentacaoLoteModal({ companies, onNotify, onView, onClose }) {
                           "span",
                           null,
                           docTituloExibido(entrada.doc),
+                          " ",
+                          // 2026-09-22 (pedido explícito da Iasmin, caso real do
+                          // SASSMAQ: "é de abrangência geral, não é da matriz,
+                          // ou da filial PE, é geral") — mesmo selo já usado no
+                          // resto do portal (DocScopeBadge), agora também aqui:
+                          // deixa claro que um item corporativo (SASSMAQ,
+                          // Código de Conduta) listado dentro do grupo desta
+                          // Base é o MESMO documento de sempre, nunca uma cópia
+                          // exclusiva dela.
+                          /*#__PURE__*/ React.createElement(DocScopeBadge, {
+                            doc: entrada.doc,
+                          }),
                           entrada.ambiguo &&
                             /*#__PURE__*/ React.createElement(
                               "span",
