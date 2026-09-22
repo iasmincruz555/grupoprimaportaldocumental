@@ -17353,20 +17353,23 @@ function AddDocumentView({ companies, onNotify }) {
    aceitar/assinar/operar de acordo com aquela documentação — obrigações,
    riscos, prazos, valores, seguros, exigências documentais.
 
-   FASE 1 (esta sessão): frontend completo + Firestore + extração de texto
-   REAL no navegador + geração de PDF REAL — a chamada de IA usa um MOCK
-   claramente identificado (mockClientAnalysis) no lugar do endpoint real,
-   porque o motor de IA definido pela Iasmin (Claude via API da Anthropic)
-   só pode ser chamado pelo backend Cloud Run, nunca no navegador (a chave
-   nunca pode ser exposta no GitHub Pages) — mesma linha de proteção que
-   motivou a desativação total do Gemini em 2026-09-17 ("não quero uma IA
-   decidindo livremente quais documentos utilizar"): aqui a IA real (Fase 2)
-   só vai ler e resumir o que foi enviado, nunca decidir sozinha o que
-   entregar, com disciplina anti-alucinação embutida no prompt do backend.
+   FASE 1 (concluída 2026-09-22): frontend completo + Firestore + extração
+   de texto REAL no navegador + geração de PDF REAL.
 
-   FASE 2 (fora do alcance desta sessão — ver especificação entregue à
-   parte): endpoint novo POST /api/client-analysis no mesmo Cloud Run que já
-   serve o resto do portal, chamando de fato a API da Anthropic.
+   FASE 2 (concluída 2026-09-22 — backend precisa ser reimplantado pela
+   pessoa com acesso ao Cloud Run; ver LEIA-ME-DEPLOY entregue junto):
+   processarAnaliseClausulas agora chama de fato o endpoint
+   POST /api/client-analysis (callClientAnalysisBackend, abaixo), que roda
+   no mesmo Cloud Run que já serve o resto do portal e chama a API da
+   Anthropic de verdade — a chave nunca é exposta no navegador/GitHub
+   Pages, só existe no ambiente do Cloud Run. Mesma linha de proteção que
+   motivou a desativação total do Gemini em 2026-09-17 ("não quero uma IA
+   decidindo livremente quais documentos utilizar"): a IA real só lê e
+   resume o que foi enviado, nunca decide sozinha o que entregar, com
+   disciplina anti-alucinação embutida no prompt do backend. A função
+   mockClientAnalysis abaixo NÃO é mais chamada pelo pipeline real — fica
+   só como referência do formato de dados e para os testes automatizados
+   (mesmo formato que o endpoint real devolve).
 
    Reaproveita, sem alterar nenhuma linha: tryPersistUploadedFile (upload
    real pro Drive), extractTextForResumoSolicitacao (extração de texto —
@@ -17395,15 +17398,14 @@ function generateClientAnalysisId() {
   clientAnalysisSeq += 1;
   return `analise-clausulas-${Date.now().toString(36)}-${clientAnalysisSeq}`;
 }
-/** mockClientAnalysis: placeholder CLARAMENTE identificado (campo `mock:
- *  true`, sempre exibido na tela via banner) no lugar da chamada real ao
- *  endpoint /api/client-analysis (Fase 2 — Cloud Run → API da Anthropic).
- *  Devolve o MESMO formato de dados que o endpoint real vai devolver, para
- *  que a tela de resultado, a geração de PDF e o histórico já funcionem de
- *  ponta a ponta hoje e não precisem de nenhuma mudança quando a Fase 2
- *  entrar no ar — só a origem do `resultado` muda. Nunca finge ter lido o
- *  conteúdo real dos documentos (por isso relaciona só os nomes recebidos,
- *  nunca um conteúdo específico inventado). */
+/** mockClientAnalysis: NÃO é mais chamado pelo pipeline real desde
+ *  2026-09-22 (processarAnaliseClausulas agora chama
+ *  callClientAnalysisBackend, que fala com o endpoint real
+ *  /api/client-analysis). Mantido só como referência do formato de dados
+ *  esperado (campo `mock: true`, nunca gerado pelo endpoint real) e para
+ *  os testes automatizados continuarem cobrindo esse formato. Nunca finge
+ *  ter lido o conteúdo real dos documentos (por isso relaciona só os
+ *  nomes recebidos, nunca um conteúdo específico inventado). */
 function mockClientAnalysis({ cliente, documentos }) {
   const nomes = (documentos || []).map((d) => d.nome).join(", ") || "nenhum documento";
   const qtd = (documentos || []).length;
@@ -17437,17 +17439,62 @@ function mockClientAnalysis({ cliente, documentos }) {
     ],
   };
 }
-/** processarAnaliseClausulas: pipeline real da Fase 1 — extrai o texto de
- *  CADA documento enviado (mesmo motor já usado em "Envio de documentações
- *  em lote", extractTextForResumoSolicitacao) a partir do File ainda em
+/** callClientAnalysisBackend: chama de fato o endpoint real (Fase 2 —
+ *  Cloud Run → API da Anthropic), reaproveitando o mesmo backend/chave já
+ *  usados no resto do portal (DRIVE_PROXY_URL/DRIVE_PROXY_KEY, igual a
+ *  createRestDb/fetchDocumentFile). Envia só o TEXTO já extraído no
+ *  navegador (nunca o binário do documento) — o backend nunca vê o
+ *  arquivo original. Nunca inventa um resultado: se o backend responder
+ *  com falha, ou devolver algo sem `resultado`, lança erro — quem chama
+ *  decide o status "erro" a partir disso, nunca finge sucesso. */
+async function callClientAnalysisBackend({ id, cliente, documentos }) {
+  const resp = await fetch(`${DRIVE_PROXY_URL}/api/client-analysis`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(DRIVE_PROXY_KEY ? { "X-Portal-Key": DRIVE_PROXY_KEY } : {}),
+    },
+    body: JSON.stringify({
+      id,
+      clienteNome: cliente,
+      documentos: documentos.map((d) => ({ nome: d.nome, textoExtraido: d.textoExtraido })),
+    }),
+  });
+  if (!resp.ok) {
+    let detalhe = "";
+    try {
+      const corpo = await resp.json();
+      detalhe = corpo && corpo.erro ? corpo.erro : "";
+    } catch (e) {
+      // resposta sem JSON (ex.: erro de infraestrutura antes do handler) — segue sem detalhe extra.
+    }
+    throw new Error(detalhe || `O backend de análise respondeu com erro (${resp.status}).`);
+  }
+  const corpo = await resp.json();
+  if (!corpo || !corpo.resultado) {
+    throw new Error("O backend de análise não devolveu um resultado válido.");
+  }
+  return corpo.resultado;
+}
+/** processarAnaliseClausulas: pipeline real — extrai o texto de CADA
+ *  documento enviado (mesmo motor já usado em "Envio de documentações em
+ *  lote", extractTextForResumoSolicitacao) a partir do File ainda em
  *  memória nesta sessão (`_localFile`, preenchido pelo
- *  ClientAnalysisFilePicker) e só então chama mockClientAnalysis. Nunca
- *  finge ter lido um documento cujo texto não pôde ser extraído: cada item
- *  guarda `extraido`/`motivoFalhaExtracao`, e o status final reflete isso —
- *  "erro" quando NENHUM documento pôde ser lido, "necessita_conferencia"
- *  quando pelo menos um falhou, "concluido" só quando todos foram lidos. */
+ *  ClientAnalysisFilePicker), monta a lista de textos extraídos (só em
+ *  memória — nunca gravada no Firestore, que continua guardando apenas
+ *  metadados por documento) e chama o endpoint real (Fase 2,
+ *  callClientAnalysisBackend). Nunca finge ter lido um documento cujo
+ *  texto não pôde ser extraído nem finge ter concluído uma análise que o
+ *  backend não devolveu de verdade: cada item guarda
+ *  `extraido`/`motivoFalhaExtracao`, e o status final reflete isso —
+ *  "erro" quando NENHUM documento pôde ser lido OU quando a chamada ao
+ *  backend falhou, "necessita_conferencia" quando pelo menos um documento
+ *  falhou a extração (mas a análise ainda foi gerada com o restante),
+ *  "concluido" só quando todos os documentos foram lidos e a análise foi
+ *  gerada com sucesso. */
 async function processarAnaliseClausulas(item, { onDone }) {
   const documentosAtualizados = [];
+  const documentosParaAnalise = [];
   for (const docMeta of item.documentos || []) {
     const base = {
       id: docMeta.id,
@@ -17471,11 +17518,12 @@ async function processarAnaliseClausulas(item, { onDone }) {
     try {
       const bytes = new Uint8Array(await file.arrayBuffer());
       const extraido = await extractTextForResumoSolicitacao(bytes, file.type, file.name);
-      documentosAtualizados.push(
-        extraido.ok
-          ? { ...base, extraido: true, textoExtraidoChars: extraido.text.length }
-          : { ...base, extraido: false, motivoFalhaExtracao: extraido.motivo },
-      );
+      if (extraido.ok) {
+        documentosAtualizados.push({ ...base, extraido: true, textoExtraidoChars: extraido.text.length });
+        documentosParaAnalise.push({ nome: docMeta.nome, textoExtraido: extraido.text });
+      } else {
+        documentosAtualizados.push({ ...base, extraido: false, motivoFalhaExtracao: extraido.motivo });
+      }
     } catch (e) {
       documentosAtualizados.push({
         ...base,
@@ -17497,7 +17545,23 @@ async function processarAnaliseClausulas(item, { onDone }) {
     });
     return;
   }
-  const resultado = mockClientAnalysis({ cliente: item.cliente, documentos: documentosAtualizados });
+  let resultado;
+  try {
+    resultado = await callClientAnalysisBackend({
+      id: item.id,
+      cliente: item.cliente,
+      documentos: documentosParaAnalise,
+    });
+  } catch (e) {
+    onDone({
+      ...item,
+      documentos: documentosAtualizados,
+      status: "erro",
+      erro: `Não foi possível concluir a análise por IA agora: ${e.message || "erro desconhecido"}. Tente novamente em alguns instantes.`,
+      dataConclusao: new Date().toISOString(),
+    });
+    return;
+  }
   onDone({
     ...item,
     documentos: documentosAtualizados,
