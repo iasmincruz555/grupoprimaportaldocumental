@@ -3367,8 +3367,17 @@ async function createDocumentPackageMultiBase(entradasPorBase, opts = {}) {
       // "gerenciamento de risco" (sem o "programa de" na frente) adicionado
       // em 2026-09-18 (pedido explícito da Iasmin: "PGR, Programa de
       // Gerenciamento de risco e também só Gerenciamento de risco").
+      // "gest[ãa]o de risco(s)" adicionado em 2026-09-22 (bug real relatado
+      // pela Iasmin: "Gestão de riscos" — sinônimo real de "gerenciamento de
+      // risco" que ela/clientes usam — não batia com nada, porque o regex
+      // exigia literalmente a palavra "gerenciamento"). Plural "riscos"
+      // também passa a valer pras duas formas (só "risco" no singular
+      // funcionava antes). "PGR BRK" não precisa de entrada própria: já bate
+      // em `\bpgr\b` (fronteira de palavra não exige que "pgr" seja a
+      // palavra inteira da frase, só que "pgr" apareça como palavra isolada
+      // em algum ponto do texto).
       label: "PGR",
-      match: /\bpgr\b|(programa de )?gerenciamento de risco/,
+      match: /\bpgr\b|(programa de )?(gerenciamento|gest[aã]o) de riscos?/,
     },
     {
       key: "seguranca_qualidade_compliance",
@@ -3555,8 +3564,12 @@ function tipoLabelsAceitos(label) {
     },
     {
       key: "seguranca_qualidade_compliance",
+      // "gerenciamento|gest[ãa]o de riscos?" adicionado em 2026-09-22 (mesmo
+      // bug/pedido do PGR em DOC_TYPE_KEYWORDS acima: "gestão de riscos"
+      // sozinho, sem a sigla "PGR" na frase, não batia nem com a categoria
+      // inteira antes disso).
       match:
-        /seguranca|qualidade|compliance|\bavcb\b|\bclcb\b|bombeiro|vistoria|sassmaq|brigada de inc[eê]ndio|\bpgr\b|\bpae\b|auditoria|certifica[cç][aã]o/,
+        /seguranca|qualidade|compliance|\bavcb\b|\bclcb\b|bombeiro|vistoria|sassmaq|brigada de inc[eê]ndio|\bpgr\b|\bpae\b|auditoria|certifica[cç][aã]o|(gerenciamento|gest[aã]o) de riscos?/,
     },
     { key: "outros", match: /^outros/ },
     {
