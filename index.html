@@ -1110,6 +1110,173 @@ const companiesRaw = [
   },
 ];
 /* =========================================================================
+   ENDEREÇOS DAS BASES — lista fixa fornecida diretamente pela Iasmin
+   (2026-09-23), usada SÓ para o assistente responder "endereço de X"/"todos
+   os endereços" em texto natural. Propositalmente SEPARADA de `companiesRaw`
+   (nunca lida a partir de `company.endereco`/`company.cep`): a Filial —
+   Três Lagoas/MS (id "0003", CNPJ 30.668.797/0003-22) que a Iasmin incluiu
+   nesta lista ainda NÃO existe como base completa em `companiesRaw` (sem
+   documentos, sincronização com o Drive, contato, data de abertura etc.) —
+   adicioná-la lá seria uma mudança bem maior (nova base "de verdade" no
+   sistema todo) que não foi pedida aqui, só o endereço. Os outros 7 ids
+   abaixo (0001/0004/0005/0007/0010/0011/0012) coincidem com os ids já
+   usados em `companiesRaw`, propositalmente, só para reaproveitar o mesmo
+   padrão de busca (id/município/UF) — não são lidos de lá. O CNPJ de cada
+   base fica de fora de propósito (pedido explícito da Iasmin: CNPJ é uma
+   pergunta à parte, já coberta pelo pedido de "Cartão CNPJ").
+   ========================================================================= */
+const BASE_ENDERECOS = [
+  {
+    id: "0001",
+    tipo: "Matriz",
+    municipio: "Três Lagoas",
+    uf: "MS",
+    endereco: "Av. Ranulpho Marques Leal, nº 3169, Sala 117, Jardim Alvorada, Três Lagoas/MS – CEP 79610-100",
+  },
+  {
+    id: "0003",
+    tipo: "Filial",
+    municipio: "Três Lagoas",
+    uf: "MS",
+    endereco: "Av. Youssef Ahmed El Jarouche, nº 6619, Distrito Industrial II, Três Lagoas/MS – CEP 79613-001",
+  },
+  {
+    id: "0004",
+    tipo: "Filial",
+    municipio: "Recife",
+    uf: "PE",
+    endereco: "Rua Agenor Lopes, nº 277, Sala 501, Boa Viagem, Recife/PE – CEP 51021-110",
+  },
+  {
+    id: "0005",
+    tipo: "Filial",
+    municipio: "Londrina",
+    uf: "PR",
+    endereco: "Av. Brasília, nº 8416, Lindóia, Londrina/PR – CEP 86031-770",
+  },
+  {
+    id: "0007",
+    tipo: "Filial",
+    municipio: "São Paulo",
+    uf: "SP",
+    endereco: "Rua Santa Cruz, nº 2187, Sala 10, CXPST 364, Vila Mariana, São Paulo/SP – CEP 04121-002",
+  },
+  {
+    id: "0010",
+    tipo: "Filial",
+    municipio: "Vitória",
+    uf: "ES",
+    endereco: "Av. Nossa Senhora da Penha, nº 2796, Sala 808, CP 144, Santa Luiza, Vitória/ES – CEP 29045-402",
+  },
+  {
+    id: "0011",
+    tipo: "Filial",
+    municipio: "Belo Horizonte",
+    uf: "MG",
+    endereco: "Rua Rio Grande do Norte, nº 1436, Sala 1605, Savassi, Belo Horizonte/MG – CEP 30130-138",
+  },
+  {
+    id: "0012",
+    tipo: "Filial",
+    municipio: "Cabedelo",
+    uf: "PB",
+    endereco: "Rua Antônio Francisco de Araújo, nº 29, Box 1101, Parque Esperança, Cabedelo/PB – CEP 58108-646",
+  },
+];
+/** baseEnderecoLabelFor: mesmo padrão de `companyLabelFor`, mas também
+ *  precisa distinguir as DUAS bases de Três Lagoas/MS (Matriz e Filial
+ *  0003) — `companyLabelFor` sozinho ("Matriz"/"Filial 0003") já basta pra
+ *  isso, então só reaproveita o mesmo formato. */
+function baseEnderecoLabelFor(base) {
+  if (!base) return null;
+  return base.tipo === "Matriz" ? "Matriz" : `Filial ${base.id}`;
+}
+/** findBaseEnderecosInQuery: reconhece 1, algumas, ou todas as bases citadas
+ *  num pedido de endereço, em texto natural — mesmo espírito de
+ *  `findCompaniesInQuery` (matriz / "todas as bases"/"todas as filiais" /
+ *  id / município / UF / "filiais" no plural sem nenhuma específica =
+ *  todas), mas sobre `BASE_ENDERECOS` (ver comentário acima do porquê de
+ *  não reaproveitar `companies`). Único cuidado extra, que
+ *  `findCompaniesInQuery` nunca precisou ter: Três Lagoas/MS tem DUAS bases
+ *  (Matriz e Filial 0003) — "matriz" citado sem "filial" nunca inclui a
+ *  Filial 0003 só por causa do município bater, e vice-versa; só um
+ *  "Três Lagoas" citado sozinho, sem nenhum dos dois termos, traz as duas
+ *  (ambíguo de propósito — melhor mostrar as duas do que adivinhar
+ *  errado). */
+function findBaseEnderecosInQuery(q) {
+  const nq = normalize(q);
+  const found = [];
+  const addUnique = (b) => {
+    if (b && !found.includes(b)) found.push(b);
+  };
+  const pediuTodas =
+    /todas?\s+as\s+(bases|filiais)|todos\s+os\s+estabelecimentos|todos\s+os\s+endere[cç]os|endere[cç]os?\s+de\s+todas/.test(
+      nq,
+    );
+  if (pediuTodas) {
+    BASE_ENDERECOS.forEach(addUnique);
+    return found;
+  }
+  const pediuMatriz = /\bmatriz\b/.test(nq);
+  // "filial" (singular) e "filiais" (plural) — plural em português troca o
+  // final "l" por "is" (não é só acrescentar "s"), por isso não dá pra usar
+  // "filiais?" aqui (isso bateria com "filiai"/"filiais", nunca com
+  // "filial" sozinho).
+  const pediuFilial = /\bfilia(l|is)\b/.test(nq);
+  if (pediuMatriz) {
+    addUnique(BASE_ENDERECOS.find((b) => b.tipo === "Matriz"));
+  }
+  for (const b of BASE_ENDERECOS) {
+    if (found.includes(b)) continue;
+    // "matriz" citado sem "filial(is)": ignora as filiais mesmo que o
+    // município bata (caso Três Lagoas). "filial(is)" citado sem "matriz":
+    // ignora a matriz pelo mesmo motivo.
+    if (b.tipo === "Matriz" && pediuFilial && !pediuMatriz) continue;
+    if (b.tipo !== "Matriz" && pediuMatriz && !pediuFilial) continue;
+    if (nq.includes(normalize(b.id))) addUnique(b);
+    else if (nq.includes(normalize(b.municipio))) addUnique(b);
+  }
+  for (const b of BASE_ENDERECOS) {
+    if (found.includes(b) || b.tipo === "Matriz") continue;
+    if (pediuMatriz && !pediuFilial) continue;
+    const re = new RegExp(`\\b${normalize(b.uf)}\\b`);
+    if (re.test(nq)) addUnique(b);
+  }
+  // "filiais" no plural, sem nenhuma filial específica reconhecida acima —
+  // mesma regra de `findCompaniesInQuery`: "endereço das filiais" quer
+  // dizer todas, não nenhuma.
+  const nenhumaFilialEspecificaCitada = found.every((b) => b.tipo === "Matriz");
+  if (nenhumaFilialEspecificaCitada && pediuFilial) {
+    BASE_ENDERECOS.forEach((b) => {
+      if (b.tipo !== "Matriz") addUnique(b);
+    });
+  }
+  return found;
+}
+/** formatEnderecosResposta: monta a resposta em texto do(s) endereço(s)
+ *  encontrado(s) — nunca inclui CNPJ (pedido explícito da Iasmin: CNPJ é
+ *  pergunta à parte). Uma base só devolve uma frase; várias, uma lista com
+ *  cabeçalho. */
+function formatEnderecosResposta(bases) {
+  if (bases.length === 1) {
+    const b = bases[0];
+    return `${baseEnderecoLabelFor(b)} (${b.municipio}/${b.uf}) — ${b.endereco}.`;
+  }
+  const linhas = bases.map(
+    (b) => `• ${baseEnderecoLabelFor(b)} (${b.municipio}/${b.uf}): ${b.endereco}`,
+  );
+  return `Endereços das bases da Grupoprima:\n${linhas.join("\n")}`;
+}
+/** isEnderecoQuery: reconhece um pedido de endereço em texto natural, antes
+ *  de cair no motor de regras genérico (`answerQuery`, que só resolvia UMA
+ *  base por vez via `findCompanyInQuery`) — pedido explícito da Iasmin,
+ *  2026-09-23: "todos os endereços das bases" (e variações com 1, 2, 3
+ *  bases específicas) precisa funcionar, não só o de uma base isolada. */
+function isEnderecoQuery(text) {
+  const nq = normalize(text);
+  return /endere[cç]|localiza[cç][aã]o|onde fica|onde fic(a|am)/.test(nq);
+}
+/* =========================================================================
    FILA DE CONFERÊNCIA — documentos localizados na pasta oficial do Drive
    que NÃO puderam ser vinculados com segurança a nenhuma empresa
    cadastrada acima. Nunca são atribuídos "no chute" a uma filial: ficam
@@ -10148,6 +10315,20 @@ function ChatDrawer({
       });
       return;
     }
+    // Endereço das bases (pedido explícito da Iasmin, 2026-09-23) — checado
+    // ANTES do motor de regras genérico (`answerQuery`, mais abaixo) porque
+    // esse só resolvia UMA base por vez; aqui reconhece 1, algumas ou todas.
+    if (isEnderecoQuery(text)) {
+      const basesEndereco = findBaseEnderecosInQuery(text);
+      if (basesEndereco.length > 0) {
+        pushMessage({
+          role: "assistant",
+          type: "text",
+          text: formatEnderecosResposta(basesEndereco),
+        });
+        return;
+      }
+    }
     if (isHomologacaoQuery(text)) {
       if (await tryHomologacaoQuery(text, pushMessage)) return;
     }
@@ -10388,6 +10569,7 @@ function ChatDrawer({
     "Quais documentos são corporativos?",
     "Quais seguros temos?",
     "Como uso os filtros?",
+    "Todos os endereços das bases",
   ];
   if (!open) return null;
   return /*#__PURE__*/ React.createElement(
