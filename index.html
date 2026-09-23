@@ -3177,47 +3177,47 @@ function sanitizeClientNameForFilename(nome) {
     .trim();
 }
 /** createDocumentPackageMultiBase: mesma lógica de createDocumentPackage,
- *  mas reunindo VÁRIAS bases num único ZIP — usado pelo fluxo "Envio de
- *  documentações em lote" (Homologações, pedido da Iasmin, 2026-09-17).
- *  Cada entrada é {baseFolder, numerados}, onde `numerados` já vem de
- *  buildResumoZipPlan (mesma numeração da checklist mostrada na prévia) —
- *  o ZIP final organiza por Base > "<número> - <documento>", sempre com o
- *  arquivo ORIGINAL, nunca recriado; falhas pontuais não derrubam o resto
- *  do pacote. */
-async function createDocumentPackageMultiBase(entradasPorBase, opts = {}) {
+ *  mas reunindo documentos de VÁRIAS bases num único ZIP — usado pelo fluxo
+ *  "Envio de Documentações em Lote" (pedido da Iasmin, 2026-09-17).
+ *  `numerados` é uma lista ÚNICA e FLAT de {numero, doc} (quem monta a
+ *  numeração — "N" pra uma documentação resolvida numa base só, "N.1",
+ *  "N.2"... pra uma resolvida em várias bases/candidatos — é o chamador,
+ *  hoje só `processarLote`). SEM nenhuma pasta por base (mudança de
+ *  2026-09-23, pedido explícito da Iasmin: a segregação anterior em pastas
+ *  "Matriz"/"Filial X" atrapalhava mais do que ajudava, mesmo pra
+ *  solicitações pequenas — o título de cada documento já inclui
+ *  "Matriz"/"Filial X" quando aplicável, então a pasta era redundante) — o
+ *  ZIP final é uma lista única, "<número> - <documento>" direto na raiz,
+ *  sempre com o arquivo ORIGINAL, nunca recriado; falhas pontuais não
+ *  derrubam o resto do pacote. */
+async function createDocumentPackageMultiBase(numerados, opts = {}) {
   const files = [];
   const failed = [];
-  for (const entrada of entradasPorBase) {
-    for (const num of entrada.numerados) {
-      try {
-        const { bytes, filename } = await fetchDocumentFile(num.doc);
-        const ext = (filename || "").split(".").pop();
-        // sanitizeClientNameForFilename (não safeFileSlug — esse tira
-        // acento/vira snake_case, ilegível pra um nome de arquivo que a
-        // Iasmin vai ler) tira só os caracteres realmente inválidos em
-        // nome de arquivo/pasta. Essencial aqui porque alguns rótulos de
-        // tipo documental têm "/" no nome (ex.: "ANTT/RNTRC", "ANTT/RNTRC -
-        // Relação de Frotas") — sem isso, o "/" virava separador de pasta
-        // DENTRO do zip, e o item aparecia como uma PASTA vazia em vez de
-        // um arquivo (bug relatado pela Iasmin, 2026-09-21, com prints do
-        // Explorer mostrando "1 - ANTT" e "8 - ANTT" como pastas).
-        const nomeBase = `${num.numero} - ${sanitizeClientNameForFilename(docTituloExibido(num.doc))}`;
-        const nomeArquivo =
-          ext && ext !== filename ? `${nomeBase}.${ext}` : nomeBase;
-        files.push({
-          name: `${entrada.baseFolder}/${nomeArquivo}`,
-          data: bytes,
-        });
-      } catch (e) {
-        failed.push({
-          doc: num.doc,
-          baseFolder: entrada.baseFolder,
-          message:
-            e instanceof DocumentFileError
-              ? e.message
-              : "Falha ao obter o arquivo.",
-        });
-      }
+  for (const num of numerados) {
+    try {
+      const { bytes, filename } = await fetchDocumentFile(num.doc);
+      const ext = (filename || "").split(".").pop();
+      // sanitizeClientNameForFilename (não safeFileSlug — esse tira
+      // acento/vira snake_case, ilegível pra um nome de arquivo que a
+      // Iasmin vai ler) tira só os caracteres realmente inválidos em
+      // nome de arquivo/pasta. Essencial aqui porque alguns rótulos de
+      // tipo documental têm "/" no nome (ex.: "ANTT/RNTRC", "ANTT/RNTRC -
+      // Relação de Frotas") — sem isso, o "/" virava separador de pasta
+      // DENTRO do zip, e o item aparecia como uma PASTA vazia em vez de
+      // um arquivo (bug relatado pela Iasmin, 2026-09-21, com prints do
+      // Explorer mostrando "1 - ANTT" e "8 - ANTT" como pastas).
+      const nomeBase = `${num.numero} - ${sanitizeClientNameForFilename(docTituloExibido(num.doc))}`;
+      const nomeArquivo =
+        ext && ext !== filename ? `${nomeBase}.${ext}` : nomeBase;
+      files.push({ name: nomeArquivo, data: bytes });
+    } catch (e) {
+      failed.push({
+        doc: num.doc,
+        message:
+          e instanceof DocumentFileError
+            ? e.message
+            : "Falha ao obter o arquivo.",
+      });
     }
   }
   return { files, failed, zipName: opts.zipName || "Documentacoes.zip" };
@@ -9686,18 +9686,23 @@ function ChatDrawer({
       empresaLogLabel = [
         ...new Set(msg.items.map((it) => companyLabelFor(it.company))),
       ].join(", ");
-      const porBase = new Map();
-      msg.items.forEach((it) => {
-        const baseLabel = companyLabelFor(it.company);
-        if (!porBase.has(it.company.id))
-          porBase.set(it.company.id, { baseFolder: baseLabel, numerados: [] });
-        const entrada = porBase.get(it.company.id);
-        entrada.numerados.push({ numero: entrada.numerados.length + 1, doc: it.doc });
+      // Mesma regra de numeração/organização do "Envio de Documentações em
+      // Lote" (pedido explícito da Iasmin, 2026-09-23, mesmo print mostrando
+      // pasta por base e numeração incorreta): aqui `msg.items` é sempre UMA
+      // única documentação (ex.: "CNPJ") resolvida em várias bases, então
+      // vira "1.1 -, 1.2 -, 1.3 -..." — sub-número em TODAS as bases,
+      // inclusive a 1ª (nunca um "1 -" cru seguido só de ".2"/".3" nas
+      // demais); com só 1 base encontrada, fica "1 -" direto (não faz
+      // sentido sub-numerar uma única base). SEM nenhuma pasta por base — o
+      // título de cada documento já inclui "Matriz"/"Filial X" quando
+      // aplicável, então a pasta era redundante.
+      const numerados = msg.items.map((it, i) => ({
+        numero: msg.items.length > 1 ? `1.${i + 1}` : "1",
+        doc: it.doc,
+      }));
+      pkg = await createDocumentPackageMultiBase(numerados, {
+        zipName: msg.zipName,
       });
-      pkg = await createDocumentPackageMultiBase(
-        [...porBase.values()],
-        { zipName: msg.zipName },
-      );
     } else {
       const docs = msg.type === "category-summary" ? msg.docs : msg.found;
       docsCount = docs.length;
@@ -9736,7 +9741,12 @@ function ChatDrawer({
       documentos: docsForLog.slice(0, pkg.files.length).map((d) => d.tipo),
       arquivo: pkg.zipName,
     });
-    let resultText = `Pronto — ${pkg.files.length} de ${docsCount} documento(s) reunidos em "${pkg.zipName}", organizados ${msg.type === "doc-multi-empresas" ? "por base" : "por categoria"}. O download deve iniciar automaticamente.`;
+    // "por categoria" só faz sentido pros outros dois tipos de mensagem
+    // (agrupamento dentro de UMA base); "doc-multi-empresas" não tem mais
+    // organização por pasta nenhuma (mudança de 2026-09-23, pedido da
+    // Iasmin) — cada arquivo já sai numerado (1 -, 1.1 -, 1.2 -...) direto
+    // no nome, então a frase não precisa mais qualificar "por base".
+    let resultText = `Pronto — ${pkg.files.length} de ${docsCount} documento(s) reunidos em "${pkg.zipName}"${msg.type === "doc-multi-empresas" ? "" : ", organizados por categoria"}. O download deve iniciar automaticamente.`;
     if (pkg.failed.length > 0) {
       resultText +=
         `\n\n⚠️ ${pkg.failed.length} documento(s) não puderam ser incluídos:\n` +
@@ -18683,6 +18693,30 @@ function LoteItemStatusBadge({ status }) {
   const meta = LOTE_ITEM_STATUS_META[status] || { label: status, className: "status-ok" };
   return React.createElement("span", { className: "status-badge " + meta.className }, meta.label);
 }
+/** LoteItemStatusSelect: UM único controle pra ver e mudar o status de um
+ *  item×base — antes existiam DOIS (o selo LoteItemStatusBadge mostrando o
+ *  status, mais um <select> logo ao lado mostrando o MESMO status de novo,
+ *  só pra permitir trocar). Reclamação direta da Iasmin (2026-09-23, com
+ *  print): a lista ficava "muito extensa, grande e pouco estética" — a
+ *  duplicação era uma das causas. Aqui o próprio <select> já é o selo
+ *  colorido (herda as classes .status-badge + a cor do status atual). */
+function LoteItemStatusSelect({ status, onChange }) {
+  const meta = LOTE_ITEM_STATUS_META[status] || { label: status, className: "status-ok" };
+  return React.createElement(
+    "span",
+    { className: "lote-status-select-wrap" },
+    React.createElement(
+      "select",
+      {
+        value: status,
+        onChange: (e) => onChange(e.target.value),
+        className: "lote-status-select status-badge " + meta.className,
+      },
+      Object.entries(LOTE_ITEM_STATUS_META).map(([k, m]) => React.createElement("option", { key: k, value: k }, m.label)),
+    ),
+    React.createElement(ChevronDown, { size: 10, className: "lote-status-select-caret" }),
+  );
+}
 function EnvioLoteStyles() {
   return React.createElement(
     "style",
@@ -18690,13 +18724,27 @@ function EnvioLoteStyles() {
     `
       .lote-section { margin-bottom: 18px; }
       .lote-section h3 { font-size: 12.5px; font-weight: 800; color: var(--azul); text-transform: uppercase; letter-spacing: 0.03em; margin: 0 0 8px; }
-      .lote-item-row { border: 1px solid var(--cinza-frio); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; }
-      .lote-item-row-head { display:flex; align-items:center; gap:8px; justify-content: space-between; flex-wrap: wrap; margin-bottom: 6px; }
-      .lote-item-titulo { font-size: 13px; font-weight: 700; color: var(--azul-2); }
-      .lote-item-origem { font-size: 10.5px; color: var(--carvao); text-transform: uppercase; letter-spacing: 0.03em; }
-      .lote-item-bases { display: flex; flex-direction: column; gap: 6px; }
-      .lote-item-base-row { display:flex; align-items:center; gap:8px; flex-wrap: wrap; font-size: 12.5px; padding: 6px 8px; background: var(--branco-frio); border-radius: 6px; }
-      .lote-item-base-nome { font-weight: 600; min-width: 130px; }
+      /* Lista de documentações (2026-09-23, pedido da Iasmin: "muito
+         extenso, grande e pouco estético") — trocado de cartão com borda +
+         chip de status duplicado (badge E select mostrando o mesmo valor)
+         por linhas leves com divisor fino, um único controle de status por
+         base, e recolhimento automático dos itens já 100% resolvidos. */
+      .lote-item-row { border-bottom: 1px solid var(--cinza-frio); padding: 7px 0; }
+      .lote-item-row:last-child { border-bottom: none; }
+      .lote-item-row-head { display:flex; align-items:center; gap:7px; width:100%; background:none; border:none; padding:2px 0; margin:0; cursor:pointer; text-align:left; font:inherit; color:inherit; }
+      .lote-item-row-head:hover .lote-item-titulo { color: var(--azul); }
+      .lote-item-chevron { color: var(--carvao); opacity:0.55; flex-shrink:0; }
+      .lote-item-titulo { font-size: 12.5px; font-weight: 700; color: var(--azul-2); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex: 1 1 auto; min-width: 0; }
+      .lote-item-origem { font-size: 9.5px; color: var(--carvao); opacity:0.65; text-transform: uppercase; letter-spacing: 0.03em; flex-shrink:0; }
+      .lote-item-resumo { margin-left:auto; font-size: 11px; font-weight:600; color: var(--carvao); flex-shrink:0; white-space:nowrap; }
+      .lote-item-bases { display: flex; flex-direction: column; margin-top: 4px; padding-left: 21px; }
+      .lote-item-base-row { display:grid; grid-template-columns: 104px auto 1fr; align-items:center; column-gap:10px; font-size: 12px; padding: 4px 0; border-top: 1px solid rgba(15,30,45,0.05); }
+      .lote-item-base-row:first-child { border-top: none; }
+      .lote-item-base-nome { font-weight: 600; font-size: 11.5px; color: var(--carvao); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width: 0; }
+      .lote-item-base-actions { display:flex; align-items:center; gap:6px; flex-wrap:wrap; justify-content:flex-end; }
+      .lote-status-select-wrap { position:relative; display:inline-flex; align-items:center; }
+      .lote-status-select { appearance:none; -webkit-appearance:none; -moz-appearance:none; border:none; outline:none; cursor:pointer; padding-right:20px !important; }
+      .lote-status-select-caret { position:absolute; right:5px; top:50%; transform:translateY(-50%); pointer-events:none; opacity:0.6; }
       .lote-compilado-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(130px,1fr)); gap: 10px; margin-bottom: 14px; }
       .lote-compilado-card { border:1px solid var(--cinza-frio); border-radius: 8px; padding: 10px 12px; text-align:center; }
       .lote-compilado-card strong { display:block; font-size: 20px; color: var(--azul); }
@@ -18745,75 +18793,111 @@ async function processarLote(solicitacao, { companies, usuarioProcessamento, dep
     };
   }
 
-  // Passo único de análise: para cada (item x base) ainda não não-aplicável
-  // E sem anexo manual associado (esses já são tratados pelo laço de
-  // anexos, mais abaixo — nunca duplicados aqui), tenta casar AO VIVO com o
-  // catálogo real da base A CADA processamento — mesmo que o item já
-  // estivesse "recebido"/"conferido" de uma vez anterior — porque é assim
-  // que reprocessar/gerar uma nova versão do ZIP volta a incluir esse
-  // documento de novo (senão a 2ª versão do ZIP saía sem os itens que só
-  // foram casados automaticamente, nunca anexados). QUAL documento casou
-  // nunca é gravado "congelado". Quando o casamento entra de fato no ZIP
-  // gerado, o STATUS passa a refletir isso (nunca rebaixa um "conferido"
-  // manual pra um simples "recebido"); quando não é mais localizável mas já
-  // estava recebido/conferido antes, mantém a confirmação anterior (confia
-  // no que já foi confirmado por alguém). Resultado usado tanto pra decidir
-  // se há algo pra processar (etapa "recebimento") quanto pra organizar o
-  // ZIP (etapas "organização"/"classificação") e pra atualizar quem
-  // genuinamente não foi localizado (solicitado -> pendente — nunca fica
-  // "solicitado" pra sempre depois de uma tentativa real de processamento).
-  const entradasPorBase = new Map();
+  // Passo único de análise: para cada (item x base) ainda não não-aplicável,
+  // tenta casar AO VIVO com o catálogo real da base A CADA processamento —
+  // mesmo que o item já estivesse "recebido"/"conferido" de uma vez
+  // anterior — porque é assim que reprocessar/gerar uma nova versão do ZIP
+  // volta a incluir esse documento de novo (senão a 2ª versão do ZIP saía
+  // sem os itens que só foram casados automaticamente, nunca anexados).
+  // QUAL documento casou nunca é gravado "congelado". Quando o casamento
+  // entra de fato no ZIP gerado, o STATUS passa a refletir isso (nunca
+  // rebaixa um "conferido" manual pra um simples "recebido"); quando não é
+  // mais localizável mas já estava recebido/conferido antes, mantém a
+  // confirmação anterior (confia no que já foi confirmado por alguém).
+  //
+  // Numeração do ZIP (pedido explícito da Iasmin, 2026-09-23, após ver o
+  // resultado real: todo arquivo saía numerado "1 -" e os arquivos vinham
+  // segregados em pastas "Matriz"/"Filial X"): o número principal (1, 2,
+  // 3...) segue a ORDEM das documentações solicitadas — nunca reinicia por
+  // base, e só avança para uma documentação que de fato resultou em algo
+  // (recebido/casado). Quando essa documentação resolve em UMA única
+  // base/documento, o arquivo fica só "N - <documento>"; quando resolve em
+  // VÁRIAS bases (ex.: "CNPJ de matriz e filiais") ou em vários candidatos
+  // dentro da mesma base (categoria inteira/ambíguo), cada um vira
+  // "N.1 - <documento>", "N.2 - <documento>"... SEMPRE com sub-número,
+  // mesmo a primeira base (nunca um "N -" bruto seguido de "N.1 -" só nas
+  // demais) — o nome de cada documento já inclui "Matriz"/"Filial X" quando
+  // aplicável (mesmo título mostrado na tela), então isso sozinho já
+  // distingue as bases. E o ZIP fica SEMPRE em lista única, na raiz do
+  // pacote — sem nenhuma pasta por base — pedido explícito da Iasmin:
+  // pastas "Matriz"/"Filial X" atrapalhavam mais do que ajudavam, mesmo
+  // quando a solicitação tinha só 2 documentações.
+  const entradasNumeradas = [];
+  const anexosConsumidos = new Set();
+  let itemContador = 0;
   let algumRecebivel = false;
   const itensAtualizados = (solicitacao.documentacoesSolicitadas || []).map((item) => {
     const statusPorBase = { ...(item.statusPorBase || {}) };
+    const resolvidosDoItem = [];
     Object.keys(statusPorBase).forEach((baseId) => {
       const stAtual = statusPorBase[baseId];
       if (stAtual === "nao_aplicavel") return;
       const company = companiesPorId.get(baseId);
-      const temAnexo = (solicitacao.anexosRecebidos || []).some(
+      const anexo = (solicitacao.anexosRecebidos || []).find(
         (a) => a.itemAssociadoId === item.id && a.baseId === baseId,
       );
-      if (temAnexo) {
+      if (anexo) {
         algumRecebivel = true;
+        anexosConsumidos.add(anexo.id);
+        resolvidosDoItem.push({
+          doc: {
+            id: anexo.id,
+            categoria: null,
+            tipo: anexo.nome,
+            titulo: anexo.nome,
+            arquivo: {
+              driveFileId: anexo.driveFileId || null,
+              assetId: anexo.assetId || null,
+              mimeType: anexo.tipo || null,
+              nomeOriginal: anexo.nome,
+            },
+            __anexoManualLote: true,
+          },
+        });
         return;
       }
       const r = company
         ? matchChecklistItemToCompany(loteItemParaMatch(item), company)
         : { status: "sem_base", candidatos: [] };
-      if (r.status === "encontrado" || r.status === "grupo" || r.status === "ambiguo") {
+      if (r.status === "encontrado") {
         algumRecebivel = true;
-        const plano = buildResumoZipPlan([loteItemParaMatch(item)], company, {});
-        if (plano.numerados.length > 0) {
-          if (!entradasPorBase.has(baseId)) {
-            entradasPorBase.set(baseId, { baseFolder: companyLabelFor(company), numerados: [] });
-          }
-          entradasPorBase.get(baseId).numerados.push(...plano.numerados);
-          statusPorBase[baseId] = stAtual === "conferido" ? "conferido" : "recebido";
-        }
+        resolvidosDoItem.push({ doc: r.doc });
+        statusPorBase[baseId] = stAtual === "conferido" ? "conferido" : "recebido";
+      } else if (r.status === "grupo" || r.status === "ambiguo") {
+        algumRecebivel = true;
+        r.candidatos.forEach((doc) => resolvidosDoItem.push({ doc }));
+        statusPorBase[baseId] = stAtual === "conferido" ? "conferido" : "recebido";
       } else if (stAtual === "recebido" || stAtual === "conferido") {
         algumRecebivel = true; // não é mais localizável agora, mas confia na confirmação anterior
       } else {
         statusPorBase[baseId] = "pendente";
       }
     });
+    if (resolvidosDoItem.length === 1) {
+      itemContador++;
+      entradasNumeradas.push({ numero: String(itemContador), doc: resolvidosDoItem[0].doc });
+    } else if (resolvidosDoItem.length > 1) {
+      itemContador++;
+      resolvidosDoItem.forEach((r, i) => {
+        entradasNumeradas.push({ numero: `${itemContador}.${i + 1}`, doc: r.doc });
+      });
+    }
     return { ...item, statusPorBase };
   });
 
-  // anexos manuais (recebidos sem bater com nenhum documento já indexado no
-  // catálogo) entram no ZIP à parte, numerados dentro da pasta da própria
-  // base — reaproveita fetchDocumentFile sem alteração nenhuma, só
-  // adaptando o formato do anexo pro formato {id, categoria, tipo, titulo,
-  // arquivo:{driveFileId, assetId, mimeType, nomeOriginal}} que ela espera.
-  (solicitacao.anexosRecebidos || []).forEach((anexo, i) => {
+  // Rede de segurança: um anexo cujo item/base não bateu com nenhuma chave
+  // de `statusPorBase` (não deveria acontecer no fluxo normal, já que todo
+  // anexo é criado a partir de um item×base existente — mas nunca some um
+  // arquivo já enviado por causa de uma inconsistência de dados) ainda
+  // entra no ZIP, como uma entrada numerada própria.
+  (solicitacao.anexosRecebidos || []).forEach((anexo) => {
+    if (anexosConsumidos.has(anexo.id)) return;
     const company = companiesPorId.get(anexo.baseId);
     if (!company) return;
     algumRecebivel = true;
-    if (!entradasPorBase.has(anexo.baseId)) {
-      entradasPorBase.set(anexo.baseId, { baseFolder: companyLabelFor(company), numerados: [] });
-    }
-    entradasPorBase.get(anexo.baseId).numerados.push({
-      numero: `anexo-${i + 1}`,
-      item: { descricaoOriginal: anexo.nome },
+    itemContador++;
+    entradasNumeradas.push({
+      numero: String(itemContador),
       doc: {
         id: anexo.id,
         categoria: null,
@@ -18850,10 +18934,10 @@ async function processarLote(solicitacao, { companies, usuarioProcessamento, dep
   marcarEtapa("upload", "ok");
   marcarEtapa("validacao", "ok");
 
-  if (entradasPorBase.size === 0) {
+  if (entradasNumeradas.length === 0) {
     return falhar(
       "organizacao_classificacao",
-      "Não foi possível organizar nenhum documento por base para compactar.",
+      "Não foi possível organizar nenhum documento para compactar.",
       itensAtualizados,
     );
   }
@@ -18862,7 +18946,7 @@ async function processarLote(solicitacao, { companies, usuarioProcessamento, dep
   const zipName = `Grupoprima & ${sanitizeClientNameForFilename(solicitacao.cliente)} - Documentações.zip`;
   let pkg;
   try {
-    pkg = await _createDocumentPackageMultiBase([...entradasPorBase.values()], { zipName });
+    pkg = await _createDocumentPackageMultiBase(entradasNumeradas, { zipName });
   } catch (e) {
     return falhar("compactacao", (e && e.message) || "Falha ao montar o pacote de documentos.", itensAtualizados);
   }
@@ -19296,69 +19380,114 @@ function LoteItemBaseRow({ item, baseId, company, statusAtual, anexo, onUsarEnco
     "div",
     { className: "lote-item-base-row" },
     React.createElement("span", { className: "lote-item-base-nome" }, company ? companyLabelFor(company) : baseId),
-    React.createElement(LoteItemStatusBadge, { status: statusAtual }),
-    podeUsarEncontrado &&
-      React.createElement(
-        "button",
-        { type: "button", className: "mini-download-btn", onClick: onUsarEncontrado },
-        React.createElement(CheckCircle2, { size: 13 }),
-        " Usar documento encontrado",
-      ),
-    podeUsarEncontrado &&
-      match.status === "encontrado" &&
-      React.createElement(
-        React.Fragment,
-        null,
-        React.createElement(
-          "button",
-          { type: "button", className: "mini-download-btn", onClick: () => onVer(match.doc) },
-          React.createElement(Eye, { size: 13 }),
-          " Ver",
-        ),
-        React.createElement(
-          "button",
-          { type: "button", className: "mini-download-btn", onClick: () => onBaixar(match.doc) },
-          React.createElement(Download, { size: 13 }),
-          " Baixar",
-        ),
-      ),
-    !podeUsarEncontrado &&
-      statusAtual !== "recebido" &&
-      statusAtual !== "conferido" &&
-      statusAtual !== "nao_aplicavel" &&
-      React.createElement(LoteAnexoInlinePicker, { onFile: onAnexar, disabled: enviandoAnexo, label: enviandoAnexo ? "Enviando..." : "Anexar arquivo recebido" }),
-    anexo &&
-      React.createElement(
-        React.Fragment,
-        null,
-        React.createElement("span", { className: "homolog-anexo-nome" }, anexo.nome),
-        React.createElement(
-          "button",
-          { type: "button", className: "mini-download-btn", onClick: () => onVer({ id: anexo.id, tipo: anexo.tipo, titulo: anexo.nome, categoria: null, arquivo: { driveFileId: anexo.driveFileId, assetId: anexo.assetId, mimeType: anexo.tipo, nomeOriginal: anexo.nome } }) },
-          React.createElement(Eye, { size: 13 }),
-          " Ver",
-        ),
-        React.createElement(
-          "button",
-          { type: "button", className: "mini-download-btn", onClick: () => onBaixar({ id: anexo.id, tipo: anexo.tipo, titulo: anexo.nome, categoria: null, arquivo: { driveFileId: anexo.driveFileId, assetId: anexo.assetId, mimeType: anexo.tipo, nomeOriginal: anexo.nome } }) },
-          React.createElement(Download, { size: 13 }),
-          " Baixar",
-        ),
-        React.createElement(
-          "button",
-          { type: "button", className: "icon-btn-dark", onClick: onRemoverAnexo, "aria-label": `Remover ${anexo.nome}` },
-          React.createElement(X, { size: 13 }),
-        ),
-      ),
+    React.createElement(LoteItemStatusSelect, { status: statusAtual, onChange: onAlterarStatus }),
     React.createElement(
-      "select",
-      {
-        value: statusAtual,
-        onChange: (e) => onAlterarStatus(e.target.value),
-        style: { marginLeft: "auto", fontSize: "11.5px" },
-      },
-      Object.entries(LOTE_ITEM_STATUS_META).map(([k, m]) => React.createElement("option", { key: k, value: k }, m.label)),
+      "div",
+      { className: "lote-item-base-actions" },
+      podeUsarEncontrado &&
+        React.createElement(
+          "button",
+          { type: "button", className: "mini-download-btn", onClick: onUsarEncontrado },
+          React.createElement(CheckCircle2, { size: 13 }),
+          " Usar encontrado",
+        ),
+      podeUsarEncontrado &&
+        match.status === "encontrado" &&
+        React.createElement(
+          React.Fragment,
+          null,
+          React.createElement(
+            "button",
+            { type: "button", className: "mini-download-btn", onClick: () => onVer(match.doc), "aria-label": "Ver documento encontrado" },
+            React.createElement(Eye, { size: 13 }),
+          ),
+          React.createElement(
+            "button",
+            { type: "button", className: "mini-download-btn", onClick: () => onBaixar(match.doc), "aria-label": "Baixar documento encontrado" },
+            React.createElement(Download, { size: 13 }),
+          ),
+        ),
+      !podeUsarEncontrado &&
+        statusAtual !== "recebido" &&
+        statusAtual !== "conferido" &&
+        statusAtual !== "nao_aplicavel" &&
+        React.createElement(LoteAnexoInlinePicker, { onFile: onAnexar, disabled: enviandoAnexo, label: enviandoAnexo ? "Enviando..." : "Anexar arquivo" }),
+      anexo &&
+        React.createElement(
+          React.Fragment,
+          null,
+          React.createElement("span", { className: "homolog-anexo-nome" }, anexo.nome),
+          React.createElement(
+            "button",
+            { type: "button", className: "mini-download-btn", onClick: () => onVer({ id: anexo.id, tipo: anexo.tipo, titulo: anexo.nome, categoria: null, arquivo: { driveFileId: anexo.driveFileId, assetId: anexo.assetId, mimeType: anexo.tipo, nomeOriginal: anexo.nome } }), "aria-label": "Ver anexo" },
+            React.createElement(Eye, { size: 13 }),
+          ),
+          React.createElement(
+            "button",
+            { type: "button", className: "mini-download-btn", onClick: () => onBaixar({ id: anexo.id, tipo: anexo.tipo, titulo: anexo.nome, categoria: null, arquivo: { driveFileId: anexo.driveFileId, assetId: anexo.assetId, mimeType: anexo.tipo, nomeOriginal: anexo.nome } }), "aria-label": "Baixar anexo" },
+            React.createElement(Download, { size: 13 }),
+          ),
+          React.createElement(
+            "button",
+            { type: "button", className: "icon-btn-dark", onClick: onRemoverAnexo, "aria-label": `Remover ${anexo.nome}` },
+            React.createElement(X, { size: 13 }),
+          ),
+        ),
     ),
+  );
+}
+/** LoteItemCard: um item de "documentações solicitadas" (título + suas
+ *  bases). Recolhido por padrão quando TODAS as bases já estão resolvidas
+ *  (recebido/conferido/não aplicável) — só os itens que ainda precisam de
+ *  atenção abrem expandidos de cara. Pedido direto da Iasmin (2026-09-23,
+ *  com print): a lista ficava grande e repetitiva quando praticamente tudo
+ *  já tinha sido recebido — não faz sentido mostrar 7 linhas de "Recebido"
+ *  por extenso quando um resumo de uma linha já diz tudo. */
+function LoteItemCard({ it, companiesPorId, anexosRecebidos, enviandoAnexoChave, onUsarEncontrado, onAnexar, onRemoverAnexo, onAlterarStatus, onVer, onBaixar }) {
+  const baseIds = Object.keys(it.statusPorBase || {});
+  const resolvido = (st) => st === "recebido" || st === "conferido" || st === "nao_aplicavel";
+  const statuses = baseIds.map((b) => it.statusPorBase[b]);
+  const todasResolvidas = statuses.length > 0 && statuses.every(resolvido);
+  const [expanded, setExpanded] = useState(!todasResolvidas);
+  const recebidas = statuses.filter(resolvido).length;
+  const resumo =
+    baseIds.length <= 1
+      ? (LOTE_ITEM_STATUS_META[statuses[0]] || {}).label || ""
+      : `${recebidas}/${baseIds.length} resolvidas`;
+  return React.createElement(
+    "div",
+    { className: "lote-item-row" },
+    React.createElement(
+      "button",
+      { type: "button", className: "lote-item-row-head", onClick: () => setExpanded((v) => !v) },
+      React.createElement(expanded ? ChevronDown : ChevronRight, { size: 14, className: "lote-item-chevron" }),
+      React.createElement("span", { className: "lote-item-titulo" }, it.nome),
+      React.createElement("span", { className: "lote-item-origem" }, it.origem === "manual" ? "manual" : "checklist"),
+      React.createElement("span", { className: "lote-item-resumo" }, resumo),
+    ),
+    expanded &&
+      React.createElement(
+        "div",
+        { className: "lote-item-bases" },
+        baseIds.map((baseId) => {
+          const anexo = (anexosRecebidos || []).find((a) => a.itemAssociadoId === it.id && a.baseId === baseId);
+          return React.createElement(LoteItemBaseRow, {
+            key: baseId,
+            item: it,
+            baseId,
+            company: companiesPorId.get(baseId),
+            statusAtual: it.statusPorBase[baseId],
+            anexo,
+            enviandoAnexo: enviandoAnexoChave === `${it.id}:${baseId}`,
+            onUsarEncontrado: () => onUsarEncontrado(it.id, baseId),
+            onAnexar: (file) => onAnexar(it.id, baseId, file),
+            onRemoverAnexo: () => anexo && onRemoverAnexo(anexo),
+            onAlterarStatus: (novoStatus) => onAlterarStatus(it.id, baseId, novoStatus),
+            onVer,
+            onBaixar,
+          });
+        }),
+      ),
   );
 }
 /** EnvioLoteDetailView: tela de UMA solicitação — documentações solicitadas
@@ -19576,38 +19705,19 @@ function EnvioLoteDetailView({ item, companies, onBack, onNotify, onView, onUpda
       { className: "lote-section" },
       React.createElement("h3", null, "Documentações solicitadas"),
       (item.documentacoesSolicitadas || []).map((it) =>
-        React.createElement(
-          "div",
-          { key: it.id, className: "lote-item-row" },
-          React.createElement(
-            "div",
-            { className: "lote-item-row-head" },
-            React.createElement("span", { className: "lote-item-titulo" }, it.nome),
-            React.createElement("span", { className: "lote-item-origem" }, it.origem === "manual" ? "adicionado manualmente" : "da checklist"),
-          ),
-          React.createElement(
-            "div",
-            { className: "lote-item-bases" },
-            Object.keys(it.statusPorBase || {}).map((baseId) => {
-              const anexo = (item.anexosRecebidos || []).find((a) => a.itemAssociadoId === it.id && a.baseId === baseId);
-              return React.createElement(LoteItemBaseRow, {
-                key: baseId,
-                item: it,
-                baseId,
-                company: companiesPorId.get(baseId),
-                statusAtual: it.statusPorBase[baseId],
-                anexo,
-                enviandoAnexo: enviandoAnexoChave === `${it.id}:${baseId}`,
-                onUsarEncontrado: () => alterarStatus(it.id, baseId, "recebido"),
-                onAnexar: (file) => handleAnexarArquivo(it.id, baseId, file),
-                onRemoverAnexo: () => anexo && handleRemoverAnexo(anexo),
-                onAlterarStatus: (novoStatus) => alterarStatus(it.id, baseId, novoStatus),
-                onVer: handleVer,
-                onBaixar: handleBaixar,
-              });
-            }),
-          ),
-        ),
+        React.createElement(LoteItemCard, {
+          key: it.id,
+          it,
+          companiesPorId,
+          anexosRecebidos: item.anexosRecebidos,
+          enviandoAnexoChave,
+          onUsarEncontrado: (itemId, baseId) => alterarStatus(itemId, baseId, "recebido"),
+          onAnexar: handleAnexarArquivo,
+          onRemoverAnexo: handleRemoverAnexo,
+          onAlterarStatus: alterarStatus,
+          onVer: handleVer,
+          onBaixar: handleBaixar,
+        }),
       ),
       React.createElement(
         "div",
