@@ -1400,8 +1400,9 @@ function assetIssueMessage(reason) {
       return "Atenção: o arquivo original ficará disponível somente nesta aba.";
   }
 }
-async function tryPersistUploadedFile(file) {
+async function tryPersistUploadedFile(file, opts) {
   const MAX_BYTES = 20 * 1024 * 1024;
+  const pastaDestino = opts && opts.pasta ? String(opts.pasta) : null;
   if (file.size > MAX_BYTES)
     return { ok: false, reason: "arquivo_grande_demais" };
   // Backend próprio (Cloud Run): tentado PRIMEIRO — sobe o binário de
@@ -1417,6 +1418,7 @@ async function tryPersistUploadedFile(file) {
     try {
       const formData = new FormData();
       formData.append("arquivo", file, file.name);
+      if (pastaDestino) formData.append("pasta", pastaDestino);
       const resp = await fetch(`${DRIVE_PROXY_URL}/api/documents/upload-file`, {
         method: "POST",
         headers: DRIVE_PROXY_KEY ? { "X-Portal-Key": DRIVE_PROXY_KEY } : {},
@@ -2258,6 +2260,16 @@ const AUDIT_ACTION_LABELS = {
   excluiu_homologacao: "Excluiu homologação",
   solicitou_analise_clausulas: "Solicitou análise documental de cliente",
   gerou_pdf_analise_clausulas: "Gerou PDF da análise documental",
+  criou_solicitacao_lote: "Criou solicitação de envio de documentações em lote",
+  adicionou_documentacao_lote: "Adicionou documentação à solicitação em lote",
+  upload_arquivo_lote: "Enviou arquivo recebido (envio em lote)",
+  removeu_arquivo_lote: "Removeu arquivo recebido (envio em lote)",
+  alterou_status_documentacao_lote: "Alterou status de documentação (envio em lote)",
+  processou_lote: "Processou solicitação de envio em lote",
+  gerou_zip_lote: "Gerou ZIP da solicitação em lote",
+  baixou_zip_lote: "Baixou ZIP da solicitação em lote",
+  concluiu_lote: "Concluiu solicitação de envio em lote",
+  atualizou_solicitacao_lote: "Atualizou solicitação de envio em lote",
 };
 /** RESTDB_POLL_INTERVAL_MS: fora do Artifact não existe um canal de tempo
  *  real (onSnapshot de verdade) sem adicionar uma dependência nova
@@ -5892,6 +5904,7 @@ function DashboardView({
   data,
   onOpenCompany,
   onGoCompanies,
+  onGoCompaniesCorporate,
   onOpenDocuments,
   onOpenChat,
 }) {
@@ -6023,8 +6036,12 @@ function DashboardView({
         // explícito da Iasmin, 2026-09-18: "inclui nesse espaço em branco...
         // um acesso rápido") — mesma estrutura visual dos cards de base, no
         // espaço que sobra na grade (4 colunas × 2 linhas com 7 bases).
-        // Nunca uma base/CNPJ novo: leva pra Empresas, que já abre mostrando
-        // essa seção por padrão.
+        // Nunca uma base/CNPJ novo: leva pra Empresas. `onGoCompaniesCorporate`
+        // (nunca o `onGoCompanies` genérico usado pelos outros cards/KPIs
+        // desta tela) também liga a semente `companiesOpenCorporate` — só
+        // clicando ESTE card específico é que a tela de Empresas chega com o
+        // bloco "Documentações de abrangência empresarial" já aberto (pedido
+        // explícito da Iasmin, 2026-09-23; ver CompaniesView abaixo).
         /*#__PURE__*/ React.createElement(
           "div",
           {
@@ -6032,8 +6049,8 @@ function DashboardView({
             className: "company-mini company-mini-corporate",
             role: "button",
             tabIndex: 0,
-            onClick: onGoCompanies,
-            onKeyDown: (e) => e.key === "Enter" && onGoCompanies(),
+            onClick: onGoCompaniesCorporate,
+            onKeyDown: (e) => e.key === "Enter" && onGoCompaniesCorporate(),
           },
           /*#__PURE__*/ React.createElement(
             "div",
@@ -6065,7 +6082,7 @@ function DashboardView({
                 className: "company-mini-docs-btn",
                 onClick: (e) => {
                   e.stopPropagation();
-                  onGoCompanies();
+                  onGoCompaniesCorporate();
                 },
               },
               /*#__PURE__*/ React.createElement(FileSearch, { size: 12 }),
@@ -6863,6 +6880,8 @@ function CompaniesView({
   onNotify,
   onView,
   isAdmin,
+  openCorporateOnMount,
+  onCorporateAutoOpenConsumed,
 }) {
   // Hierarquia definitiva (item 1/10): o portal tem UMA empresa (Grupoprima
   // Logística) — as unidades com CNPJ próprio são estabelecimentos dela,
@@ -6879,7 +6898,23 @@ function CompaniesView({
   // próprio "balão" (cartão) da Grupoprima Logística, atrás deste toggle.
   // Na lista de bases (drilled) o bloco continua aparecendo embaixo das
   // filiais, sem mudança — só a tela única foi alterada aqui.
-  const [showCorporateBlock, setShowCorporateBlock] = useState(false);
+  // `openCorporateOnMount` (pedido explícito da Iasmin, 2026-09-23): só
+  // quando a navegação até aqui veio do card "Grupoprima Logística" do
+  // Dashboard (`goToCompaniesCorporate`) é que este toggle já nasce aberto
+  // — qualquer outra entrada nesta tela (nav lateral, "Ver todas", busca)
+  // continua nascendo fechado, como sempre (valor default `false`).
+  const [showCorporateBlock, setShowCorporateBlock] = useState(
+    () => !!openCorporateOnMount,
+  );
+  // Consome a semente uma única vez, no mount (mesmo mecanismo de
+  // onSeedConsumed do chat) — sem isso, `companiesOpenCorporate` ficaria
+  // "true" pra sempre no componente pai, e a PRÓXIMA vez que a usuária
+  // entrasse em Empresas por qualquer outro caminho o bloco reabriria
+  // sozinho, o que nunca foi pedido.
+  useEffect(() => {
+    if (openCorporateOnMount) onCorporateAutoOpenConsumed?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   // "Documentações de abrangência empresarial" (item 3 do pedido de
   // 2026-09-14): painel separado — NÃO é uma nova empresa/Base, só uma área
   // para organizar documentos cuja abrangência é "Empresa — Grupoprima
@@ -11633,661 +11668,6 @@ function avisoFonteExterna(descricao) {
   });
   return { numerados, ambiguosInformados, naoLocalizados };
 }
-/** EnvioDocumentacaoLoteModal: "Envio de documentações em lote" — fica na
- *  área GERAL de Homologações (nunca dentro de um registro específico),
- *  pedido estrutural da Iasmin (2026-09-17). Substitui de vez o antigo
- *  fluxo por homologação (HomologacaoResumoSolicitacao, que dava erro e
- *  dependia do Gemini) e a seção equivalente por Base em Empresas
- *  (PacoteDocumentosBase) — agora existe um único ponto de entrada, sem
- *  nenhuma IA generativa: 3 campos (documentações necessárias, filiais/
- *  bases já cadastradas, nome do cliente), cruzamento 100% por regras
- *  contra os dados REAIS já indexados (mesmo motor de
- *  matchChecklistItemToCompany/buildResumoZipPlan usado no resto do
- *  portal — "não quero uma IA decidindo livremente quais documentos
- *  utilizar"), e separação clara em três grupos antes de qualquer
- *  download: encontradas, não encontradas (por base) e necessita de
- *  conferência (só o que o motor de regras genuinamente não conseguiu
- *  identificar — nunca uma adivinhação). */
-function EnvioDocumentacaoLoteModal({ companies, onNotify, onView, onClose }) {
-  const [clienteNome, setClienteNome] = useState("");
-  const [baseIds, setBaseIds] = useState([]);
-  const [modoEntrada, setModoEntrada] = useState("texto");
-  const [textoChecklist, setTextoChecklist] = useState("");
-  const [arquivoInfo, setArquivoInfo] = useState(null);
-  const arquivoRef = useRef(null);
-  const fileInputRef = useRef(null);
-  const [processando, setProcessando] = useState(false);
-  const [erro, setErro] = useState(null);
-  const [itens, setItens] = useState(null);
-  const [exclusoesPorBase, setExclusoesPorBase] = useState({});
-  const [gerandoZip, setGerandoZip] = useState(false);
-  function baseLabel(c) {
-    return c.tipo === "Matriz"
-      ? "Matriz"
-      : `Filial ${c.id} — ${c.municipio}/${c.uf}`;
-  }
-  function toggleBase(id) {
-    setBaseIds((prev) =>
-      prev.includes(id) ? prev.filter((b) => b !== id) : [...prev, id],
-    );
-  }
-  async function handleArquivoSelecionado(file) {
-    if (!file) return;
-    const bytes = new Uint8Array(await file.arrayBuffer());
-    arquivoRef.current = { bytes, mimeType: file.type, filename: file.name };
-    setArquivoInfo({ nome: file.name, tamanho: file.size });
-    setErro(null);
-  }
-  async function handleGerarChecklist() {
-    setErro(null);
-    setItens(null);
-    setExclusoesPorBase({});
-    if (!clienteNome.trim()) {
-      setErro("Informe o nome do cliente.");
-      return;
-    }
-    let texto = "";
-    if (modoEntrada === "texto") {
-      texto = textoChecklist;
-      if (!texto.trim()) {
-        setErro(
-          "Cole ou digite a lista de documentações necessárias (uma por linha), ou envie um arquivo.",
-        );
-        return;
-      }
-    } else {
-      if (!arquivoRef.current) {
-        setErro(
-          "Envie um arquivo com a lista de documentações necessárias, ou digite manualmente.",
-        );
-        return;
-      }
-      setProcessando(true);
-      const { bytes, mimeType, filename } = arquivoRef.current;
-      const extraido = await extractTextForResumoSolicitacao(
-        bytes,
-        mimeType,
-        filename,
-      );
-      if (!extraido.ok) {
-        setProcessando(false);
-        setErro(motivoParaTexto(extraido.motivo));
-        return;
-      }
-      texto = extraido.text;
-    }
-    if (baseIds.length === 0) {
-      setProcessando(false);
-      setErro("Selecione ao menos uma filial/base.");
-      return;
-    }
-    const gerado = gerarChecklistViaRegras(texto);
-    setProcessando(false);
-    if (!gerado.ok) {
-      setErro(motivoParaTexto(gerado.motivo));
-      return;
-    }
-    // Regra explícita da Iasmin, 2026-09-21: cada ITEM que mencionar "matriz
-    // e filiais" (ou frase equivalente) na própria linha vale para TODAS as
-    // bases cadastradas automaticamente — sem exigir marcar cada checkbox
-    // manualmente — mas SÓ aquele item; os demais itens da mesma checklist
-    // continuam restritos à(s) base(s) realmente marcada(s) ("a única
-    // alternativa marcada"). Isso é aplicado mais abaixo em `planosPorBase`;
-    // aqui só avisa o que foi identificado, sem mexer na seleção de bases.
-    const itensParaTodasAsBases = gerado.itens.filter(
-      (it) => it.valePorTodasAsBases,
-    );
-    if (itensParaTodasAsBases.length > 0 && companies.length > 0 && onNotify) {
-      const rotulos = itensParaTodasAsBases
-        .map((it) => it.tipoSugerido || it.descricaoOriginal)
-        .join(", ");
-      onNotify(
-        `Identifiquei que ${itensParaTodasAsBases.length === 1 ? "este item vale" : "estes itens valem"} para todas as bases cadastradas: ${rotulos}. Os demais itens seguem restritos à(s) base(s) marcada(s).`,
-        "info",
-      );
-    }
-    setItens(gerado.itens);
-  }
-  const basesSelecionadas = companies.filter((c) => baseIds.includes(c.id));
-  const itensSemClassificacao = useMemo(
-    () =>
-      (itens || []).filter(
-        (it) => !it.tipoSugerido && !it.categoriaSugerida,
-      ),
-    [itens],
-  );
-  // basesExtrasTodasAsBases: bases que a Iasmin NÃO marcou manualmente, mas
-  // que precisam entrar mesmo assim porque pelo menos um item da checklist
-  // (ex.: "Cartão CNPJ da matriz e filiais") vale para todas as bases
-  // cadastradas. Cada uma dessas bases extras só recebe ESSES itens — nunca
-  // o restante da checklist, que segue restrito à(s) base(s) realmente
-  // marcada(s) (pedido explícito da Iasmin, 2026-09-21: "o restante seguirá
-  // sendo da única alternativa marcada").
-  const basesExtrasTodasAsBases = useMemo(() => {
-    if (!itens || !itens.some((it) => it.valePorTodasAsBases)) return [];
-    return companies.filter((c) => !baseIds.includes(c.id));
-  }, [itens, companies, baseIds]);
-  const planosPorBase = useMemo(() => {
-    if (!itens) return [];
-    const marcadasManualmente = basesSelecionadas.map((company) => ({
-      company,
-      itensDaBase: itens,
-    }));
-    const extras = basesExtrasTodasAsBases.map((company) => ({
-      company,
-      itensDaBase: itens.filter((it) => it.valePorTodasAsBases),
-    }));
-    return [...marcadasManualmente, ...extras].map(({ company, itensDaBase }) => {
-      const plano = buildResumoZipPlan(
-        itensDaBase,
-        company,
-        exclusoesPorBase[company.id] || {},
-      );
-      return {
-        company,
-        plano,
-        naoEncontrados: plano.naoLocalizados.filter(
-          (p) => p.status === "nao_localizado",
-        ),
-      };
-    });
-  }, [itens, basesSelecionadas, basesExtrasTodasAsBases, exclusoesPorBase]);
-  function alternarExclusao(companyId, itemId, docId) {
-    const chave = `${itemId}:${docId}`;
-    setExclusoesPorBase((prev) => ({
-      ...prev,
-      [companyId]: {
-        ...(prev[companyId] || {}),
-        [chave]: !(prev[companyId] || {})[chave],
-      },
-    }));
-  }
-  async function handleVer(doc, company) {
-    await viewDocument(doc, { onNotify, company, onView });
-  }
-  const totalEncontrados = planosPorBase.reduce(
-    (s, p) => s + p.plano.numerados.length,
-    0,
-  );
-  async function handleBaixarZip() {
-    if (totalEncontrados === 0) {
-      onNotify?.("Nenhum documento localizado para incluir no ZIP.", "info");
-      return;
-    }
-    setGerandoZip(true);
-    const entradas = planosPorBase
-      .filter((p) => p.plano.numerados.length > 0)
-      .map((p) => ({
-        baseFolder: baseLabel(p.company).split(" — ")[0],
-        numerados: p.plano.numerados,
-      }));
-    const zipName = `Grupoprima & ${sanitizeClientNameForFilename(clienteNome)} - Documentações.zip`;
-    const pkg = await createDocumentPackageMultiBase(entradas, { zipName });
-    if (pkg.files.length === 0) {
-      setGerandoZip(false);
-      onNotify?.(
-        "Nenhum dos arquivos originais foi encontrado no repositório para compactar.",
-        "error",
-      );
-      return;
-    }
-    const blob = createZip(pkg.files);
-    try {
-      await downloadZip(blob, pkg.zipName);
-    } catch (e) {
-      setGerandoZip(false);
-      onNotify?.(
-        e instanceof DocumentFileError
-          ? e.message
-          : "Não foi possível baixar o ZIP.",
-        "error",
-      );
-      return;
-    }
-    logDocumentAction("gerou_zip_envio_lote", {
-      cliente: clienteNome,
-      bases: planosPorBase.map((p) => baseLabel(p.company)),
-      quantidade: pkg.files.length,
-    });
-    setGerandoZip(false);
-    onNotify?.(
-      pkg.failed.length > 0
-        ? `ZIP gerado com ${pkg.files.length} arquivo(s) — ${pkg.failed.length} não puderam ser incluídos.`
-        : `ZIP gerado com ${pkg.files.length} arquivo(s).`,
-      "info",
-    );
-  }
-  return /*#__PURE__*/ React.createElement(
-    "div",
-    { className: "docs-modal-overlay", onClick: onClose },
-    /*#__PURE__*/ React.createElement(
-      "div",
-      {
-        className: "docs-modal homolog-form-modal homolog-zip-modal",
-        onClick: (e) => e.stopPropagation(),
-      },
-      /*#__PURE__*/ React.createElement(
-        "div",
-        { className: "docs-modal-head" },
-        /*#__PURE__*/ React.createElement(
-          "div",
-          null,
-          /*#__PURE__*/ React.createElement(
-            "div",
-            { className: "docs-modal-title" },
-            /*#__PURE__*/ React.createElement(FolderArchive, { size: 16 }),
-            " Envio de documentações em lote",
-          ),
-          /*#__PURE__*/ React.createElement(
-            "div",
-            { className: "docs-modal-sub" },
-            "Informe o cliente, as filiais/bases envolvidas e a lista de documentos exigidos — o portal cruza com a documentação real já indexada e organiza tudo em um único ZIP, sem usar IA generativa: só regras e os dados já cadastrados.",
-          ),
-        ),
-        /*#__PURE__*/ React.createElement(
-          "button",
-          {
-            className: "icon-btn-dark",
-            onClick: onClose,
-            "aria-label": "Fechar",
-          },
-          /*#__PURE__*/ React.createElement(X, { size: 18 }),
-        ),
-      ),
-      /*#__PURE__*/ React.createElement(
-        "div",
-        { className: "docs-modal-body" },
-        erro &&
-          /*#__PURE__*/ React.createElement(
-            "div",
-            { className: "login-error" },
-            /*#__PURE__*/ React.createElement(AlertTriangle, { size: 14 }),
-            " ",
-            erro,
-          ),
-        /*#__PURE__*/ React.createElement(
-          "div",
-          { className: "homolog-field" },
-          /*#__PURE__*/ React.createElement(
-            "label",
-            null,
-            "Documentações necessárias",
-          ),
-          /*#__PURE__*/ React.createElement(
-            "p",
-            { className: "homolog-bases-hint" },
-            'Digite ou cole a lista (uma documentação por linha, ex.: "CNPJ", "Contrato Social", "Certidão Federal", "Licença Ambiental", "Alvará", "Seguro", "SASSMAQ") ou envie um arquivo com o pedido do cliente.',
-          ),
-          /*#__PURE__*/ React.createElement(
-            "div",
-            { className: "homolog-radio-group" },
-            /*#__PURE__*/ React.createElement(
-              "label",
-              {
-                className:
-                  "homolog-radio" +
-                  (modoEntrada === "texto" ? " active" : ""),
-              },
-              /*#__PURE__*/ React.createElement("input", {
-                type: "radio",
-                name: "modoEntradaLote",
-                checked: modoEntrada === "texto",
-                onChange: () => setModoEntrada("texto"),
-              }),
-              " Digitar/colar lista",
-            ),
-            /*#__PURE__*/ React.createElement(
-              "label",
-              {
-                className:
-                  "homolog-radio" +
-                  (modoEntrada === "arquivo" ? " active" : ""),
-              },
-              /*#__PURE__*/ React.createElement("input", {
-                type: "radio",
-                name: "modoEntradaLote",
-                checked: modoEntrada === "arquivo",
-                onChange: () => setModoEntrada("arquivo"),
-              }),
-              " Enviar arquivo",
-            ),
-          ),
-          modoEntrada === "texto"
-            ? /*#__PURE__*/ React.createElement("textarea", {
-                rows: 6,
-                value: textoChecklist,
-                onChange: (e) => setTextoChecklist(e.target.value),
-                placeholder:
-                  "CNPJ\nContrato Social\nCertidão Federal\nLicença Ambiental\nAlvará\nSeguro\nSASSMAQ",
-              })
-            : /*#__PURE__*/ React.createElement(
-                React.Fragment,
-                null,
-                /*#__PURE__*/ React.createElement(
-                  "div",
-                  {
-                    className: "homolog-dropzone",
-                    onDragOver: (e) => e.preventDefault(),
-                    onDrop: (e) => {
-                      e.preventDefault();
-                      handleArquivoSelecionado(e.dataTransfer.files?.[0]);
-                    },
-                    onClick: () => fileInputRef.current?.click(),
-                    role: "button",
-                    tabIndex: 0,
-                  },
-                  /*#__PURE__*/ React.createElement(UploadCloud, { size: 20 }),
-                  /*#__PURE__*/ React.createElement(
-                    "span",
-                    null,
-                    "Arraste o arquivo aqui ou clique para selecionar (PDF, Word, Excel, TXT ou CSV)",
-                  ),
-                  /*#__PURE__*/ React.createElement("input", {
-                    ref: fileInputRef,
-                    type: "file",
-                    accept:
-                      ".pdf,.doc,.docx,.xls,.xlsx,.txt,.csv,image/*,application/pdf",
-                    hidden: true,
-                    onChange: (e) => {
-                      handleArquivoSelecionado(e.target.files?.[0]);
-                      e.target.value = "";
-                    },
-                  }),
-                ),
-                arquivoInfo &&
-                  /*#__PURE__*/ React.createElement(
-                    "div",
-                    { className: "homolog-anexo-item" },
-                    /*#__PURE__*/ React.createElement(FileText, { size: 14 }),
-                    /*#__PURE__*/ React.createElement(
-                      "span",
-                      { className: "homolog-anexo-nome" },
-                      arquivoInfo.nome,
-                    ),
-                    /*#__PURE__*/ React.createElement(
-                      "span",
-                      { className: "homolog-anexo-tamanho" },
-                      formatBytes(arquivoInfo.tamanho),
-                    ),
-                  ),
-              ),
-        ),
-        /*#__PURE__*/ React.createElement(
-          "div",
-          { className: "homolog-field" },
-          /*#__PURE__*/ React.createElement("label", null, "Filiais/Bases"),
-          /*#__PURE__*/ React.createElement(
-            "p",
-            { className: "homolog-bases-hint" },
-            "Selecione uma ou mais bases já cadastradas no portal — nenhum registro novo é criado.",
-          ),
-          /*#__PURE__*/ React.createElement(
-            "div",
-            { className: "homolog-bases-grid" },
-            companies.map((c) =>
-              /*#__PURE__*/ React.createElement(
-                "label",
-                {
-                  key: c.id,
-                  className:
-                    "homolog-base-chip" +
-                    (baseIds.includes(c.id) ? " active" : ""),
-                },
-                /*#__PURE__*/ React.createElement("input", {
-                  type: "checkbox",
-                  checked: baseIds.includes(c.id),
-                  onChange: () => toggleBase(c.id),
-                }),
-                baseLabel(c),
-              ),
-            ),
-          ),
-        ),
-        /*#__PURE__*/ React.createElement(
-          "div",
-          { className: "homolog-field" },
-          /*#__PURE__*/ React.createElement("label", null, "Nome do cliente"),
-          /*#__PURE__*/ React.createElement(
-            "p",
-            { className: "homolog-bases-hint" },
-            "Usado para nomear a pasta principal do pacote final: ",
-            /*#__PURE__*/ React.createElement(
-              "strong",
-              null,
-              "Grupoprima & [Nome do Cliente] - Documentações",
-            ),
-            ".",
-          ),
-          /*#__PURE__*/ React.createElement("input", {
-            type: "text",
-            value: clienteNome,
-            onChange: (e) => setClienteNome(e.target.value),
-            placeholder: "Razão social ou nome fantasia do cliente",
-          }),
-        ),
-        !itens &&
-          /*#__PURE__*/ React.createElement(
-            "div",
-            { className: "homolog-form-actions" },
-            /*#__PURE__*/ React.createElement(
-              "button",
-              {
-                type: "button",
-                className: "doc-download-btn",
-                disabled: processando,
-                onClick: handleGerarChecklist,
-              },
-              processando
-                ? /*#__PURE__*/ React.createElement(Loader2, { size: 13 })
-                : /*#__PURE__*/ React.createElement(FileSearch, { size: 13 }),
-              processando ? " Processando..." : " Processar",
-            ),
-          ),
-        itens &&
-          /*#__PURE__*/ React.createElement(
-            React.Fragment,
-            null,
-            /*#__PURE__*/ React.createElement(
-              "div",
-              { className: "homolog-zip-resumo" },
-              /*#__PURE__*/ React.createElement(CheckCircle2, { size: 13 }),
-              " ",
-              totalEncontrados,
-              " documento(s) encontrado(s) · ",
-              /*#__PURE__*/ React.createElement(HelpCircle, { size: 13 }),
-              " ",
-              itensSemClassificacao.length,
-              " necessita(m) de conferência",
-            ),
-            /*#__PURE__*/ React.createElement(
-              "button",
-              {
-                type: "button",
-                className: "filters-clear-btn",
-                style: { flex: "none", marginBottom: "8px" },
-                onClick: () => setItens(null),
-              },
-              "← Ajustar checklist",
-            ),
-            itensSemClassificacao.length > 0 &&
-              /*#__PURE__*/ React.createElement(
-                "div",
-                { className: "homolog-zip-grupo" },
-                /*#__PURE__*/ React.createElement(
-                  "h4",
-                  null,
-                  "Necessita de conferência",
-                ),
-                /*#__PURE__*/ React.createElement(
-                  "p",
-                  { className: "empty-note" },
-                  "O motor de regras não reconheceu o tipo/categoria destes itens — não é possível cruzar automaticamente com nenhuma base; confira manualmente.",
-                ),
-                /*#__PURE__*/ React.createElement(
-                  "ul",
-                  { className: "homolog-zip-lista" },
-                  itensSemClassificacao.map((item) =>
-                    /*#__PURE__*/ React.createElement(
-                      "li",
-                      { key: item.id, className: "homolog-zip-item" },
-                      /*#__PURE__*/ React.createElement(
-                        "span",
-                        null,
-                        item.descricaoOriginal,
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            planosPorBase.map(({ company, plano, naoEncontrados }) =>
-              /*#__PURE__*/ React.createElement(
-                "div",
-                {
-                  key: company.id,
-                  className: "homolog-zip-grupo",
-                },
-                /*#__PURE__*/ React.createElement(
-                  "h4",
-                  null,
-                  baseLabel(company),
-                ),
-                /*#__PURE__*/ React.createElement(
-                  "p",
-                  { className: "empty-note" },
-                  "Documentações encontradas: ",
-                  plano.numerados.length,
-                  " · não encontradas: ",
-                  naoEncontrados.length,
-                ),
-                plano.numerados.length > 0 &&
-                  /*#__PURE__*/ React.createElement(
-                    "ul",
-                    { className: "homolog-zip-lista" },
-                    plano.numerados.map((entrada) =>
-                      /*#__PURE__*/ React.createElement(
-                        "li",
-                        {
-                          key: `${entrada.item.id}-${entrada.doc.id}`,
-                          className: "homolog-zip-item",
-                        },
-                        /*#__PURE__*/ React.createElement(
-                          "span",
-                          { className: "homolog-zip-numero" },
-                          entrada.numero,
-                        ),
-                        /*#__PURE__*/ React.createElement(
-                          "span",
-                          null,
-                          docTituloExibido(entrada.doc),
-                          " ",
-                          // 2026-09-22 (pedido explícito da Iasmin, caso real do
-                          // SASSMAQ: "é de abrangência geral, não é da matriz,
-                          // ou da filial PE, é geral") — mesmo selo já usado no
-                          // resto do portal (DocScopeBadge), agora também aqui:
-                          // deixa claro que um item corporativo (SASSMAQ,
-                          // Código de Conduta) listado dentro do grupo desta
-                          // Base é o MESMO documento de sempre, nunca uma cópia
-                          // exclusiva dela.
-                          /*#__PURE__*/ React.createElement(DocScopeBadge, {
-                            doc: entrada.doc,
-                          }),
-                          entrada.ambiguo &&
-                            /*#__PURE__*/ React.createElement(
-                              "span",
-                              { className: "homolog-zip-tag-ambiguo" },
-                              " (ambíguo — todos incluídos; desmarque abaixo se algum não deve ir)",
-                            ),
-                        ),
-                        /*#__PURE__*/ React.createElement(
-                          "button",
-                          {
-                            type: "button",
-                            className: "mini-download-btn",
-                            onClick: () => handleVer(entrada.doc, company),
-                          },
-                          /*#__PURE__*/ React.createElement(Eye, { size: 12 }),
-                          " Ver",
-                        ),
-                        entrada.ambiguo &&
-                          /*#__PURE__*/ React.createElement("input", {
-                            type: "checkbox",
-                            title: "Incluir no ZIP",
-                            checked: !(exclusoesPorBase[company.id] || {})[
-                              `${entrada.item.id}:${entrada.doc.id}`
-                            ],
-                            onChange: () =>
-                              alternarExclusao(
-                                company.id,
-                                entrada.item.id,
-                                entrada.doc.id,
-                              ),
-                          }),
-                      ),
-                    ),
-                  ),
-                naoEncontrados.length > 0 &&
-                  /*#__PURE__*/ React.createElement(
-                    "ul",
-                    { className: "homolog-zip-lista" },
-                    naoEncontrados.map(({ item }) => {
-                      const aviso = avisoFonteExterna(item.descricaoOriginal);
-                      return /*#__PURE__*/ React.createElement(
-                        "li",
-                        { key: item.id, className: "homolog-zip-item" },
-                        /*#__PURE__*/ React.createElement(XCircle, {
-                          size: 12,
-                        }),
-                        /*#__PURE__*/ React.createElement(
-                          "span",
-                          null,
-                          item.descricaoOriginal,
-                          " — não encontrado nesta base",
-                          aviso &&
-                            /*#__PURE__*/ React.createElement(
-                              "span",
-                              { className: "homolog-zip-aviso-externo" },
-                              " — ",
-                              aviso,
-                            ),
-                        ),
-                      );
-                    }),
-                  ),
-              ),
-            ),
-          ),
-      ),
-      /*#__PURE__*/ React.createElement(
-        "div",
-        { className: "homolog-form-actions" },
-        /*#__PURE__*/ React.createElement(
-          "button",
-          {
-            type: "button",
-            className: "filters-clear-btn",
-            onClick: onClose,
-            style: { flex: "none" },
-          },
-          "Cancelar",
-        ),
-        itens &&
-          /*#__PURE__*/ React.createElement(
-            "button",
-            {
-              type: "button",
-              className: "doc-download-btn",
-              disabled: gerandoZip || totalEncontrados === 0,
-              onClick: handleBaixarZip,
-            },
-            gerandoZip
-              ? /*#__PURE__*/ React.createElement(Loader2, { size: 13 })
-              : /*#__PURE__*/ React.createElement(FolderArchive, { size: 13 }),
-            gerandoZip ? " Gerando..." : " Baixar ZIP",
-          ),
-      ),
-    ),
-  );
-}
 /** HomologacaoDetailView: espelha o padrão visual de CompanyDetailView
  *  (back-btn + company-header). `onUpdate` grava um objeto TOTALMENTE
  *  MESCLADO (mesmo padrão de ConferenceQueueView) — nunca um patch parcial. */ function HomologacaoDetailView({
@@ -12837,7 +12217,6 @@ function EnvioDocumentacaoLoteModal({ companies, onNotify, onView, onClose }) {
   const [dbBacked, setDbBacked] = useState(false);
   const [selectedId, setSelectedId] = useState(null);
   const [modalOpen, setModalOpen] = useState(false);
-  const [envioLoteOpen, setEnvioLoteOpen] = useState(false);
   const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
   const [filtroCliente, setFiltroCliente] = useState("");
   const [filtroConsultor, setFiltroConsultor] = useState("");
@@ -13107,16 +12486,6 @@ function EnvioDocumentacaoLoteModal({ companies, onNotify, onView, onClose }) {
       "button",
       {
         type: "button",
-        className: "kpi-new-homolog-btn envio-lote-btn",
-        onClick: () => setEnvioLoteOpen(true),
-      },
-      /*#__PURE__*/ React.createElement(FolderArchive, { size: 14 }),
-      " Envio de documentações em lote",
-    ),
-    /*#__PURE__*/ React.createElement(
-      "button",
-      {
-        type: "button",
         className: "filters-btn mobile-only",
         "aria-expanded": mobileFiltersOpen,
         onClick: () => setMobileFiltersOpen((v) => !v),
@@ -13367,13 +12736,6 @@ function EnvioDocumentacaoLoteModal({ companies, onNotify, onView, onClose }) {
         onClose: () => setModalOpen(false),
         onCreate: handleCreate,
         currentUser: currentUser,
-      }),
-    envioLoteOpen &&
-      /*#__PURE__*/ React.createElement(EnvioDocumentacaoLoteModal, {
-        companies: companies,
-        onNotify: onNotify,
-        onView: onView,
-        onClose: () => setEnvioLoteOpen(false),
       }),
   );
 }
@@ -19054,6 +18416,1536 @@ function ClientAnalysisView({ currentUser, onNotify, onView, companies }) {
   );
 }
 /* =========================================================================
+   ENVIO DE DOCUMENTAÇÕES EM LOTE (2026-09-23) — aba própria e persistente,
+   extraída do antigo modal efêmero EnvioDocumentacaoLoteModal (que vivia
+   dentro de Homologação e não gravava nada no Firestore — fechar o modal
+   descartava tudo). Reaproveita SEM MODIFICAR o motor de checklist/
+   cruzamento já usado ali: gerarChecklistViaRegras,
+   extractTextForResumoSolicitacao, tiposDistintosParaChecklist,
+   textoPedeTodasAsBases, matchChecklistItemToCompany, buildResumoZipPlan,
+   createDocumentPackageMultiBase, createZip, sanitizeClientNameForFilename,
+   companyLabelFor, tryPersistUploadedFile (que ganhou um `opts.pasta`
+   opcional — ver acima), logDocumentAction. Só adiciona o que faltava:
+   persistência real (Firestore, coleção "batch_document_submissions"),
+   upload de arquivos recebidos do cliente que ainda não existem no
+   catálogo oficial, processamento em etapas de verdade (nunca uma barra de
+   progresso decorativa) e histórico completo com auditoria.
+   O botão antigo dentro de Homologação é removido só depois desta aba
+   testada e funcionando (pedido explícito da Iasmin).
+   ========================================================================= */
+const LOTE_STATUS_META = {
+  pendente: { label: "Pendente", className: "status-conferencia" },
+  processando: { label: "Processando", className: "status-andamento" },
+  concluido: { label: "Concluído", className: "status-ok" },
+  com_pendencias: { label: "Com pendências", className: "status-conferencia" },
+  erro: { label: "Com erro", className: "status-vencido" },
+};
+const LOTE_ITEM_STATUS_META = {
+  solicitado: { label: "Solicitado", className: "status-conferencia" },
+  recebido: { label: "Recebido", className: "status-ok" },
+  em_processamento: { label: "Em processamento", className: "status-andamento" },
+  conferido: { label: "Conferido", className: "status-ok" },
+  pendente: { label: "Pendente", className: "status-vencido" },
+  nao_aplicavel: { label: "Não aplicável", className: "status-cancelada" },
+};
+let loteSeq = 0;
+function generateLoteId() {
+  loteSeq += 1;
+  return `lote-${Date.now().toString(36)}-${loteSeq}`;
+}
+const NOME_PASTA_ENVIO_LOTE_DRIVE = "ENVIO DE DOCUMENTAÇÕES EM LOTE";
+/** pastaLoteParaSolicitacao: caminho de pastas dedicado a CADA solicitação
+ *  (Cliente/ID da solicitação), passado como `pasta` para
+ *  tryPersistUploadedFile — hierarquia confirmada com a Iasmin via
+ *  AskUserQuestion em 2026-09-23. A raiz ("PORTAL DOCUMENTAL | GRUPOPRIMA")
+ *  já é o DRIVE_FOLDER_ID configurado no backend — não entra aqui. */
+function pastaLoteParaSolicitacao(cliente, id) {
+  return `${NOME_PASTA_ENVIO_LOTE_DRIVE}/${cliente || "Cliente sem nome"}/${id}`;
+}
+/** loteItemParaMatch: adapta um item já persistido (campo `nome`) para o
+ *  formato que matchChecklistItemToCompany espera (`descricaoOriginal`) —
+ *  nenhuma lógica de cruzamento é duplicada, só um adaptador de campo. */
+function loteItemParaMatch(item) {
+  return {
+    tipoSugerido: item.tipoSugerido,
+    categoriaSugerida: item.categoriaSugerida,
+    descricaoOriginal: item.nome,
+  };
+}
+/** computeLoteStatusGeral: status GERAL da solicitação, sempre DERIVADO a
+ *  partir de statusPorBase — nunca digitado à mão (mesma exigência da
+ *  Iasmin de que usuário/data/hora são sempre automáticos vale para o
+ *  status): nenhum par item×base resolvido ainda -> pendente; pelo menos
+ *  um recebido/conferido/não aplicável mas ainda sobra algo solicitado/
+ *  pendente/em processamento -> com_pendencias; tudo resolvido ->
+ *  concluído. "processando" só existe como estado transitório, gravado no
+ *  início de processarLote — nunca calculado aqui. */
+function computeLoteStatusGeral(documentacoesSolicitadas) {
+  const pares = [];
+  (documentacoesSolicitadas || []).forEach((item) => {
+    Object.values(item.statusPorBase || {}).forEach((st) => pares.push(st));
+  });
+  if (pares.length === 0) return "pendente";
+  const resolvido = (st) => st === "recebido" || st === "conferido" || st === "nao_aplicavel";
+  const algumResolvido = pares.some(resolvido);
+  const algumPendente = pares.some((st) => !resolvido(st));
+  if (!algumResolvido) return "pendente";
+  if (algumPendente) return "com_pendencias";
+  return "concluido";
+}
+function LoteStatusBadge({ status }) {
+  const meta = LOTE_STATUS_META[status] || { label: status, className: "status-ok" };
+  return React.createElement("span", { className: "status-badge " + meta.className }, meta.label);
+}
+function LoteItemStatusBadge({ status }) {
+  const meta = LOTE_ITEM_STATUS_META[status] || { label: status, className: "status-ok" };
+  return React.createElement("span", { className: "status-badge " + meta.className }, meta.label);
+}
+function EnvioLoteStyles() {
+  return React.createElement(
+    "style",
+    null,
+    `
+      .lote-section { margin-bottom: 18px; }
+      .lote-section h3 { font-size: 12.5px; font-weight: 800; color: var(--azul); text-transform: uppercase; letter-spacing: 0.03em; margin: 0 0 8px; }
+      .lote-item-row { border: 1px solid var(--cinza-frio); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; }
+      .lote-item-row-head { display:flex; align-items:center; gap:8px; justify-content: space-between; flex-wrap: wrap; margin-bottom: 6px; }
+      .lote-item-titulo { font-size: 13px; font-weight: 700; color: var(--azul-2); }
+      .lote-item-origem { font-size: 10.5px; color: var(--carvao); text-transform: uppercase; letter-spacing: 0.03em; }
+      .lote-item-bases { display: flex; flex-direction: column; gap: 6px; }
+      .lote-item-base-row { display:flex; align-items:center; gap:8px; flex-wrap: wrap; font-size: 12.5px; padding: 6px 8px; background: var(--branco-frio); border-radius: 6px; }
+      .lote-item-base-nome { font-weight: 600; min-width: 130px; }
+      .lote-compilado-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(130px,1fr)); gap: 10px; margin-bottom: 14px; }
+      .lote-compilado-card { border:1px solid var(--cinza-frio); border-radius: 8px; padding: 10px 12px; text-align:center; }
+      .lote-compilado-card strong { display:block; font-size: 20px; color: var(--azul); }
+      .lote-compilado-card span { font-size: 11px; color: var(--carvao); }
+      .lote-etapas-list { list-style:none; margin: 0; padding: 0; display:flex; flex-direction: column; gap: 6px; }
+      .lote-etapa-item { display:flex; align-items:center; gap: 8px; font-size: 12.5px; }
+      .lote-etapa-item.ok { color: #0b4a2c; }
+      .lote-etapa-item.erro { color: #a13333; }
+      .lote-versao-zip { display:flex; align-items:center; justify-content: space-between; gap: 8px; border: 1px solid var(--cinza-frio); border-radius: 8px; padding: 8px 12px; margin-bottom: 6px; font-size: 12.5px; }
+    `,
+  );
+}
+/** processarLote: pipeline REAL de processamento — 7 etapas
+ *  (recebimento/upload/validação/organização-classificação/compactação/
+ *  armazenamento/concluído), cada uma só marcada "ok" depois de
+ *  efetivamente acontecer; um erro em qualquer etapa para o fluxo ali
+ *  mesmo, nunca finge sucesso das seguintes. Sempre opera sobre o MESMO
+ *  registro (nunca cria um novo) — reprocessar é seguro e nunca duplica
+ *  histórico (etapasProcessamento acumula, versoesZip acumula). Casamento
+ *  item×base é recalculado AO VIVO contra company.documentos a cada
+ *  chamada (via matchChecklistItemToCompany/buildResumoZipPlan, sem
+ *  nenhuma mudança nessas funções) — nunca um resultado "congelado" de
+ *  quando o item foi criado ou processado da última vez. `deps` existe só
+ *  para os testes automatizados injetarem tryPersistUploadedFile/
+ *  createDocumentPackageMultiBase/createZip falsos, sem depender de rede
+ *  real. */
+async function processarLote(solicitacao, { companies, usuarioProcessamento, deps } = {}) {
+  const _tryPersistUploadedFile = (deps && deps.tryPersistUploadedFile) || tryPersistUploadedFile;
+  const _createDocumentPackageMultiBase =
+    (deps && deps.createDocumentPackageMultiBase) || createDocumentPackageMultiBase;
+  const _createZip = (deps && deps.createZip) || createZip;
+  const companiesPorId = new Map((companies || []).map((c) => [c.id, c]));
+  const etapas = [];
+  function marcarEtapa(chave, status, detalhe) {
+    etapas.push({ etapa: chave, status, em: new Date().toISOString(), ...(detalhe ? { detalhe } : {}) });
+  }
+  function falhar(chave, detalhe, itensAtualizados) {
+    marcarEtapa(chave, "erro", detalhe);
+    return {
+      ...solicitacao,
+      documentacoesSolicitadas: itensAtualizados || solicitacao.documentacoesSolicitadas,
+      etapasProcessamento: [...(solicitacao.etapasProcessamento || []), ...etapas],
+      status: "erro",
+      usuarioProcessamento: usuarioProcessamento || solicitacao.usuarioProcessamento || null,
+      processadoEm: new Date().toISOString(),
+    };
+  }
+
+  // Passo único de análise: para cada (item x base) ainda não não-aplicável
+  // E sem anexo manual associado (esses já são tratados pelo laço de
+  // anexos, mais abaixo — nunca duplicados aqui), tenta casar AO VIVO com o
+  // catálogo real da base A CADA processamento — mesmo que o item já
+  // estivesse "recebido"/"conferido" de uma vez anterior — porque é assim
+  // que reprocessar/gerar uma nova versão do ZIP volta a incluir esse
+  // documento de novo (senão a 2ª versão do ZIP saía sem os itens que só
+  // foram casados automaticamente, nunca anexados). QUAL documento casou
+  // nunca é gravado "congelado". Quando o casamento entra de fato no ZIP
+  // gerado, o STATUS passa a refletir isso (nunca rebaixa um "conferido"
+  // manual pra um simples "recebido"); quando não é mais localizável mas já
+  // estava recebido/conferido antes, mantém a confirmação anterior (confia
+  // no que já foi confirmado por alguém). Resultado usado tanto pra decidir
+  // se há algo pra processar (etapa "recebimento") quanto pra organizar o
+  // ZIP (etapas "organização"/"classificação") e pra atualizar quem
+  // genuinamente não foi localizado (solicitado -> pendente — nunca fica
+  // "solicitado" pra sempre depois de uma tentativa real de processamento).
+  const entradasPorBase = new Map();
+  let algumRecebivel = false;
+  const itensAtualizados = (solicitacao.documentacoesSolicitadas || []).map((item) => {
+    const statusPorBase = { ...(item.statusPorBase || {}) };
+    Object.keys(statusPorBase).forEach((baseId) => {
+      const stAtual = statusPorBase[baseId];
+      if (stAtual === "nao_aplicavel") return;
+      const company = companiesPorId.get(baseId);
+      const temAnexo = (solicitacao.anexosRecebidos || []).some(
+        (a) => a.itemAssociadoId === item.id && a.baseId === baseId,
+      );
+      if (temAnexo) {
+        algumRecebivel = true;
+        return;
+      }
+      const r = company
+        ? matchChecklistItemToCompany(loteItemParaMatch(item), company)
+        : { status: "sem_base", candidatos: [] };
+      if (r.status === "encontrado" || r.status === "grupo" || r.status === "ambiguo") {
+        algumRecebivel = true;
+        const plano = buildResumoZipPlan([loteItemParaMatch(item)], company, {});
+        if (plano.numerados.length > 0) {
+          if (!entradasPorBase.has(baseId)) {
+            entradasPorBase.set(baseId, { baseFolder: companyLabelFor(company), numerados: [] });
+          }
+          entradasPorBase.get(baseId).numerados.push(...plano.numerados);
+          statusPorBase[baseId] = stAtual === "conferido" ? "conferido" : "recebido";
+        }
+      } else if (stAtual === "recebido" || stAtual === "conferido") {
+        algumRecebivel = true; // não é mais localizável agora, mas confia na confirmação anterior
+      } else {
+        statusPorBase[baseId] = "pendente";
+      }
+    });
+    return { ...item, statusPorBase };
+  });
+
+  // anexos manuais (recebidos sem bater com nenhum documento já indexado no
+  // catálogo) entram no ZIP à parte, numerados dentro da pasta da própria
+  // base — reaproveita fetchDocumentFile sem alteração nenhuma, só
+  // adaptando o formato do anexo pro formato {id, categoria, tipo, titulo,
+  // arquivo:{driveFileId, assetId, mimeType, nomeOriginal}} que ela espera.
+  (solicitacao.anexosRecebidos || []).forEach((anexo, i) => {
+    const company = companiesPorId.get(anexo.baseId);
+    if (!company) return;
+    algumRecebivel = true;
+    if (!entradasPorBase.has(anexo.baseId)) {
+      entradasPorBase.set(anexo.baseId, { baseFolder: companyLabelFor(company), numerados: [] });
+    }
+    entradasPorBase.get(anexo.baseId).numerados.push({
+      numero: `anexo-${i + 1}`,
+      item: { descricaoOriginal: anexo.nome },
+      doc: {
+        id: anexo.id,
+        categoria: null,
+        tipo: anexo.nome,
+        titulo: anexo.nome,
+        arquivo: {
+          driveFileId: anexo.driveFileId || null,
+          assetId: anexo.assetId || null,
+          mimeType: anexo.tipo || null,
+          nomeOriginal: anexo.nome,
+        },
+        __anexoManualLote: true,
+      },
+    });
+  });
+
+  if (!algumRecebivel) {
+    return falhar(
+      "recebimento",
+      "Nenhuma documentação recebida (anexada) nem localizada automaticamente no catálogo — anexe ao menos um documento, marque algum item como recebido, ou aguarde a chegada de algum.",
+      itensAtualizados,
+    );
+  }
+  marcarEtapa("recebimento", "ok");
+
+  const anexosPendentes = (solicitacao.anexosRecebidos || []).filter((a) => !a.driveFileId && !a.assetId);
+  if (anexosPendentes.length > 0) {
+    return falhar(
+      "upload",
+      `${anexosPendentes.length} arquivo(s) recebido(s) ainda não terminou(aram) de subir para o repositório — aguarde e tente novamente.`,
+      itensAtualizados,
+    );
+  }
+  marcarEtapa("upload", "ok");
+  marcarEtapa("validacao", "ok");
+
+  if (entradasPorBase.size === 0) {
+    return falhar(
+      "organizacao_classificacao",
+      "Não foi possível organizar nenhum documento por base para compactar.",
+      itensAtualizados,
+    );
+  }
+  marcarEtapa("organizacao_classificacao", "ok");
+
+  const zipName = `Grupoprima & ${sanitizeClientNameForFilename(solicitacao.cliente)} - Documentações.zip`;
+  let pkg;
+  try {
+    pkg = await _createDocumentPackageMultiBase([...entradasPorBase.values()], { zipName });
+  } catch (e) {
+    return falhar("compactacao", (e && e.message) || "Falha ao montar o pacote de documentos.", itensAtualizados);
+  }
+  if (!pkg || pkg.files.length === 0) {
+    return falhar(
+      "compactacao",
+      "Nenhum dos arquivos originais foi encontrado no repositório para compactar.",
+      itensAtualizados,
+    );
+  }
+  marcarEtapa(
+    "compactacao",
+    "ok",
+    pkg.failed.length > 0 ? `${pkg.failed.length} arquivo(s) não puderam ser incluídos.` : undefined,
+  );
+
+  let blob;
+  try {
+    blob = _createZip(pkg.files);
+  } catch (e) {
+    return falhar("compactacao", (e && e.message) || "Falha ao compactar os documentos.", itensAtualizados);
+  }
+  const zipFile = new File([blob], pkg.zipName, { type: "application/zip" });
+  const uploadRes = await _tryPersistUploadedFile(zipFile, {
+    pasta: pastaLoteParaSolicitacao(solicitacao.cliente, solicitacao.id),
+  });
+  if (!uploadRes.ok) {
+    return falhar(
+      "armazenamento",
+      "Não foi possível salvar o ZIP gerado no repositório agora — tente novamente em instantes.",
+      itensAtualizados,
+    );
+  }
+  marcarEtapa("armazenamento", "ok");
+  const novaVersao = {
+    versao: (solicitacao.versoesZip || []).length + 1,
+    driveFileId: uploadRes.driveFileId || null,
+    assetId: uploadRes.assetId || null,
+    zipFileName: pkg.zipName,
+    geradoEm: new Date().toISOString(),
+    geradoPor: usuarioProcessamento || null,
+  };
+  marcarEtapa("concluido", "ok");
+  const statusGeral = computeLoteStatusGeral(itensAtualizados);
+  return {
+    ...solicitacao,
+    documentacoesSolicitadas: itensAtualizados,
+    etapasProcessamento: [...(solicitacao.etapasProcessamento || []), ...etapas],
+    versoesZip: [...(solicitacao.versoesZip || []), novaVersao],
+    status: statusGeral,
+    usuarioProcessamento: usuarioProcessamento || solicitacao.usuarioProcessamento || null,
+    processadoEm: new Date().toISOString(),
+    concluidoEm: statusGeral === "concluido" ? new Date().toISOString() : solicitacao.concluidoEm || null,
+  };
+}
+/** LoteAnexoInlinePicker: um único botão "Anexar arquivo" com input de
+ *  arquivo escondido — usado linha a linha dentro de EnvioLoteDetailView
+ *  (cada linha item×base tem o seu, porque cada anexo se associa a UM item
+ *  e UMA base específicos). */
+function LoteAnexoInlinePicker({ onFile, disabled, label }) {
+  const inputRef = useRef(null);
+  return React.createElement(
+    React.Fragment,
+    null,
+    React.createElement(
+      "button",
+      {
+        type: "button",
+        className: "mini-download-btn",
+        disabled: disabled,
+        onClick: () => inputRef.current?.click(),
+      },
+      React.createElement(UploadCloud, { size: 13 }),
+      " ",
+      label || "Anexar arquivo recebido",
+    ),
+    React.createElement("input", {
+      ref: inputRef,
+      type: "file",
+      accept: ".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png",
+      hidden: true,
+      onChange: (e) => {
+        const file = e.target.files?.[0];
+        e.target.value = "";
+        if (file) onFile(file);
+      },
+    }),
+  );
+}
+/** EnvioLoteFormModal: "+ Nova solicitação" — mesmo molde de campos do
+ *  antigo EnvioDocumentacaoLoteModal (cliente, bases, checklist por texto
+ *  colado/arquivo, reaproveitando gerarChecklistViaRegras/
+ *  extractTextForResumoSolicitacao sem alteração), com um adicional:
+ *  permite também incluir itens manualmente (nome livre) antes mesmo de
+ *  criar a solicitação. Ao salvar, cria o registro já e abre o detalhe —
+ *  nenhuma prévia de ZIP aqui dentro (isso agora é o "Processar
+ *  documentação" na tela de detalhe). */
+function EnvioLoteFormModal({ companies, onClose, onCreate }) {
+  const [clienteNome, setClienteNome] = useState("");
+  const [baseIds, setBaseIds] = useState([]);
+  const [modoEntrada, setModoEntrada] = useState("texto");
+  const [textoChecklist, setTextoChecklist] = useState("");
+  const [arquivoInfo, setArquivoInfo] = useState(null);
+  const arquivoRef = useRef(null);
+  const fileInputRef = useRef(null);
+  const [processando, setProcessando] = useState(false);
+  const [erro, setErro] = useState(null);
+  const [itensManuais, setItensManuais] = useState([]);
+  const [novoItemNome, setNovoItemNome] = useState("");
+
+  function baseLabel(c) {
+    return c.tipo === "Matriz" ? "Matriz" : `Filial ${c.id} — ${c.municipio}/${c.uf}`;
+  }
+  function toggleBase(id) {
+    setBaseIds((prev) => (prev.includes(id) ? prev.filter((b) => b !== id) : [...prev, id]));
+  }
+  async function handleArquivoSelecionado(file) {
+    if (!file) return;
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    arquivoRef.current = { bytes, mimeType: file.type, filename: file.name };
+    setArquivoInfo({ nome: file.name, tamanho: file.size });
+    setErro(null);
+  }
+  function handleAdicionarItemManual() {
+    if (!novoItemNome.trim()) return;
+    const tipos = tiposDistintosParaChecklist(novoItemNome.trim());
+    setItensManuais((prev) => [
+      ...prev,
+      {
+        id: `chk-manual-${Date.now().toString(36)}-${prev.length}`,
+        descricaoOriginal: novoItemNome.trim(),
+        tipoSugerido: tipos[0]?.label || null,
+        categoriaSugerida: null,
+        origem: "manual",
+        valePorTodasAsBases: textoPedeTodasAsBases(novoItemNome.trim()),
+      },
+    ]);
+    setNovoItemNome("");
+  }
+  function handleRemoverItemManual(id) {
+    setItensManuais((prev) => prev.filter((it) => it.id !== id));
+  }
+  async function handleSubmit(e) {
+    e.preventDefault();
+    setErro(null);
+    if (!clienteNome.trim()) {
+      setErro("Informe o nome do cliente.");
+      return;
+    }
+    if (baseIds.length === 0) {
+      setErro("Selecione ao menos uma filial/base.");
+      return;
+    }
+    let texto = "";
+    if (modoEntrada === "texto") {
+      texto = textoChecklist;
+    } else if (arquivoRef.current) {
+      setProcessando(true);
+      const { bytes, mimeType, filename } = arquivoRef.current;
+      const extraido = await extractTextForResumoSolicitacao(bytes, mimeType, filename);
+      setProcessando(false);
+      if (!extraido.ok) {
+        setErro(motivoParaTexto(extraido.motivo));
+        return;
+      }
+      texto = extraido.text;
+    }
+    let itensDoChecklist = [];
+    if (texto.trim()) {
+      const gerado = gerarChecklistViaRegras(texto);
+      if (gerado.ok) {
+        itensDoChecklist = gerado.itens.map((it) => ({ ...it, origem: "checklist" }));
+      } else if (itensManuais.length === 0) {
+        setErro(motivoParaTexto(gerado.motivo));
+        return;
+      }
+    }
+    const todosItens = [...itensDoChecklist, ...itensManuais];
+    if (todosItens.length === 0) {
+      setErro(
+        "Cole/digite a lista de documentações, envie um arquivo, ou adicione ao menos um item manualmente.",
+      );
+      return;
+    }
+    onCreate({ cliente: clienteNome.trim(), baseIds, itens: todosItens });
+  }
+  return React.createElement(
+    "div",
+    { className: "docs-modal-overlay", onClick: onClose },
+    React.createElement(
+      "div",
+      { className: "docs-modal homolog-form-modal", onClick: (e) => e.stopPropagation() },
+      React.createElement(
+        "div",
+        { className: "docs-modal-head" },
+        React.createElement(
+          "div",
+          null,
+          React.createElement(
+            "div",
+            { className: "docs-modal-title" },
+            React.createElement(FolderArchive, { size: 16 }),
+            " Nova solicitação de envio em lote",
+          ),
+          React.createElement(
+            "div",
+            { className: "docs-modal-sub" },
+            "Informe o cliente, as filiais/bases envolvidas e a lista de documentações exigidas — a solicitação fica salva com histórico completo, mesmo antes de processar.",
+          ),
+        ),
+        React.createElement(
+          "button",
+          { className: "icon-btn-dark", onClick: onClose, "aria-label": "Fechar" },
+          React.createElement(X, { size: 18 }),
+        ),
+      ),
+      React.createElement(
+        "form",
+        { className: "docs-modal-body", onSubmit: handleSubmit },
+        erro &&
+          React.createElement(
+            "div",
+            { className: "login-error" },
+            React.createElement(AlertTriangle, { size: 14 }),
+            " ",
+            erro,
+          ),
+        React.createElement(
+          "div",
+          { className: "homolog-field" },
+          React.createElement("label", null, "Nome do cliente"),
+          React.createElement(
+            "p",
+            { className: "homolog-bases-hint" },
+            "Usado para nomear a pasta e o ZIP final: ",
+            React.createElement("strong", null, "Grupoprima & [Nome do Cliente] - Documentações"),
+            ".",
+          ),
+          React.createElement("input", {
+            type: "text",
+            value: clienteNome,
+            onChange: (e) => setClienteNome(e.target.value),
+            placeholder: "Razão social ou nome fantasia do cliente",
+            autoFocus: true,
+          }),
+        ),
+        React.createElement(
+          "div",
+          { className: "homolog-field" },
+          React.createElement("label", null, "Filiais/Bases"),
+          React.createElement(
+            "div",
+            { className: "homolog-bases-grid" },
+            companies.map((c) =>
+              React.createElement(
+                "label",
+                { key: c.id, className: "homolog-base-chip" + (baseIds.includes(c.id) ? " active" : "") },
+                React.createElement("input", {
+                  type: "checkbox",
+                  checked: baseIds.includes(c.id),
+                  onChange: () => toggleBase(c.id),
+                }),
+                baseLabel(c),
+              ),
+            ),
+          ),
+        ),
+        React.createElement(
+          "div",
+          { className: "homolog-field" },
+          React.createElement("label", null, "Documentações necessárias"),
+          React.createElement(
+            "p",
+            { className: "homolog-bases-hint" },
+            'Digite ou cole a lista (uma documentação por linha) ou envie um arquivo com o pedido do cliente.',
+          ),
+          React.createElement(
+            "div",
+            { className: "homolog-radio-group" },
+            React.createElement(
+              "label",
+              { className: "homolog-radio" + (modoEntrada === "texto" ? " active" : "") },
+              React.createElement("input", {
+                type: "radio",
+                name: "modoEntradaLoteTab",
+                checked: modoEntrada === "texto",
+                onChange: () => setModoEntrada("texto"),
+              }),
+              " Digitar/colar lista",
+            ),
+            React.createElement(
+              "label",
+              { className: "homolog-radio" + (modoEntrada === "arquivo" ? " active" : "") },
+              React.createElement("input", {
+                type: "radio",
+                name: "modoEntradaLoteTab",
+                checked: modoEntrada === "arquivo",
+                onChange: () => setModoEntrada("arquivo"),
+              }),
+              " Enviar arquivo",
+            ),
+          ),
+          modoEntrada === "texto"
+            ? React.createElement("textarea", {
+                rows: 5,
+                value: textoChecklist,
+                onChange: (e) => setTextoChecklist(e.target.value),
+                placeholder: "CNPJ\nContrato Social\nCertidão Federal\nLicença Ambiental\nAlvará\nSeguro",
+              })
+            : React.createElement(
+                React.Fragment,
+                null,
+                React.createElement(
+                  "div",
+                  {
+                    className: "homolog-dropzone",
+                    onDragOver: (e) => e.preventDefault(),
+                    onDrop: (e) => {
+                      e.preventDefault();
+                      handleArquivoSelecionado(e.dataTransfer.files?.[0]);
+                    },
+                    onClick: () => fileInputRef.current?.click(),
+                    role: "button",
+                    tabIndex: 0,
+                  },
+                  React.createElement(UploadCloud, { size: 20 }),
+                  React.createElement("span", null, "Arraste o arquivo aqui ou clique para selecionar"),
+                  React.createElement("input", {
+                    ref: fileInputRef,
+                    type: "file",
+                    accept: ".pdf,.doc,.docx,.xls,.xlsx,.txt,.csv,image/*,application/pdf",
+                    hidden: true,
+                    onChange: (e) => {
+                      handleArquivoSelecionado(e.target.files?.[0]);
+                      e.target.value = "";
+                    },
+                  }),
+                ),
+                arquivoInfo &&
+                  React.createElement(
+                    "div",
+                    { className: "homolog-anexo-item" },
+                    React.createElement(FileText, { size: 14 }),
+                    React.createElement("span", { className: "homolog-anexo-nome" }, arquivoInfo.nome),
+                    React.createElement("span", { className: "homolog-anexo-tamanho" }, formatBytes(arquivoInfo.tamanho)),
+                  ),
+              ),
+        ),
+        React.createElement(
+          "div",
+          { className: "homolog-field" },
+          React.createElement("label", null, "Adicionar documentação manualmente (opcional)"),
+          React.createElement(
+            "div",
+            { style: { display: "flex", gap: 8 } },
+            React.createElement("input", {
+              type: "text",
+              value: novoItemNome,
+              onChange: (e) => setNovoItemNome(e.target.value),
+              placeholder: 'Ex.: "Ficha técnica do produto X"',
+              onKeyDown: (e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  handleAdicionarItemManual();
+                }
+              },
+            }),
+            React.createElement(
+              "button",
+              { type: "button", className: "filters-clear-btn", style: { flex: "none" }, onClick: handleAdicionarItemManual },
+              React.createElement(Plus, { size: 14 }),
+              " Adicionar",
+            ),
+          ),
+          itensManuais.length > 0 &&
+            React.createElement(
+              "ul",
+              { className: "homolog-anexos-list" },
+              itensManuais.map((it) =>
+                React.createElement(
+                  "li",
+                  { key: it.id, className: "homolog-anexo-item" },
+                  React.createElement("span", { className: "homolog-anexo-nome" }, it.descricaoOriginal),
+                  React.createElement(
+                    "button",
+                    {
+                      type: "button",
+                      className: "icon-btn-dark",
+                      onClick: () => handleRemoverItemManual(it.id),
+                      "aria-label": `Remover ${it.descricaoOriginal}`,
+                    },
+                    React.createElement(X, { size: 14 }),
+                  ),
+                ),
+              ),
+            ),
+        ),
+        React.createElement(
+          "div",
+          { className: "homolog-form-actions" },
+          React.createElement(
+            "button",
+            { type: "button", className: "filters-clear-btn", onClick: onClose, style: { flex: "none" } },
+            "Cancelar",
+          ),
+          React.createElement(
+            "button",
+            { type: "submit", className: "doc-download-btn", disabled: processando },
+            processando ? "Processando..." : "Criar solicitação",
+          ),
+        ),
+      ),
+    ),
+  );
+}
+/** LoteItemBaseRow: uma linha item×base dentro de EnvioLoteDetailView.
+ *  Recalcula o casamento AO VIVO contra company.documentos (nunca guarda um
+ *  resultado "congelado") pra decidir se mostra "Usar documento
+ *  encontrado"/"Ver" ou "Anexar arquivo recebido". O status mostrado
+ *  (LoteItemStatusBadge) é sempre o persistido em statusPorBase — a busca
+ *  ao vivo só informa os botões disponíveis, nunca substitui o status
+ *  gravado. */
+function LoteItemBaseRow({ item, baseId, company, statusAtual, anexo, onUsarEncontrado, onAnexar, onRemoverAnexo, onAlterarStatus, onVer, onBaixar, enviandoAnexo }) {
+  const match = company ? matchChecklistItemToCompany(loteItemParaMatch(item), company) : { status: "sem_base", candidatos: [] };
+  const podeUsarEncontrado =
+    (match.status === "encontrado" || match.status === "grupo" || match.status === "ambiguo") &&
+    statusAtual !== "recebido" &&
+    statusAtual !== "conferido" &&
+    statusAtual !== "nao_aplicavel";
+  return React.createElement(
+    "div",
+    { className: "lote-item-base-row" },
+    React.createElement("span", { className: "lote-item-base-nome" }, company ? companyLabelFor(company) : baseId),
+    React.createElement(LoteItemStatusBadge, { status: statusAtual }),
+    podeUsarEncontrado &&
+      React.createElement(
+        "button",
+        { type: "button", className: "mini-download-btn", onClick: onUsarEncontrado },
+        React.createElement(CheckCircle2, { size: 13 }),
+        " Usar documento encontrado",
+      ),
+    podeUsarEncontrado &&
+      match.status === "encontrado" &&
+      React.createElement(
+        React.Fragment,
+        null,
+        React.createElement(
+          "button",
+          { type: "button", className: "mini-download-btn", onClick: () => onVer(match.doc) },
+          React.createElement(Eye, { size: 13 }),
+          " Ver",
+        ),
+        React.createElement(
+          "button",
+          { type: "button", className: "mini-download-btn", onClick: () => onBaixar(match.doc) },
+          React.createElement(Download, { size: 13 }),
+          " Baixar",
+        ),
+      ),
+    !podeUsarEncontrado &&
+      statusAtual !== "recebido" &&
+      statusAtual !== "conferido" &&
+      statusAtual !== "nao_aplicavel" &&
+      React.createElement(LoteAnexoInlinePicker, { onFile: onAnexar, disabled: enviandoAnexo, label: enviandoAnexo ? "Enviando..." : "Anexar arquivo recebido" }),
+    anexo &&
+      React.createElement(
+        React.Fragment,
+        null,
+        React.createElement("span", { className: "homolog-anexo-nome" }, anexo.nome),
+        React.createElement(
+          "button",
+          { type: "button", className: "mini-download-btn", onClick: () => onVer({ id: anexo.id, tipo: anexo.tipo, titulo: anexo.nome, categoria: null, arquivo: { driveFileId: anexo.driveFileId, assetId: anexo.assetId, mimeType: anexo.tipo, nomeOriginal: anexo.nome } }) },
+          React.createElement(Eye, { size: 13 }),
+          " Ver",
+        ),
+        React.createElement(
+          "button",
+          { type: "button", className: "mini-download-btn", onClick: () => onBaixar({ id: anexo.id, tipo: anexo.tipo, titulo: anexo.nome, categoria: null, arquivo: { driveFileId: anexo.driveFileId, assetId: anexo.assetId, mimeType: anexo.tipo, nomeOriginal: anexo.nome } }) },
+          React.createElement(Download, { size: 13 }),
+          " Baixar",
+        ),
+        React.createElement(
+          "button",
+          { type: "button", className: "icon-btn-dark", onClick: onRemoverAnexo, "aria-label": `Remover ${anexo.nome}` },
+          React.createElement(X, { size: 13 }),
+        ),
+      ),
+    React.createElement(
+      "select",
+      {
+        value: statusAtual,
+        onChange: (e) => onAlterarStatus(e.target.value),
+        style: { marginLeft: "auto", fontSize: "11.5px" },
+      },
+      Object.entries(LOTE_ITEM_STATUS_META).map(([k, m]) => React.createElement("option", { key: k, value: k }, m.label)),
+    ),
+  );
+}
+/** EnvioLoteDetailView: tela de UMA solicitação — documentações solicitadas
+ *  (uma linha por item, expandida por base), compilado da documentação
+ *  (contadores derivados ao vivo), etapas do último processamento,
+ *  histórico de versões do ZIP e ação de processar/reprocessar. */
+function EnvioLoteDetailView({ item, companies, onBack, onNotify, onView, onUpdate, currentUser }) {
+  const [processando, setProcessando] = useState(false);
+  const [novoItemNome, setNovoItemNome] = useState("");
+  const [enviandoAnexoChave, setEnviandoAnexoChave] = useState(null);
+  const [observacoes, setObservacoes] = useState(item.observacoes || "");
+  const companiesPorId = useMemo(() => new Map(companies.map((c) => [c.id, c])), [companies]);
+
+  function persistPatch(patch) {
+    onUpdate(patch);
+  }
+  function alterarStatus(itemId, baseId, novoStatus) {
+    const documentacoesSolicitadas = item.documentacoesSolicitadas.map((it) =>
+      it.id !== itemId ? it : { ...it, statusPorBase: { ...it.statusPorBase, [baseId]: novoStatus } },
+    );
+    persistPatch({ documentacoesSolicitadas, status: computeLoteStatusGeral(documentacoesSolicitadas) });
+    const itemRef = item.documentacoesSolicitadas.find((it) => it.id === itemId);
+    logDocumentAction("alterou_status_documentacao_lote", {
+      cliente: item.cliente,
+      documento: itemRef?.nome,
+      base: companyLabelFor(companiesPorId.get(baseId)),
+      status: novoStatus,
+    });
+  }
+  async function handleAnexarArquivo(itemId, baseId, file) {
+    if (!file) return;
+    const chave = `${itemId}:${baseId}`;
+    setEnviandoAnexoChave(chave);
+    const res = await tryPersistUploadedFile(file, { pasta: pastaLoteParaSolicitacao(item.cliente, item.id) });
+    const anexo = {
+      id: `anexo-lote-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
+      nome: file.name,
+      tamanho: file.size,
+      tipo: file.type || "application/octet-stream",
+      driveFileId: res.ok ? res.driveFileId || null : null,
+      assetId: res.ok ? res.assetId || null : null,
+      itemAssociadoId: itemId,
+      baseId,
+      enviadoPor: currentUser?.nome || "Usuário do portal",
+      enviadoEm: new Date().toISOString(),
+    };
+    const documentacoesSolicitadas = item.documentacoesSolicitadas.map((it) =>
+      it.id !== itemId ? it : { ...it, statusPorBase: { ...it.statusPorBase, [baseId]: "recebido" } },
+    );
+    persistPatch({
+      documentacoesSolicitadas,
+      anexosRecebidos: [...(item.anexosRecebidos || []), anexo],
+      status: computeLoteStatusGeral(documentacoesSolicitadas),
+    });
+    setEnviandoAnexoChave(null);
+    logDocumentAction("upload_arquivo_lote", {
+      cliente: item.cliente,
+      arquivo: file.name,
+      base: companyLabelFor(companiesPorId.get(baseId)),
+    });
+    onNotify?.(
+      res.ok ? `"${file.name}" anexado.` : `"${file.name}" anexado (não foi possível salvá-lo no repositório agora — tente reenviar depois).`,
+      res.ok ? "info" : "error",
+    );
+  }
+  function handleRemoverAnexo(anexo) {
+    const documentacoesSolicitadas = item.documentacoesSolicitadas.map((it) =>
+      it.id !== anexo.itemAssociadoId ? it : { ...it, statusPorBase: { ...it.statusPorBase, [anexo.baseId]: "solicitado" } },
+    );
+    persistPatch({
+      documentacoesSolicitadas,
+      anexosRecebidos: (item.anexosRecebidos || []).filter((a) => a.id !== anexo.id),
+      status: computeLoteStatusGeral(documentacoesSolicitadas),
+    });
+    logDocumentAction("removeu_arquivo_lote", { cliente: item.cliente, arquivo: anexo.nome });
+  }
+  function handleAdicionarItem() {
+    if (!novoItemNome.trim()) return;
+    const tipos = tiposDistintosParaChecklist(novoItemNome.trim());
+    const valeTodas = textoPedeTodasAsBases(novoItemNome.trim());
+    const basesAplicaveis = valeTodas ? companies.map((c) => c.id) : item.baseIds;
+    const statusPorBase = {};
+    basesAplicaveis.forEach((bId) => {
+      statusPorBase[bId] = "solicitado";
+    });
+    const novoItem = {
+      id: `chk-manual-${Date.now().toString(36)}`,
+      nome: novoItemNome.trim(),
+      tipoSugerido: tipos[0]?.label || null,
+      categoriaSugerida: null,
+      origem: "manual",
+      statusPorBase,
+      observacao: null,
+    };
+    const documentacoesSolicitadas = [...item.documentacoesSolicitadas, novoItem];
+    persistPatch({ documentacoesSolicitadas, status: computeLoteStatusGeral(documentacoesSolicitadas) });
+    logDocumentAction("adicionou_documentacao_lote", { cliente: item.cliente, documento: novoItem.nome });
+    setNovoItemNome("");
+    onNotify?.(`"${novoItem.nome}" adicionado à solicitação.`, "info");
+  }
+  async function handleProcessar() {
+    setProcessando(true);
+    const usuarioProcessamento = { nome: currentUser?.nome || "Usuário do portal", email: currentUser?.email || "" };
+    const atualizado = await processarLote(item, { companies, usuarioProcessamento });
+    persistPatch(atualizado);
+    setProcessando(false);
+    logDocumentAction("processou_lote", { cliente: item.cliente, status: atualizado.status });
+    if (atualizado.status === "erro") {
+      const ultimaEtapa = (atualizado.etapasProcessamento || []).slice(-1)[0];
+      onNotify?.(
+        `Erro no processamento (${ultimaEtapa?.etapa || "?"}): ${ultimaEtapa?.detalhe || "tente novamente."}`,
+        "error",
+      );
+    } else {
+      const versaoAtual = (atualizado.versoesZip || []).length;
+      logDocumentAction("gerou_zip_lote", { cliente: item.cliente, versao: versaoAtual });
+      if (atualizado.status === "concluido") logDocumentAction("concluiu_lote", { cliente: item.cliente });
+      onNotify?.(
+        atualizado.status === "concluido"
+          ? `Processamento concluído — ZIP gerado (versão ${versaoAtual}).`
+          : `Processamento concluído com pendências — ZIP gerado (versão ${versaoAtual}).`,
+        "info",
+      );
+    }
+  }
+  async function handleBaixarZip() {
+    const ultimaVersao = (item.versoesZip || []).slice(-1)[0];
+    if (!ultimaVersao) return;
+    const doc = {
+      id: `zip-lote-${item.id}-v${ultimaVersao.versao}`,
+      nome: ultimaVersao.zipFileName,
+      tipo: "application/zip",
+      driveFileId: ultimaVersao.driveFileId,
+      assetId: ultimaVersao.assetId,
+    };
+    await downloadHomologAnexo(doc, { onNotify });
+    logDocumentAction("baixou_zip_lote", { cliente: item.cliente, versao: ultimaVersao.versao });
+  }
+  function handleSalvarObservacoes() {
+    persistPatch({ observacoes });
+    logDocumentAction("atualizou_solicitacao_lote", { cliente: item.cliente, campo: "observacoes" });
+    onNotify?.("Observações salvas.", "info");
+  }
+  async function handleVer(doc) {
+    await viewDocument(doc, { onNotify, company: null, onView });
+  }
+  async function handleBaixar(doc) {
+    await downloadDocument(null, doc, { onNotify });
+  }
+
+  const compilado = useMemo(() => {
+    let solicitados = 0,
+      recebidos = 0,
+      pendentes = 0,
+      naoAplicaveis = 0;
+    (item.documentacoesSolicitadas || []).forEach((it) => {
+      Object.values(it.statusPorBase || {}).forEach((st) => {
+        solicitados++;
+        if (st === "recebido" || st === "conferido") recebidos++;
+        else if (st === "pendente") pendentes++;
+        else if (st === "nao_aplicavel") naoAplicaveis++;
+      });
+    });
+    const processados = (item.versoesZip || []).length > 0 ? recebidos : 0;
+    return { solicitados, recebidos, pendentes, naoAplicaveis, processados };
+  }, [item]);
+
+  return React.createElement(
+    "div",
+    { className: "view" },
+    React.createElement(EnvioLoteStyles, null),
+    React.createElement(
+      "button",
+      { className: "back-btn", onClick: onBack },
+      React.createElement(ArrowLeft, { size: 15 }),
+      " Voltar ao histórico",
+    ),
+    React.createElement(
+      "header",
+      { className: "company-header" },
+      React.createElement(
+        "div",
+        { className: "company-header-top" },
+        React.createElement("span", { className: "company-header-tag" }, "ENVIO DE DOCUMENTAÇÕES EM LOTE"),
+        React.createElement(LoteStatusBadge, { status: item.status }),
+      ),
+      React.createElement("h1", null, item.cliente),
+      React.createElement(
+        "p",
+        { className: "company-header-legal" },
+        "Solicitado por ",
+        item.usuarioSolicitante?.nome,
+        " · em ",
+        formatAuditWhen(new Date(item.criadoEm)),
+        " · bases: ",
+        (item.baseIds || []).map((bId) => companyLabelFor(companiesPorId.get(bId))).filter(Boolean).join(", "),
+        item.concluidoEm ? ` · concluído em ${formatAuditWhen(new Date(item.concluidoEm))}` : "",
+      ),
+    ),
+    React.createElement(
+      "div",
+      { className: "lote-section" },
+      React.createElement("h3", null, "Compilado da documentação"),
+      React.createElement(
+        "div",
+        { className: "lote-compilado-grid" },
+        React.createElement("div", { className: "lote-compilado-card" }, React.createElement("strong", null, compilado.solicitados), React.createElement("span", null, "Solicitados")),
+        React.createElement("div", { className: "lote-compilado-card" }, React.createElement("strong", null, compilado.recebidos), React.createElement("span", null, "Recebidos")),
+        React.createElement("div", { className: "lote-compilado-card" }, React.createElement("strong", null, compilado.processados), React.createElement("span", null, "Processados")),
+        React.createElement("div", { className: "lote-compilado-card" }, React.createElement("strong", null, compilado.pendentes), React.createElement("span", null, "Pendentes")),
+      ),
+    ),
+    React.createElement(
+      "div",
+      { className: "lote-section" },
+      React.createElement("h3", null, "Documentações solicitadas"),
+      (item.documentacoesSolicitadas || []).map((it) =>
+        React.createElement(
+          "div",
+          { key: it.id, className: "lote-item-row" },
+          React.createElement(
+            "div",
+            { className: "lote-item-row-head" },
+            React.createElement("span", { className: "lote-item-titulo" }, it.nome),
+            React.createElement("span", { className: "lote-item-origem" }, it.origem === "manual" ? "adicionado manualmente" : "da checklist"),
+          ),
+          React.createElement(
+            "div",
+            { className: "lote-item-bases" },
+            Object.keys(it.statusPorBase || {}).map((baseId) => {
+              const anexo = (item.anexosRecebidos || []).find((a) => a.itemAssociadoId === it.id && a.baseId === baseId);
+              return React.createElement(LoteItemBaseRow, {
+                key: baseId,
+                item: it,
+                baseId,
+                company: companiesPorId.get(baseId),
+                statusAtual: it.statusPorBase[baseId],
+                anexo,
+                enviandoAnexo: enviandoAnexoChave === `${it.id}:${baseId}`,
+                onUsarEncontrado: () => alterarStatus(it.id, baseId, "recebido"),
+                onAnexar: (file) => handleAnexarArquivo(it.id, baseId, file),
+                onRemoverAnexo: () => anexo && handleRemoverAnexo(anexo),
+                onAlterarStatus: (novoStatus) => alterarStatus(it.id, baseId, novoStatus),
+                onVer: handleVer,
+                onBaixar: handleBaixar,
+              });
+            }),
+          ),
+        ),
+      ),
+      React.createElement(
+        "div",
+        { style: { display: "flex", gap: 8, marginTop: 8 } },
+        React.createElement("input", {
+          type: "text",
+          value: novoItemNome,
+          onChange: (e) => setNovoItemNome(e.target.value),
+          placeholder: "+ Adicionar documentação a esta solicitação",
+          onKeyDown: (e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              handleAdicionarItem();
+            }
+          },
+        }),
+        React.createElement(
+          "button",
+          { type: "button", className: "filters-clear-btn", style: { flex: "none" }, onClick: handleAdicionarItem },
+          React.createElement(Plus, { size: 14 }),
+          " Adicionar",
+        ),
+      ),
+    ),
+    (item.etapasProcessamento || []).length > 0 &&
+      React.createElement(
+        "div",
+        { className: "lote-section" },
+        React.createElement("h3", null, "Último processamento"),
+        React.createElement(
+          "ul",
+          { className: "lote-etapas-list" },
+          item.etapasProcessamento.slice(-7).map((et, i) =>
+            React.createElement(
+              "li",
+              { key: i, className: "lote-etapa-item " + et.status },
+              et.status === "ok" ? React.createElement(CheckCircle2, { size: 14 }) : React.createElement(AlertTriangle, { size: 14 }),
+              " ",
+              et.etapa,
+              " — ",
+              formatAuditWhen(new Date(et.em)),
+              et.detalhe ? `: ${et.detalhe}` : "",
+            ),
+          ),
+        ),
+      ),
+    (item.versoesZip || []).length > 0 &&
+      React.createElement(
+        "div",
+        { className: "lote-section" },
+        React.createElement("h3", null, "Versões do ZIP gerado"),
+        item.versoesZip
+          .slice()
+          .reverse()
+          .map((v) =>
+            React.createElement(
+              "div",
+              { key: v.versao, className: "lote-versao-zip" },
+              React.createElement("span", null, `Versão ${v.versao} — ${formatAuditWhen(new Date(v.geradoEm))}`),
+              v.versao === item.versoesZip.length &&
+                React.createElement(
+                  "button",
+                  { type: "button", className: "mini-download-btn", onClick: handleBaixarZip },
+                  React.createElement(Download, { size: 13 }),
+                  " Baixar ZIP",
+                ),
+            ),
+          ),
+      ),
+    React.createElement(
+      "div",
+      { className: "homolog-field" },
+      React.createElement("label", null, "Observações"),
+      React.createElement("textarea", {
+        rows: 3,
+        value: observacoes,
+        onChange: (e) => setObservacoes(e.target.value),
+        placeholder: "Observações internas sobre esta solicitação (opcional)",
+      }),
+      React.createElement(
+        "button",
+        { type: "button", className: "filters-clear-btn", style: { flex: "none", marginTop: 6 }, onClick: handleSalvarObservacoes },
+        "Salvar observações",
+      ),
+    ),
+    React.createElement(
+      "div",
+      { className: "homolog-form-actions" },
+      React.createElement(
+        "button",
+        { type: "button", className: "doc-download-btn", onClick: handleProcessar, disabled: processando },
+        processando
+          ? React.createElement(Loader2, { size: 14 })
+          : React.createElement(FolderArchive, { size: 14 }),
+        " ",
+        processando ? "Processando..." : item.status === "erro" ? "Tentar novamente" : "Processar documentação",
+      ),
+      (item.versoesZip || []).length > 0 &&
+        React.createElement(
+          "button",
+          { type: "button", className: "doc-download-btn", onClick: handleBaixarZip },
+          React.createElement(Download, { size: 14 }),
+          " Baixar ZIP",
+        ),
+    ),
+  );
+}
+/** EnvioLoteView: ponto de entrada da aba — lista/histórico com KPIs,
+ *  filtros e paginação (mesmo molde de ClientAnalysisView/AuditLogView),
+ *  detalhe (EnvioLoteDetailView) quando uma solicitação está selecionada.
+ *  Firestore em tempo real na coleção "batch_document_submissions" — mesmo
+ *  padrão getDb().collection(...).onSnapshot/.doc(id).set já usado no resto
+ *  do portal. Nenhum campo não serializável é guardado nos itens desta aba
+ *  (uploads são aguardados ANTES de entrar no registro), então, ao
+ *  contrário de ClientAnalysisView, não precisa de uma cópia "em memória"
+ *  à parte para sobreviver ao onSnapshot. */
+function EnvioLoteView({ currentUser, onNotify, onView, companies }) {
+  const [items, setItems] = useState([]);
+  const [selectedId, setSelectedId] = useState(null);
+  const [modalOpen, setModalOpen] = useState(false);
+  const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
+  const [filtroCliente, setFiltroCliente] = useState("");
+  const [filtroUsuario, setFiltroUsuario] = useState("");
+  const [filtroStatus, setFiltroStatus] = useState("");
+  const [filtroBase, setFiltroBase] = useState("");
+  const [filtroInicio, setFiltroInicio] = useState("");
+  const [filtroFim, setFiltroFim] = useState("");
+  const [pagina, setPagina] = useState(1);
+  const companiesPorId = useMemo(() => new Map(companies.map((c) => [c.id, c])), [companies]);
+
+  useEffect(() => {
+    setPagina(1);
+  }, [filtroCliente, filtroUsuario, filtroStatus, filtroBase, filtroInicio, filtroFim]);
+
+  useEffect(() => {
+    let unsub = null;
+    let cancelled = false;
+    getDb().then((db) => {
+      if (cancelled || !db) return;
+      const col = db.collection("batch_document_submissions");
+      unsub = col.onSnapshot(
+        (snap) => {
+          if (cancelled) return;
+          setItems(snap.docs.map((d) => d.data()));
+        },
+        () => {},
+      );
+    });
+    return () => {
+      cancelled = true;
+      if (unsub) unsub();
+    };
+  }, []);
+
+  function persist(item) {
+    setItems((prev) => {
+      const exists = prev.some((it) => it.id === item.id);
+      return exists ? prev.map((it) => (it.id === item.id ? item : it)) : [item, ...prev];
+    });
+    getDb()
+      .then((db) => {
+        if (!db) return;
+        return db.collection("batch_document_submissions").doc(item.id).set(item).catch(() => {});
+      })
+      .catch(() => {});
+    return item;
+  }
+  function handleUpdate(id, patch) {
+    const atual = items.find((it) => it.id === id);
+    if (!atual) return;
+    persist({ ...atual, ...patch });
+  }
+  function handleCreate({ cliente, baseIds, itens }) {
+    const id = generateLoteId();
+    const agora = new Date().toISOString();
+    const documentacoesSolicitadas = itens.map((it) => {
+      const basesAplicaveis = it.valePorTodasAsBases ? companies.map((c) => c.id) : baseIds;
+      const statusPorBase = {};
+      basesAplicaveis.forEach((bId) => {
+        statusPorBase[bId] = "solicitado";
+      });
+      return {
+        id: it.id,
+        nome: it.descricaoOriginal,
+        tipoSugerido: it.tipoSugerido || null,
+        categoriaSugerida: it.categoriaSugerida || null,
+        origem: it.origem || "checklist",
+        statusPorBase,
+        observacao: null,
+      };
+    });
+    const item = {
+      id,
+      cliente,
+      baseIds,
+      documentacoesSolicitadas,
+      anexosRecebidos: [],
+      status: "pendente",
+      etapasProcessamento: [],
+      versoesZip: [],
+      usuarioSolicitante: { nome: currentUser?.nome || "Usuário do portal", email: currentUser?.email || "" },
+      criadoEm: agora,
+      usuarioProcessamento: null,
+      processadoEm: null,
+      concluidoEm: null,
+      observacoes: null,
+    };
+    persist(item);
+    setModalOpen(false);
+    setSelectedId(id);
+    logDocumentAction("criou_solicitacao_lote", {
+      cliente,
+      bases: baseIds.map((bId) => companyLabelFor(companiesPorId.get(bId))),
+      quantidade: documentacoesSolicitadas.length,
+    });
+    onNotify?.(`Solicitação de "${cliente}" criada com ${documentacoesSolicitadas.length} documentação(ões).`, "info");
+  }
+
+  const usuarios = useMemo(
+    () => [...new Set(items.map((it) => it.usuarioSolicitante?.nome).filter(Boolean))].sort(),
+    [items],
+  );
+  const filtered = items.filter((it) => {
+    if (filtroCliente && !normalize(it.cliente || "").includes(normalize(filtroCliente))) return false;
+    if (filtroUsuario && it.usuarioSolicitante?.nome !== filtroUsuario) return false;
+    if (filtroStatus && it.status !== filtroStatus) return false;
+    if (filtroBase && !(it.baseIds || []).includes(filtroBase)) return false;
+    if (filtroInicio && new Date(it.criadoEm) < new Date(filtroInicio + "T00:00:00")) return false;
+    if (filtroFim && new Date(it.criadoEm) > new Date(filtroFim + "T23:59:59")) return false;
+    return true;
+  });
+  function clearFilters() {
+    setFiltroCliente("");
+    setFiltroUsuario("");
+    setFiltroStatus("");
+    setFiltroBase("");
+    setFiltroInicio("");
+    setFiltroFim("");
+  }
+  const totais = useMemo(() => {
+    let processando = 0,
+      concluidas = 0,
+      comPendencias = 0;
+    items.forEach((it) => {
+      if (it.status === "processando") processando++;
+      if (it.status === "concluido") concluidas++;
+      if (it.status === "com_pendencias") comPendencias++;
+    });
+    return { processando, concluidas, comPendencias, total: items.length };
+  }, [items]);
+
+  const LOTE_PAGE_SIZE = 20;
+  const totalPaginas = Math.max(1, Math.ceil(filtered.length / LOTE_PAGE_SIZE));
+  const paginaAtual = Math.min(pagina, totalPaginas);
+  const inicioIntervalo = filtered.length === 0 ? 0 : (paginaAtual - 1) * LOTE_PAGE_SIZE + 1;
+  const fimIntervalo = Math.min(paginaAtual * LOTE_PAGE_SIZE, filtered.length);
+  const filteredPagina = filtered.slice((paginaAtual - 1) * LOTE_PAGE_SIZE, paginaAtual * LOTE_PAGE_SIZE);
+
+  const selected = items.find((it) => it.id === selectedId);
+  if (selected) {
+    return React.createElement(EnvioLoteDetailView, {
+      item: selected,
+      companies: companies,
+      onBack: () => setSelectedId(null),
+      onNotify: onNotify,
+      onView: onView,
+      onUpdate: (patch) => handleUpdate(selected.id, patch),
+      currentUser: currentUser,
+    });
+  }
+  function baseLabelFilter(c) {
+    return c.tipo === "Matriz" ? "Matriz" : `Filial ${c.id} — ${c.municipio}/${c.uf}`;
+  }
+  return React.createElement(
+    "div",
+    { className: "view" },
+    React.createElement(EnvioLoteStyles, null),
+    React.createElement(
+      "header",
+      { className: "view-header view-header-compact" },
+      React.createElement(
+        "div",
+        null,
+        React.createElement("p", { className: "eyebrow-pill" }, "Operacional"),
+        React.createElement("h1", null, "Envio de Documentações em Lote"),
+        React.createElement(
+          "p",
+          { className: "lede" },
+          "Monte a lista de documentações exigidas por um cliente, cruze com o catálogo real e acompanhe recebimento, processamento e geração do pacote final — com histórico completo.",
+        ),
+      ),
+    ),
+    React.createElement(
+      "div",
+      { className: "kpi-grid kpi-grid-4" },
+      React.createElement(
+        "button",
+        { type: "button", className: "kpi-new-homolog-btn", onClick: () => setModalOpen(true) },
+        React.createElement(Plus, { size: 14 }),
+        " Nova solicitação",
+      ),
+      React.createElement(KpiCard, { icon: Loader2, label: "Em processamento", value: totais.processando }),
+      React.createElement(KpiCard, { icon: CheckCircle2, label: "Concluídas", value: totais.concluidas }),
+      React.createElement(KpiCard, {
+        icon: AlertTriangle,
+        label: "Com pendências",
+        value: totais.comPendencias,
+        tone: totais.comPendencias > 0 ? "danger" : "default",
+      }),
+    ),
+    React.createElement(
+      "button",
+      {
+        type: "button",
+        className: "filters-btn mobile-only",
+        "aria-expanded": mobileFiltersOpen,
+        onClick: () => setMobileFiltersOpen((v) => !v),
+      },
+      React.createElement(SlidersHorizontal, { size: 15 }),
+      " Filtros",
+    ),
+    React.createElement(
+      "div",
+      { className: "filters-bar homolog-filters-bar" + (mobileFiltersOpen ? " mobile-open" : "") },
+      React.createElement(
+        "div",
+        { className: "filters-bar-head" },
+        React.createElement(SlidersHorizontal, { size: 15 }),
+        " Filtros",
+      ),
+      React.createElement(
+        "div",
+        { className: "filters-bar-fields" },
+        React.createElement(
+          "label",
+          { className: "filter-field" },
+          React.createElement("span", null, "Cliente"),
+          React.createElement("input", {
+            placeholder: "Filtrar por cliente...",
+            value: filtroCliente,
+            onChange: (e) => setFiltroCliente(e.target.value),
+          }),
+        ),
+        React.createElement(
+          "label",
+          { className: "filter-field" },
+          React.createElement("span", null, "Usuário"),
+          React.createElement(
+            "select",
+            { value: filtroUsuario, onChange: (e) => setFiltroUsuario(e.target.value) },
+            React.createElement("option", { value: "" }, "Todos"),
+            usuarios.map((u) => React.createElement("option", { key: u, value: u }, u)),
+          ),
+        ),
+        React.createElement(
+          "label",
+          { className: "filter-field" },
+          React.createElement("span", null, "Status"),
+          React.createElement(
+            "select",
+            { value: filtroStatus, onChange: (e) => setFiltroStatus(e.target.value) },
+            React.createElement("option", { value: "" }, "Todos"),
+            Object.entries(LOTE_STATUS_META).map(([k, m]) => React.createElement("option", { key: k, value: k }, m.label)),
+          ),
+        ),
+        React.createElement(
+          "label",
+          { className: "filter-field" },
+          React.createElement("span", null, "Base"),
+          React.createElement(
+            "select",
+            { value: filtroBase, onChange: (e) => setFiltroBase(e.target.value) },
+            React.createElement("option", { value: "" }, "Todas"),
+            companies.map((c) => React.createElement("option", { key: c.id, value: c.id }, baseLabelFilter(c))),
+          ),
+        ),
+        React.createElement(
+          "label",
+          { className: "filter-field filter-field-date" },
+          React.createElement("span", null, "Solicitada de"),
+          React.createElement("input", { type: "date", value: filtroInicio, onChange: (e) => setFiltroInicio(e.target.value) }),
+        ),
+        React.createElement(
+          "label",
+          { className: "filter-field filter-field-date" },
+          React.createElement("span", null, "até"),
+          React.createElement("input", { type: "date", value: filtroFim, onChange: (e) => setFiltroFim(e.target.value) }),
+        ),
+      ),
+      React.createElement(
+        "button",
+        { className: "filters-clear-btn filters-clear-inline", onClick: clearFilters },
+        "Limpar filtros",
+      ),
+    ),
+    React.createElement(
+      "div",
+      { className: "table-wrap desktop-only" },
+      React.createElement(
+        "table",
+        { className: "company-table" },
+        React.createElement(
+          "thead",
+          null,
+          React.createElement(
+            "tr",
+            null,
+            React.createElement("th", null, "Data"),
+            React.createElement("th", null, "Usuário"),
+            React.createElement("th", null, "Cliente"),
+            React.createElement("th", null, "Bases"),
+            React.createElement("th", null, "Documentos"),
+            React.createElement("th", null, "Status"),
+            React.createElement("th", null, "Ação"),
+          ),
+        ),
+        React.createElement(
+          "tbody",
+          null,
+          filteredPagina.map((it) =>
+            React.createElement(
+              "tr",
+              { key: it.id, onClick: () => setSelectedId(it.id), style: { cursor: "pointer" } },
+              React.createElement("td", { className: "mono" }, isoDateToBR(it.criadoEm.slice(0, 10))),
+              React.createElement("td", null, it.usuarioSolicitante?.nome),
+              React.createElement("td", null, it.cliente),
+              React.createElement("td", null, (it.baseIds || []).map((bId) => companyLabelFor(companiesPorId.get(bId))).filter(Boolean).join(", ")),
+              React.createElement("td", null, (it.documentacoesSolicitadas || []).length),
+              React.createElement("td", null, React.createElement(LoteStatusBadge, { status: it.status })),
+              React.createElement(
+                "td",
+                { onClick: (e) => e.stopPropagation() },
+                React.createElement("button", { className: "link-btn", onClick: () => setSelectedId(it.id) }, "Ver solicitação"),
+              ),
+            ),
+          ),
+        ),
+      ),
+      filtered.length === 0 &&
+        React.createElement("div", { className: "empty-state" }, "Nenhuma solicitação encontrada para os filtros selecionados."),
+    ),
+    React.createElement(
+      "div",
+      { className: "company-cards mobile-only" },
+      filteredPagina.map((it) =>
+        React.createElement(
+          "div",
+          { key: it.id, className: "company-card-mobile", onClick: () => setSelectedId(it.id) },
+          React.createElement(
+            "div",
+            { className: "company-card-mobile-top" },
+            React.createElement("span", { className: "company-mini-tag" }, it.cliente),
+            React.createElement(LoteStatusBadge, { status: it.status }),
+          ),
+          React.createElement(
+            "div",
+            { className: "company-card-mobile-row" },
+            React.createElement("span", null, "Usuário"),
+            React.createElement("span", null, it.usuarioSolicitante?.nome),
+          ),
+          React.createElement(
+            "div",
+            { className: "company-card-mobile-row" },
+            React.createElement("span", null, "Data"),
+            React.createElement("span", null, isoDateToBR(it.criadoEm.slice(0, 10))),
+          ),
+        ),
+      ),
+      filtered.length === 0 && React.createElement("div", { className: "empty-state" }, "Nenhuma solicitação encontrada."),
+    ),
+    filtered.length > 0 &&
+      React.createElement(
+        "div",
+        { className: "audit-pagination" },
+        React.createElement(
+          "span",
+          { className: "audit-pagination-info" },
+          inicioIntervalo,
+          " a ",
+          fimIntervalo,
+          " de ",
+          filtered.length,
+          " registro(s)",
+        ),
+        totalPaginas > 1 &&
+          React.createElement(
+            "div",
+            { className: "audit-pagination-nav" },
+            React.createElement(
+              "button",
+              {
+                className: "icon-btn-dark",
+                disabled: paginaAtual <= 1,
+                onClick: () => setPagina((p) => Math.max(1, p - 1)),
+                "aria-label": "Página anterior",
+              },
+              React.createElement(ChevronLeft, { size: 16 }),
+            ),
+            React.createElement("span", null, "Página ", paginaAtual, " de ", totalPaginas),
+            React.createElement(
+              "button",
+              {
+                className: "icon-btn-dark",
+                disabled: paginaAtual >= totalPaginas,
+                onClick: () => setPagina((p) => Math.min(totalPaginas, p + 1)),
+                "aria-label": "Próxima página",
+              },
+              React.createElement(ChevronRight, { size: 16 }),
+            ),
+          ),
+      ),
+    modalOpen &&
+      React.createElement(EnvioLoteFormModal, {
+        companies: companies,
+        onClose: () => setModalOpen(false),
+        onCreate: handleCreate,
+      }),
+  );
+}
+/* =========================================================================
    APP
    ========================================================================= */ /* =========================================================================
    AUDITORIA — consulta ao log de ações (login, visualização, download,
@@ -19746,6 +20638,22 @@ function GrupoprimaPortal() {
     setChatOpen(true);
     setChatSeed(text);
   }
+  // companiesOpenCorporate: mesmo padrão "semente consumida uma vez" do
+  // chatSeed acima — pedido explícito da Iasmin, 2026-09-23: o card
+  // "Grupoprima Logística" (documentações de abrangência empresarial) no
+  // Dashboard deve abrir a tela de Empresas já com aquele bloco expandido,
+  // mas SÓ quando é ESSE card específico que leva pra lá — qualquer outra
+  // forma de chegar em Empresas (nav lateral, "Ver todas", busca) continua
+  // abrindo fechado, como sempre. `setView("companies")` sozinho nunca
+  // decide isso: só `goToCompaniesCorporate` liga a semente antes de trocar
+  // de tela; CompaniesView consome e reseta via onCorporateAutoOpenConsumed
+  // (mesmo mecanismo de onSeedConsumed do chat), então navegar de novo por
+  // outro caminho não reabre o bloco sozinho.
+  const [companiesOpenCorporate, setCompaniesOpenCorporate] = useState(false);
+  function goToCompaniesCorporate() {
+    setCompaniesOpenCorporate(true);
+    setView("companies");
+  }
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [toast, setToast] = useState(null);
   const [docsModalCompanyId, setDocsModalCompanyId] = useState(null); // docsModalFilter: { type: "vencido"|"proximo"|"flagged", label } | null — setado
@@ -19931,8 +20839,6 @@ function GrupoprimaPortal() {
 
         .kpi-new-homolog-btn { display: flex; align-items: center; gap: 8px; background: var(--azul); color: var(--verde); border: none; border-radius: 10px; padding: 14px 16px; font-weight: 700; font-size: 13.5px; cursor: pointer; text-align: left; transition: background 0.15s; }
         .kpi-new-homolog-btn:hover { background: var(--azul-2); }
-        .envio-lote-btn { width: 100%; justify-content: center; background: #fff; color: var(--azul); border: 2px solid var(--verde); margin-top: 22px; margin-bottom: 14px; box-shadow: 0 0 0 3px rgba(107,254,156,0.12); }
-        .envio-lote-btn:hover { border-color: var(--verde); background: rgba(107,254,156,0.08); }
         .kpi-card-hero .kpi-value { font-size: clamp(28px, 6vw, 38px); }
 
         .alert-list { margin-bottom: 30px; display: flex; flex-direction: column; gap: 8px; }
@@ -20459,18 +21365,6 @@ function GrupoprimaPortal() {
         .homolog-checklist-select { border: 1px solid var(--cinza-frio); border-radius: 7px; padding: 7px 9px; font-size: 12px; color: var(--azul); background: #fff; outline: none; max-width: 220px; }
         .homolog-checklist-select:focus { border-color: var(--azul); }
         .homolog-checklist-actions { display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-top: 4px; }
-        .homolog-zip-modal { max-width: 620px; width: 100%; }
-        .homolog-zip-resumo { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 12px; color: var(--azul); font-weight: 700; background: var(--branco-frio); border-radius: 8px; padding: 8px 10px; margin-bottom: 14px; }
-        .homolog-zip-grupo { margin-bottom: 16px; }
-        .homolog-zip-grupo h4 { font-family: 'Archivo', sans-serif; font-size: 12.5px; font-weight: 800; color: var(--azul); margin: 0 0 8px; }
-        .homolog-zip-lista { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
-        .homolog-zip-item { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--azul); background: var(--branco-frio); border: 1px solid var(--cinza-frio); border-radius: 7px; padding: 7px 9px; }
-        .homolog-zip-item > span:not(.homolog-zip-numero) { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        .homolog-zip-numero { font-weight: 800; color: var(--azul); flex-shrink: 0; min-width: 26px; }
-        .homolog-zip-ambiguo-bloco { background: rgba(214,158,46,0.08); border: 1px solid rgba(214,158,46,0.3); border-radius: 9px; padding: 10px; margin-bottom: 10px; }
-        .homolog-zip-ambiguo-bloco:last-child { margin-bottom: 0; }
-        .homolog-zip-tag-ambiguo { color: #b7791f; font-weight: 700; white-space: nowrap; }
-        .homolog-zip-aviso-externo { color: var(--carvao); font-style: italic; }
 
         /* ---- Cards de empresa (mobile) ---- */
         .desktop-only { display: block !important; }
@@ -20680,6 +21574,16 @@ function GrupoprimaPortal() {
       /*#__PURE__*/ React.createElement(
         "button",
         {
+          className: "nav-item" + (view === "envio_lote" ? " active" : ""),
+          onClick: () => goTo("envio_lote"),
+        },
+        /*#__PURE__*/ React.createElement(FolderArchive, { size: 16 }),
+        " ",
+        /*#__PURE__*/ React.createElement("span", null, "Envio de Documentações em Lote"),
+      ),
+      /*#__PURE__*/ React.createElement(
+        "button",
+        {
           className: "nav-item" + (view === "analise_clausulas" ? " active" : ""),
           onClick: () => goTo("analise_clausulas"),
         },
@@ -20839,6 +21743,7 @@ function GrupoprimaPortal() {
             data: data,
             onOpenCompany: openCompany,
             onGoCompanies: () => setView("companies"),
+            onGoCompaniesCorporate: goToCompaniesCorporate,
             onOpenDocuments: openDocumentsModal,
             onOpenChat: openChatWithQuery,
           }),
@@ -20852,6 +21757,8 @@ function GrupoprimaPortal() {
             onNotify: notify,
             onView: setViewer,
             isAdmin: currentUser?.perfil === "admin",
+            openCorporateOnMount: companiesOpenCorporate,
+            onCorporateAutoOpenConsumed: () => setCompaniesOpenCorporate(false),
           }),
         view === "company" &&
           selectedCompany &&
@@ -20866,6 +21773,13 @@ function GrupoprimaPortal() {
           }),
         view === "homologacao" &&
           /*#__PURE__*/ React.createElement(HomologacaoView, {
+            currentUser: currentUser,
+            onNotify: notify,
+            onView: setViewer,
+            companies: data.companies,
+          }),
+        view === "envio_lote" &&
+          /*#__PURE__*/ React.createElement(EnvioLoteView, {
             currentUser: currentUser,
             onNotify: notify,
             onView: setViewer,
