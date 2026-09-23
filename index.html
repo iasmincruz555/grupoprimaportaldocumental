@@ -8897,6 +8897,82 @@ function DocMiniRow({ company, doc, onNotify }) {
     ),
   );
 }
+/** DocMultiCompanyRow: mesma ideia do DocMiniRow acima, mas pra quando o
+ *  mesmo pedido de documento reconheceu VÁRIAS bases na pergunta ("CNPJ
+ *  matriz e filiais", "contrato social da filial 0004 e da matriz" — pedido
+ *  explícito da Iasmin, 2026-09-23: antes disso cada base virava um card
+ *  cheio (DocResultCard) empilhado um atrás do outro, ficando muito longo).
+ *  Linha compacta por padrão (base + título + selo de abrangência + baixar
+ *  direto), com um botão "Ver mais" que troca a própria linha pelo card
+ *  completo de sempre (DocResultCard, sem duplicar nenhuma lógica de
+ *  visualizar/baixar/editar título) — "Ver menos" volta pra linha compacta. */
+function DocMultiCompanyRow({ company, doc, onNotify, onView, isAdmin }) {
+  const [expanded, setExpanded] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const baseLabel = company.tipo === "Matriz" ? "Matriz" : `Filial ${company.id}`;
+  if (expanded) {
+    return /*#__PURE__*/ React.createElement(
+      "div",
+      { className: "doc-multi-company-expanded" },
+      /*#__PURE__*/ React.createElement(
+        "button",
+        {
+          className: "doc-multi-company-collapse",
+          onClick: () => setExpanded(false),
+        },
+        "▴ Ver menos — ",
+        baseLabel,
+      ),
+      /*#__PURE__*/ React.createElement(DocResultCard, {
+        company,
+        doc,
+        onNotify,
+        onView,
+        isAdmin,
+      }),
+    );
+  }
+  async function handleDownload() {
+    setBusy(true);
+    await downloadDocument(company, doc, { onNotify });
+    setBusy(false);
+  }
+  return /*#__PURE__*/ React.createElement(
+    "div",
+    { className: "doc-mini-card" },
+    /*#__PURE__*/ React.createElement(FileText, { size: 13 }),
+    /*#__PURE__*/ React.createElement(
+      "span",
+      { className: "doc-multi-company-base" },
+      baseLabel,
+    ),
+    /*#__PURE__*/ React.createElement("span", null, docTituloExibido(doc)),
+    /*#__PURE__*/ React.createElement(DocScopeBadge, { doc }),
+    /*#__PURE__*/ React.createElement(
+      "button",
+      {
+        className: "doc-mini-expand-btn",
+        onClick: () => setExpanded(true),
+        title: "Ver detalhes completos deste documento",
+      },
+      "Ver mais",
+    ),
+    /*#__PURE__*/ React.createElement(
+      "button",
+      {
+        onClick: handleDownload,
+        disabled: busy,
+        title: "Baixar documento original",
+      },
+      busy
+        ? /*#__PURE__*/ React.createElement(Loader2, {
+            size: 12,
+            className: "spin",
+          })
+        : /*#__PURE__*/ React.createElement(Download, { size: 12 }),
+    ),
+  );
+}
 function ZipBar({ label, sub, state, onClick }) {
   return /*#__PURE__*/ React.createElement(
     "div",
@@ -9132,6 +9208,66 @@ function ChatMessage({
         }),
     );
   }
+  if (msg.type === "doc-multi-empresas") {
+    // Pedido de um documento pra VÁRIAS bases na mesma pergunta ("CNPJ
+    // matriz e filiais", "contrato social da filial 0004 e da matriz" —
+    // pedido explícito da Iasmin, 2026-09-23). Antes, cada base virava uma
+    // mensagem própria com um DocResultCard inteiro empilhado (bem longo
+    // pra 3+ bases); aqui é UMA mensagem só, com uma linha compacta por
+    // item (DocMultiCompanyRow, com "Ver mais" pra expandir pro card
+    // completo individualmente) e um único ZIP reunindo todas as bases.
+    return /*#__PURE__*/ React.createElement(
+      "div",
+      { className: "chat-msg chat-msg-assistant chat-msg-rich" },
+      msg.text &&
+        /*#__PURE__*/ React.createElement(
+          "div",
+          { className: "chat-msg-lead" },
+          msg.text,
+        ),
+      msg.items.length > 0 &&
+        /*#__PURE__*/ React.createElement(
+          "div",
+          { className: "doc-mini-cards" },
+          msg.items.map((it) =>
+            /*#__PURE__*/ React.createElement(DocMultiCompanyRow, {
+              key: `${it.company.id}-${it.doc.id}`,
+              company: it.company,
+              doc: it.doc,
+              onNotify: onNotify,
+              onView: onView,
+              isAdmin: isAdmin,
+            }),
+          ),
+        ),
+      msg.notFoundItems.length > 0 &&
+        /*#__PURE__*/ React.createElement(
+          "ul",
+          { className: "found-list" },
+          msg.notFoundItems.map((nf, i) =>
+            /*#__PURE__*/ React.createElement(
+              "li",
+              { key: `${nf.company.id}-${nf.label}-${i}`, className: "found-missing" },
+              /*#__PURE__*/ React.createElement(XCircle, { size: 13 }),
+              " ",
+              nf.label,
+              " — não localizado(a) para ",
+              nf.company.tipo === "Matriz" ? "a Matriz" : `a Filial ${nf.company.id}`,
+            ),
+          ),
+        ),
+      msg.items.length > 1 &&
+        /*#__PURE__*/ React.createElement(ZipBar, {
+          label: `Baixar ${msg.items.length} documentos de ${new Set(msg.items.map((it) => it.company.id)).size} bases (.ZIP)`,
+          sub:
+            msg.notFoundItems.length > 0
+              ? `${msg.notFoundItems.length} documento(s) não incluído(s) por não terem sido localizados`
+              : null,
+          state: msg.zipState || "idle",
+          onClick: () => onZipClick(msg.id),
+        }),
+    );
+  }
   if (msg.type === "category-summary") {
     return /*#__PURE__*/ React.createElement(
       "div",
@@ -9332,10 +9468,43 @@ function ChatDrawer({
     const msg = messages.find((m) => m.id === msgId);
     if (!msg) return;
     updateMessage(msgId, { zipState: "working" });
-    const docs = msg.type === "category-summary" ? msg.docs : msg.found;
-    const pkg = await createDocumentPackage(msg.company, docs, {
-      zipName: msg.zipName,
-    });
+    // "doc-multi-empresas" (pedido explícito da Iasmin, 2026-09-23: ZIP
+    // pro pedido de um documento em VÁRIAS bases, ex.: "CNPJ matriz e
+    // filiais") reaproveita `createDocumentPackageMultiBase` — já usada
+    // pelo "Envio de documentações em lote" — organizando o ZIP por Base
+    // (uma pasta por empresa/filial), nunca por categoria (que só faz
+    // sentido dentro de UMA base, os outros dois tipos de mensagem acima).
+    let pkg;
+    let docsCount;
+    let empresaLogLabel;
+    let docsForLog;
+    if (msg.type === "doc-multi-empresas") {
+      docsCount = msg.items.length;
+      docsForLog = msg.items.map((it) => it.doc);
+      empresaLogLabel = [
+        ...new Set(msg.items.map((it) => companyLabelFor(it.company))),
+      ].join(", ");
+      const porBase = new Map();
+      msg.items.forEach((it) => {
+        const baseLabel = companyLabelFor(it.company);
+        if (!porBase.has(it.company.id))
+          porBase.set(it.company.id, { baseFolder: baseLabel, numerados: [] });
+        const entrada = porBase.get(it.company.id);
+        entrada.numerados.push({ numero: entrada.numerados.length + 1, doc: it.doc });
+      });
+      pkg = await createDocumentPackageMultiBase(
+        [...porBase.values()],
+        { zipName: msg.zipName },
+      );
+    } else {
+      const docs = msg.type === "category-summary" ? msg.docs : msg.found;
+      docsCount = docs.length;
+      docsForLog = docs;
+      empresaLogLabel = companyLabelFor(msg.company);
+      pkg = await createDocumentPackage(msg.company, docs, {
+        zipName: msg.zipName,
+      });
+    }
     if (pkg.files.length === 0) {
       updateMessage(msgId, { zipState: "error" });
       pushMessage({
@@ -9360,12 +9529,12 @@ function ChatDrawer({
     }
     updateMessage(msgId, { zipState: "done" });
     logDocumentAction("gerou_zip", {
-      empresa: companyLabelFor(msg.company),
+      empresa: empresaLogLabel,
       quantidade: pkg.files.length,
-      documentos: docs.slice(0, pkg.files.length).map((d) => d.tipo),
+      documentos: docsForLog.slice(0, pkg.files.length).map((d) => d.tipo),
       arquivo: pkg.zipName,
     });
-    let resultText = `Pronto — ${pkg.files.length} de ${docs.length} documento(s) reunidos em "${pkg.zipName}", organizados por categoria. O download deve iniciar automaticamente.`;
+    let resultText = `Pronto — ${pkg.files.length} de ${docsCount} documento(s) reunidos em "${pkg.zipName}", organizados ${msg.type === "doc-multi-empresas" ? "por base" : "por categoria"}. O download deve iniciar automaticamente.`;
     if (pkg.failed.length > 0) {
       resultText +=
         `\n\n⚠️ ${pkg.failed.length} documento(s) não puderam ser incluídos:\n` +
@@ -9473,6 +9642,56 @@ function ChatDrawer({
     });
     lastFoundRef.current = { company, docs: found };
     return { found, notFoundLabels };
+  }
+  /** handleDocumentIntentMultiCompany: mesma busca de handleDocumentIntent
+   *  (searchDocuments), uma vez por base reconhecida na pergunta — mas
+   *  reunindo o resultado de TODAS as bases numa única mensagem "doc-multi-
+   *  empresas" (linhas compactas + "Ver mais" por item + um ZIP só), em vez
+   *  de uma mensagem cheia por base (o que fazia "CNPJ matriz e filiais"
+   *  virar uma tela enorme, pedido explícito da Iasmin, 2026-09-23). */
+  function handleDocumentIntentMultiCompany(rawText, parsed, multiCompanies) {
+    const items = [];
+    const notFoundItems = [];
+    multiCompanies.forEach((company) => {
+      const { found, notFoundLabels } = searchDocuments({
+        company,
+        wantedTypeKeys: parsed.types,
+        wantedCategoryKeys: parsed.categories,
+        seguroCliente: parsed.seguroCliente || null,
+        afeAtividade: parsed.afeAtividade || null,
+        anoDocumento: parsed.anoDocumento || null,
+      });
+      found.forEach((doc) => items.push({ company, doc }));
+      notFoundLabels.forEach((label) => notFoundItems.push({ company, label }));
+    });
+    const basesLabel = multiCompanies
+      .map((c) => (c.tipo === "Matriz" ? "Matriz" : `Filial ${c.id}`))
+      .join(", ");
+    if (items.length === 0) {
+      pushMessage({
+        role: "assistant",
+        type: "text",
+        text: `Não localizei ${notFoundItems.length > 0 ? [...new Set(notFoundItems.map((nf) => nf.label))].join(", ") : "o documento solicitado"} em nenhuma das bases citadas (${basesLabel}) no sistema atual. Pergunte "quais documentos essa base tem?" para ver o que já foi indexado em cada uma.`,
+      });
+      return { items, notFoundItems };
+    }
+    const totalPedidos = items.length + notFoundItems.length;
+    const numBases = new Set(multiCompanies.map((c) => c.id)).size;
+    const intro =
+      items.length === totalPedidos
+        ? `Encontrei ${items.length} documento(s) em ${numBases} base(s) (${basesLabel}):`
+        : `Encontrei ${items.length} de ${totalPedidos} documento(s) solicitados em ${numBases} base(s) (${basesLabel}):`;
+    const zipName = `Documentos_${safeFileSlug(basesLabel)}.zip`;
+    pushMessage({
+      role: "assistant",
+      type: "doc-multi-empresas",
+      text: intro,
+      items,
+      notFoundItems,
+      zipState: "idle",
+      zipName,
+    });
+    return { items, notFoundItems };
   }
   function handleAllDocumentsIntent(company) {
     const docs = company.documentos;
@@ -9910,10 +10129,13 @@ function ChatDrawer({
     // bases citadas; só entra em ação quando reconhece mais de uma (uma base
     // só continua seguindo o fluxo de sempre, abaixo, sem nenhuma mudança de
     // comportamento) e quando o pedido é claramente de entrega de
-    // documento(s) — reaproveita a MESMA `handleDocumentIntent`/
-    // `handleAllDocumentsIntent` já usada pra uma base, uma vez por base
-    // encontrada, nunca uma lógica paralela (mesmo princípio já seguido em
-    // todo o resto do motor de regras).
+    // documento(s) — reaproveita a MESMA `searchDocuments` já usada pra uma
+    // base, uma vez por base encontrada, nunca uma lógica paralela (mesmo
+    // princípio já seguido em todo o resto do motor de regras). A partir de
+    // 2026-09-23 (pedido explícito da Iasmin: ficava muito longo empilhar
+    // um card cheio por base) as várias bases entram numa ÚNICA mensagem
+    // compacta (`handleDocumentIntentMultiCompany`), não mais uma mensagem
+    // inteira por base.
     const multiCompanies = findCompaniesInQuery(text, companies);
     if (multiCompanies.length > 1) {
       if (
@@ -9921,7 +10143,7 @@ function ChatDrawer({
         parsed.intent === "DOWNLOAD_MULTIPLE_DOCUMENTS" ||
         parsed.intent === "SEARCH_DOCUMENT"
       ) {
-        multiCompanies.forEach((c) => handleDocumentIntent(text, parsed, c));
+        handleDocumentIntentMultiCompany(text, parsed, multiCompanies);
         return;
       }
       if (parsed.intent === "DOWNLOAD_ALL_DOCUMENTS") {
@@ -19907,6 +20129,19 @@ function GrupoprimaPortal() {
         .doc-mini-card button { background: var(--branco-frio); border: 1px solid var(--cinza-frio); border-radius: 5px; padding: 4px 6px; cursor: pointer; color: var(--azul); display: flex; }
         .doc-mini-card button:hover { border-color: var(--azul); }
         .doc-mini-card button:disabled { opacity: 0.6; cursor: default; }
+
+        /* doc-multi-empresas (pedido explícito da Iasmin, 2026-09-23): pedido
+           de um documento pra "matriz e filiais"/"filial X e matriz" — várias
+           bases na mesma pergunta — mostra uma linha compacta por base/
+           documento (reaproveita .doc-mini-card acima) com um botão "Ver
+           mais" que expande pro card completo (.doc-card, o mesmo de sempre)
+           só daquele item, em vez de empilhar N cards inteiros de uma vez. */
+        .doc-multi-company-base { flex: 0 0 auto !important; font-weight: 800; color: var(--carvao); white-space: nowrap; }
+        .doc-mini-card .doc-scope-badge { flex: 0 0 auto; }
+        .doc-mini-card .doc-mini-expand-btn { white-space: nowrap; font-size: 11px; font-weight: 700; padding: 4px 8px; }
+        .doc-multi-company-expanded { margin-bottom: 2px; }
+        .doc-multi-company-collapse { background: none; border: none; color: var(--azul); font-weight: 700; font-size: 11px; cursor: pointer; padding: 2px 0 6px; }
+        .doc-multi-company-collapse:hover { text-decoration: underline; }
 
         .zip-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; background: #fff; border: 1px dashed var(--azul); border-radius: 8px; padding: 8px 10px; margin-top: 4px; }
         .zip-bar-info { display: flex; align-items: center; gap: 8px; color: var(--azul); min-width: 0; }
