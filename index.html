@@ -1251,6 +1251,14 @@ function findBaseEnderecosInQuery(q) {
       if (b.tipo !== "Matriz") addUnique(b);
     });
   }
+  // "bases" no plural genérico, sem "matriz"/"filial(is)" nem nenhuma base
+  // específica citada — "endereço das bases" quer dizer todas, mesmo sem
+  // "todas" explícito (bug relatado pela Iasmin, 2026-09-24, com print:
+  // "endereço das bases" devolvia uma lista vazia aqui e caía no fallback
+  // genérico). Mesmo espírito do fallback de "filiais" acima.
+  if (found.length === 0 && /\bbases\b/.test(nq)) {
+    BASE_ENDERECOS.forEach(addUnique);
+  }
   return found;
 }
 /** formatEnderecosResposta: monta a resposta em texto do(s) endereço(s)
@@ -1275,6 +1283,40 @@ function formatEnderecosResposta(bases) {
 function isEnderecoQuery(text) {
   const nq = normalize(text);
   return /endere[cç]|localiza[cç][aã]o|onde fica|onde fic(a|am)/.test(nq);
+}
+/** formatCnpjsResposta: mesmo espírito de `formatEnderecosResposta`, mas
+ *  para CNPJ — uma base só devolve uma frase; várias, uma lista com
+ *  cabeçalho. Reaproveita o `company.cnpj` real (já usado em `answerQuery`
+ *  pra uma base só), nunca uma lista separada tipo `BASE_ENDERECOS` — o
+ *  CNPJ de cada base já é um dado confiável em `companiesRaw`. */
+function formatCnpjsResposta(empresas) {
+  const labelFor = (c) => (c.tipo === "Matriz" ? "Matriz" : `Filial ${c.id}`);
+  if (empresas.length === 1) {
+    const c = empresas[0];
+    return `O CNPJ de ${labelFor(c)} (${c.municipio}/${c.uf}) é ${c.cnpj}.`;
+  }
+  const linhas = empresas.map((c) => `• ${labelFor(c)} (${c.municipio}/${c.uf}): ${c.cnpj}`);
+  return `CNPJs das bases da Grupoprima:\n${linhas.join("\n")}`;
+}
+/** isCnpjQuery: reconhece um pedido do DADO do CNPJ em texto natural (não o
+ *  documento "Cartão CNPJ"), antes de cair no motor de regras genérico
+ *  (`answerQuery`, que só resolvia UMA base por vez via
+ *  `findCompanyInQuery`, ignorando "e filiais"/"das bases" por completo) —
+ *  mesmo espírito de `isEnderecoQuery`. Pedido explícito da Iasmin,
+ *  2026-09-24 (bug relatado com prints): "cnpjs das bases" caía no
+ *  fallback genérico, e "cnpjs da matriz e filiais" respondia só a Matriz.
+ *  "cnpj" sozinho foi removido de propósito de `DOC_TYPE_KEYWORDS` (quase
+ *  todo documento brasileiro imprime um CNPJ em algum lugar) — por isso
+ *  precisa desse reconhecimento à parte, e não de `detectRequestedTypes`
+ *  diretamente. Mas quando a frase já bate com o pedido do DOCUMENTO
+ *  ("cartão cnpj", "comprovante de inscrição", "situação cadastral"),
+ *  `detectRequestedTypes` já reconhece "Cartão CNPJ" como tipo — aqui cede
+ *  o lugar pro motor de documentos (que entrega o arquivo real), nunca
+ *  disputa com ele. */
+function isCnpjQuery(text) {
+  const nq = normalize(text);
+  if (!/\bcnpjs?\b/.test(nq)) return false;
+  return detectRequestedTypes(text).length === 0;
 }
 /* =========================================================================
    FILA DE CONFERÊNCIA — documentos localizados na pasta oficial do Drive
@@ -4468,6 +4510,15 @@ function findCompaniesInQuery(q, companies) {
   // "matriz e filiais"/"cnpj das filiais" quer dizer todas, não nenhuma.
   const nenhumaFilialEspecificaCitada = found.every((c) => c === matriz);
   if (!pediuTodasAsFiliais && nenhumaFilialEspecificaCitada && /\bfiliais\b/.test(nq)) {
+    filiais.forEach(addUnique);
+  }
+  // "bases" no plural genérico, sem "matriz" nem nenhuma filial específica
+  // reconhecida (nem por id, município, UF ou CNPJ) — "cnpjs das bases"/
+  // "documentos das bases" quer dizer todas, mesmo sem "todas" explícito
+  // (bug relatado pela Iasmin, 2026-09-24, com print: "cnpjs das bases"
+  // caía no fallback genérico por devolver uma lista vazia aqui).
+  if (found.length === 0 && /\bbases\b/.test(nq)) {
+    addUnique(matriz);
     filiais.forEach(addUnique);
   }
   return found;
@@ -10335,6 +10386,25 @@ function ChatDrawer({
           role: "assistant",
           type: "text",
           text: formatEnderecosResposta(basesEndereco),
+        });
+        return;
+      }
+    }
+    // CNPJ das bases (mesmo espírito do endereço acima, pedido explícito da
+    // Iasmin, 2026-09-24) — reaproveita `findCompaniesInQuery` (a mesma
+    // função já usada pro reconhecimento de múltiplas bases em pedidos de
+    // documento) porque ela já resolve "matriz e filiais"/"todas as
+    // bases"/uma base específica corretamente. `isCnpjQuery` cede o lugar
+    // pro motor de documentos sempre que a frase já é um pedido do
+    // DOCUMENTO ("cartão cnpj"), então isso nunca disputa com a entrega do
+    // arquivo real, mais abaixo.
+    if (isCnpjQuery(text)) {
+      const empresasCnpj = findCompaniesInQuery(text, companies);
+      if (empresasCnpj.length > 0) {
+        pushMessage({
+          role: "assistant",
+          type: "text",
+          text: formatCnpjsResposta(empresasCnpj),
         });
         return;
       }
@@ -19993,7 +20063,7 @@ function EnvioLoteView({ currentUser, onNotify, onView, companies }) {
   }
   return React.createElement(
     "div",
-    { className: "view" },
+    { className: "view view-wide" },
     React.createElement(EnvioLoteStyles, null),
     React.createElement(
       "header",
@@ -20001,7 +20071,6 @@ function EnvioLoteView({ currentUser, onNotify, onView, companies }) {
       React.createElement(
         "div",
         null,
-        React.createElement("p", { className: "eyebrow-pill" }, "Operacional"),
         React.createElement("h1", null, "Envio de Documentações em Lote"),
         React.createElement(
           "p",
@@ -20041,7 +20110,7 @@ function EnvioLoteView({ currentUser, onNotify, onView, companies }) {
     ),
     React.createElement(
       "div",
-      { className: "filters-bar homolog-filters-bar" + (mobileFiltersOpen ? " mobile-open" : "") },
+      { className: "filters-bar homolog-filters-bar lote-filters-bar" + (mobileFiltersOpen ? " mobile-open" : "") },
       React.createElement(
         "div",
         { className: "filters-bar-head" },
@@ -21106,6 +21175,7 @@ function GrupoprimaPortal() {
 
         .content { flex: 1; overflow-y: auto; padding: 26px 30px 60px; }
         .view { max-width: 920px; }
+        .view-wide { max-width: 1120px; }
         .view-header { margin-bottom: 22px; display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
         .eyebrow { font-size: 11px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--carvao); margin: 0 0 6px; }
         .eyebrow-pill { display: inline-block; font-size: 10.5px; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; color: var(--azul); background: rgba(107,254,156,0.14); border: 1px solid rgba(107,254,156,0.65); padding: 3px 10px; border-radius: 999px; margin: 0 0 8px; }
@@ -21520,6 +21590,19 @@ function GrupoprimaPortal() {
           .homolog-filters-bar .filters-bar-fields { flex-wrap: nowrap; }
           .homolog-filters-bar .filter-field { min-width: 0; flex: 1 1 0; }
           .homolog-filters-bar .filter-field-date { flex: 0.85 1 0; }
+        }
+        /* .lote-filters-bar tem 1 campo a mais (Base) que as outras barras
+           que reaproveitam .homolog-filters-bar — em telas mais estreitas
+           forçar tudo numa linha só deixava "até dd/mm/aaaa" espremido, então
+           aqui ela quebra em 2 linhas até haver espaço confortável (1280px)
+           e, a partir daí, os campos de data ganham uma largura mínima
+           garantida em vez de dependerem só da proporção flex. */
+        @media (min-width: 1024px) and (max-width: 1279px) {
+          .lote-filters-bar .filters-bar-fields { flex-wrap: wrap !important; }
+          .lote-filters-bar .filter-field { min-width: 150px; }
+        }
+        @media (min-width: 1280px) {
+          .lote-filters-bar .filter-field-date { flex: 1 1 132px; min-width: 132px; }
         }
 
         /* ---- Filtros ativos (chips) ---- */
