@@ -747,6 +747,74 @@ const Pencil = (p) =>
       d: "M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z",
     }),
   );
+/* Ícone de usuário/perfil minimalista (pedido da Iasmin, 2026-09-25: aba
+   "Meu Perfil") — mesmo padrão de composição via <Icon> dos demais acima. */ const UserCircle =
+  (p) =>
+    /*#__PURE__*/ React.createElement(
+      Icon,
+      p,
+      /*#__PURE__*/ React.createElement("circle", {
+        cx: "12",
+        cy: "12",
+        r: "9",
+      }),
+      /*#__PURE__*/ React.createElement("circle", {
+        cx: "12",
+        cy: "10",
+        r: "3",
+      }),
+      /*#__PURE__*/ React.createElement("path", {
+        d: "M6.2 18.2a6 6 0 0 1 11.6 0",
+      }),
+    );
+const UserPlus = (p) =>
+  /*#__PURE__*/ React.createElement(
+    Icon,
+    p,
+    /*#__PURE__*/ React.createElement("circle", { cx: "9", cy: "8", r: "4" }),
+    /*#__PURE__*/ React.createElement("path", { d: "M2 20a7 7 0 0 1 14 0" }),
+    /*#__PURE__*/ React.createElement("path", { d: "M18 8v6" }),
+    /*#__PURE__*/ React.createElement("path", { d: "M15 11h6" }),
+  );
+const Trash2 = (p) =>
+  /*#__PURE__*/ React.createElement(
+    Icon,
+    p,
+    /*#__PURE__*/ React.createElement("path", { d: "M3 6h18" }),
+    /*#__PURE__*/ React.createElement("path", {
+      d: "M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2",
+    }),
+    /*#__PURE__*/ React.createElement("path", {
+      d: "M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6",
+    }),
+    /*#__PURE__*/ React.createElement("path", { d: "M10 11v6" }),
+    /*#__PURE__*/ React.createElement("path", { d: "M14 11v6" }),
+  );
+const Monitor = (p) =>
+  /*#__PURE__*/ React.createElement(
+    Icon,
+    p,
+    /*#__PURE__*/ React.createElement("rect", {
+      x: "3",
+      y: "4",
+      width: "18",
+      height: "13",
+      rx: "2",
+    }),
+    /*#__PURE__*/ React.createElement("path", { d: "M8 21h8" }),
+    /*#__PURE__*/ React.createElement("path", { d: "M12 17v4" }),
+  );
+const BellIcon = (p) =>
+  /*#__PURE__*/ React.createElement(
+    Icon,
+    p,
+    /*#__PURE__*/ React.createElement("path", {
+      d: "M6 9a6 6 0 0 1 12 0c0 5 2 6 2 6H4s2-1 2-6",
+    }),
+    /*#__PURE__*/ React.createElement("path", {
+      d: "M9.5 19a2.5 2.5 0 0 0 5 0",
+    }),
+  );
 /* =========================================================================
    DADOS — extraídos dos Cartões CNPJ (Receita Federal) e das Alterações
    Contratuais / Consolidações do Contrato Social (JUCEMS). Nenhuma
@@ -2346,54 +2414,211 @@ function safeFileSlug(s) {
   mergeToPdf: (docs) => mergePdfDocuments(docs),
 };
 /* =========================================================================
-   ACESSO AO PORTAL — e-mail + senha, sem perfis (ainda)
+   PERMISSÕES — 3 níveis de acesso (Administrador / Comercial / Usuário)
    ---------------------------------------------------------------------
-   Nesta etapa, o e-mail já é parte obrigatória do login — validado
-   (preenchido + formato válido) antes de liberar o acesso — mesmo que a
-   senha ainda seja única para todos os usuários de teste
-   ("grupoprima123"). Isso evita reescrever o fluxo de autenticação
-   quando um banco de usuários existir: o formato esperado por
-   `authenticate()` já é `{ email, senha }`, igual ao que uma chamada real
-   de API receberia.
-
-   Evolução prevista (não implementada agora, por pedido explícito — sem
-   perfis/níveis de acesso ainda):
-     USUÁRIO { nome, email, senha, perfil } → tabela de usuários real →
-     authenticate() passa a consultar essa tabela (ou uma API) em vez de
-     comparar com PORTAL_PASSWORD.
-
-   A verificação continua 100% síncrona (nenhuma API do navegador como
-   crypto.subtle), para eliminar qualquer ponto de falha silenciosa no
-   clique de "Entrar".
-   // API REAL AQUI: quando houver backend, trocar authenticate() por
-   // POST /api/auth/login com { email, senha } no corpo da requisição.
+   Pedido explícito da Iasmin, 2026-09-25. Fonte única de verdade: `can(user,
+   chave)`. As 17 chaves abaixo são exatamente as linhas da matriz de
+   permissões oficial que ela definiu — qualquer ponto do portal que
+   precise decidir "esse perfil pode fazer X" chama `can()`, nunca mais uma
+   comparação solta tipo `currentUser?.perfil === "admin"` (havia mais de
+   10 pontos assim, espalhados, antes desta mudança).
+   IMPORTANTE (limite real desta arquitetura, para ficar registrado): o
+   portal roda inteiramente no navegador, publicado como Artifact — não há
+   um servidor de autenticação próprio validando sessão a cada requisição
+   (o único backend, o proxy do Google Drive, usa uma chave única
+   compartilhada, não por usuário — ver comentário em index.js). `can()` é
+   aplicado de forma consistente em TODA a lógica (não só em esconder
+   botão), no mesmo nível de segurança em que o resto do portal já opera
+   hoje — não é uma barreira de servidor inquebrável, porque esse servidor
+   não existe. */ const PERMISSOES_POR_PERFIL =
+  {
+    admin: {
+      consultarDocumentos: true,
+      visualizarDocumentos: true,
+      baixarDocumentos: true,
+      editarDocumentos: true,
+      excluirDocumentos: true,
+      classificarDocumentos: true,
+      sincronizarDrive: true,
+      assistente: true,
+      envioLote: true,
+      homologacoes: true,
+      homologacoesInterno: true,
+      auditoria: true,
+      gerenciarUsuarios: true,
+      alterarPermissoes: true,
+      configAdministrativa: true,
+      alterarPropriaSenha: true,
+      alterarPropriasPreferencias: true,
+    },
+    comercial: {
+      consultarDocumentos: true,
+      visualizarDocumentos: true,
+      baixarDocumentos: true,
+      editarDocumentos: false,
+      excluirDocumentos: false,
+      classificarDocumentos: false,
+      sincronizarDrive: false,
+      assistente: true,
+      envioLote: true,
+      homologacoes: true,
+      homologacoesInterno: false,
+      auditoria: false,
+      gerenciarUsuarios: false,
+      alterarPermissoes: false,
+      configAdministrativa: false,
+      alterarPropriaSenha: true,
+      alterarPropriasPreferencias: true,
+    },
+    usuario: {
+      consultarDocumentos: true,
+      visualizarDocumentos: true,
+      baixarDocumentos: true,
+      editarDocumentos: false,
+      excluirDocumentos: false,
+      classificarDocumentos: false,
+      sincronizarDrive: false,
+      assistente: true,
+      envioLote: true,
+      homologacoes: false,
+      homologacoesInterno: false,
+      auditoria: false,
+      gerenciarUsuarios: false,
+      alterarPermissoes: false,
+      configAdministrativa: false,
+      alterarPropriaSenha: true,
+      alterarPropriasPreferencias: true,
+    },
+  };
+function can(user, chave) {
+  const permissoes = user && PERMISSOES_POR_PERFIL[user.perfil];
+  return !!(permissoes && permissoes[chave]);
+}
+/* =========================================================================
+   ACESSO AO PORTAL — e-mail + senha, usuários reais com perfil (admin /
+   comercial / usuario), armazenados na coleção "users" (mesmo padrão
+   getDb().collection(x) já usado em client_document_analysis/
+   batch_document_submissions).
+   ---------------------------------------------------------------------
+   Evolução de uma etapa anterior em que só havia 1 usuário nomeado
+   (Iasmin) e qualquer outro e-mail entrava com uma senha compartilhada.
+   Agora só entra quem tem uma conta criada (pelo Administrador, na tela
+   "Meu Perfil" → "Gerenciar usuários") — mudança de comportamento
+   deliberada, pedida junto com o sistema de permissões (item 14 do
+   pedido: criar usuário é ação exclusiva do Administrador).
+   Senha: nunca gravada em texto puro — `hashSenha()` usa
+   crypto.subtle.digest quando disponível (SHA-256), com um fallback
+   simples (não criptográfico, mas nunca texto puro) para ambientes sem
+   Web Crypto. `PORTAL_PASSWORD` continua existindo só como a senha inicial
+   padrão de todo usuário recém-criado (item 8 do pedido) — nunca mais
+   comparada diretamente, sempre em hash.
+   // API REAL AQUI: quando houver backend de autenticação de verdade,
+   // authenticate() passa a ser POST /api/auth/login com { email, senha }.
    ========================================================================= */ const PORTAL_PASSWORD =
   "grupoprima123";
-function checkPortalPassword(senha) {
-  return (senha || "") === PORTAL_PASSWORD;
+async function hashSenha(senha) {
+  const texto = String(senha || "");
+  if (
+    typeof crypto !== "undefined" &&
+    crypto &&
+    crypto.subtle &&
+    typeof crypto.subtle.digest === "function"
+  ) {
+    try {
+      const bytes = new TextEncoder().encode(texto);
+      const buf = await crypto.subtle.digest("SHA-256", bytes);
+      return (
+        "sha256:" +
+        Array.from(new Uint8Array(buf))
+          .map((b) => b.toString(16).padStart(2, "0"))
+          .join("")
+      );
+    } catch (e) {
+      // segue para o fallback abaixo — nunca deixa a senha sem hash
+    }
+  }
+  // Fallback não-criptográfico (ambientes sem Web Crypto, ex.: contexto não
+  // seguro) — ainda assim nunca grava a senha em texto puro.
+  let h1 = 0xdeadbeef ^ texto.length;
+  let h2 = 0x41c6ce57 ^ texto.length;
+  for (let i = 0; i < texto.length; i++) {
+    const ch = texto.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
+  }
+  h1 =
+    Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^
+    Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 =
+    Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^
+    Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return (
+    "fnv:" +
+    (h1 >>> 0).toString(16).padStart(8, "0") +
+    (h2 >>> 0).toString(16).padStart(8, "0")
+  );
 }
-/* Base local de usuários nomeados — primeiro passo para perfis/níveis de
-   acesso. Enquanto não houver backend de autenticação, e-mails fora desta
-   lista continuam caindo na senha compartilhada (compatibilidade com o
-   fluxo de testes anterior), mas entram com perfil "usuario" (sem acesso
-   à Auditoria). // API REAL AQUI: substituir por tabela de usuários real. */ const PORTAL_USERS =
-  [
-    {
-      email: "iasmin.oliveira@grupoprimalog.com.br",
-      senha: "grupoprima123",
-      nome: "Iasmin Oliveira",
-      perfil: "admin",
-    },
-  ];
-function findPortalUser(email) {
+function slugUserId(email) {
+  return (
+    (email || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "_") || "usuario"
+  );
+}
+const DEFAULT_PREFERENCIAS_USUARIO = { tema: "claro", notificacoes: true };
+/* Garante que exista pelo menos 1 usuário (Iasmin, admin) na coleção
+   "users" — mesmo padrão de semente já usado em conference_queue. Só roda
+   1x (a própria checagem de coleção vazia evita recriar em toda consulta). */ async function ensureSeedUsers(
+  db,
+) {
+  try {
+    const snap = await db.collection("users").get();
+    if (snap && snap.docs && snap.docs.length > 0) return;
+  } catch (e) {
+    return;
+  }
+  const senhaHash = await hashSenha(PORTAL_PASSWORD);
+  const admin = {
+    id: slugUserId("iasmin.oliveira@grupoprimalog.com.br"),
+    nome: "Iasmin Oliveira",
+    email: "iasmin.oliveira@grupoprimalog.com.br",
+    perfil: "admin",
+    senhaHash,
+    precisaTrocarSenha: true,
+    status: "ativo",
+    criadoEm: new Date().toISOString(),
+    criadoPor: "sistema",
+    ultimoAcesso: null,
+    preferencias: DEFAULT_PREFERENCIAS_USUARIO,
+  };
+  await db
+    .collection("users")
+    .doc(admin.id)
+    .set(admin)
+    .catch(() => {});
+}
+async function findPortalUserAsync(email) {
   const e = (email || "").trim().toLowerCase();
-  return PORTAL_USERS.find((u) => u.email.toLowerCase() === e) || null;
+  if (!e) return null;
+  const db = await getDb().catch(() => null);
+  if (!db) return null;
+  await ensureSeedUsers(db).catch(() => {});
+  try {
+    const snap = await db.collection("users").get();
+    const docs = (snap && snap.docs) || [];
+    const found = docs.find((d) => {
+      const u = d.data();
+      return u && (u.email || "").trim().toLowerCase() === e;
+    });
+    return found ? found.data() : null;
+  } catch (err) {
+    return null;
+  }
 }
-/** authenticate: valida e-mail (presença + formato) e senha juntos.
- *  Retorna { ok: true, user } ou { ok: false, message }. Único ponto de
- *  entrada do login — quando a autenticação por usuário real existir, só
- *  esta função muda. `user.perfil` já modela um nível de acesso básico
- *  (admin/usuario) para a UI reagir a ele. */ function authenticate({
+/** authenticate: valida e-mail (presença + formato) e senha juntos contra a
+ *  coleção "users". Retorna { ok: true, user } ou { ok: false, message }.
+ *  Único ponto de entrada do login. `user.perfil` já modela o nível de
+ *  acesso (admin/comercial/usuario) para o resto do portal reagir a ele
+ *  via `can()`. Assíncrona (consulta a coleção + hash da senha), diferente
+ *  da etapa anterior — quem chama precisa de `await`. */ async function authenticate({
   email,
   senha,
 }) {
@@ -2403,29 +2628,136 @@ function findPortalUser(email) {
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail))
     return { ok: false, message: "Informe um e-mail em formato válido." };
   if (!senha) return { ok: false, message: "Informe sua senha." };
-  const knownUser = findPortalUser(trimmedEmail);
-  if (knownUser) {
-    if (senha !== knownUser.senha)
-      return { ok: false, message: "Senha incorreta. Tente novamente." };
+  const knownUser = await findPortalUserAsync(trimmedEmail);
+  if (!knownUser)
     return {
-      ok: true,
-      user: {
-        nome: knownUser.nome,
-        email: knownUser.email,
-        perfil: knownUser.perfil,
-      },
+      ok: false,
+      message: "E-mail não encontrado. Fale com o administrador do portal.",
     };
-  }
-  if (!checkPortalPassword(senha))
+  if (knownUser.status === "inativo")
+    return {
+      ok: false,
+      message: "Este acesso está desativado. Fale com o administrador do portal.",
+    };
+  const senhaHash = await hashSenha(senha);
+  if (senhaHash !== knownUser.senhaHash)
     return { ok: false, message: "Senha incorreta. Tente novamente." };
   return {
     ok: true,
     user: {
-      nome: trimmedEmail.split("@")[0],
-      email: trimmedEmail,
-      perfil: "usuario",
+      id: knownUser.id,
+      nome: knownUser.nome,
+      email: knownUser.email,
+      perfil: knownUser.perfil,
+      precisaTrocarSenha: !!knownUser.precisaTrocarSenha,
+      preferencias: knownUser.preferencias || DEFAULT_PREFERENCIAS_USUARIO,
     },
   };
+}
+/* =========================================================================
+   CRUD da coleção "users" — usado pelo login, por "Meu Perfil" (a própria
+   usuária alterando senha/preferências) e por "Gerenciar usuários"
+   (Administrador criando/editando outras contas). Um único conjunto de
+   funções para tudo isso, seguindo o pedido explícito de não duplicar
+   lógica (item 19.6 do pedido: "implemente o sistema de permissões de
+   forma centralizada").
+   ========================================================================= */ async function listUsersDb() {
+  const db = await getDb().catch(() => null);
+  if (!db) return [];
+  await ensureSeedUsers(db).catch(() => {});
+  try {
+    const snap = await db.collection("users").get();
+    return ((snap && snap.docs) || []).map((d) => d.data());
+  } catch (e) {
+    return [];
+  }
+}
+/** updateUserDoc: aplica um patch parcial num usuário existente. Nenhuma
+ *  das duas implementações de "db" deste portal (a capability nativa do
+ *  Artifact nem createRestDb(), o backend próprio) expõe um `.update()`
+ *  parcial de verdade — as duas só têm `.doc(id).set(objetoInteiro)`,
+ *  mesmo padrão já usado em todas as outras coleções do portal
+ *  (client_document_analysis, homologacoes etc.) — então aqui é sempre
+ *  ler o doc inteiro, mesclar o patch e regravar. Nunca lança — retorna
+ *  true/false. */ async function updateUserDoc(
+  userId,
+  patch,
+) {
+  try {
+    const db = await getDb();
+    if (!db || !userId) return false;
+    const snap = await db.collection("users").get().catch(() => null);
+    const found = snap && snap.docs.find((d) => d.id === userId);
+    if (!found) return false;
+    await db
+      .collection("users")
+      .doc(userId)
+      .set({ ...found.data(), ...patch });
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+/** salvarUsuarioDb: cria ou substitui um usuário inteiro (usado só pelo
+ *  Administrador, na criação de novos usuários — edição de campos usa
+ *  updateUserDoc). */ async function salvarUsuarioDb(userObj) {
+  try {
+    const db = await getDb();
+    if (!db) return false;
+    await db.collection("users").doc(userObj.id).set(userObj);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+async function excluirUsuarioDb(userId) {
+  try {
+    const db = await getDb();
+    if (!db || !userId) return false;
+    await db.collection("users").doc(userId).delete();
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+/** registrarAcessoUsuario: best-effort, atualiza ultimoAcesso depois de um
+ *  login bem-sucedido — nunca bloqueia/derruba o login se falhar. */ async function registrarAcessoUsuario(
+  userId,
+) {
+  await updateUserDoc(userId, { ultimoAcesso: new Date().toISOString() });
+}
+/* Requisito mínimo de segurança da nova senha (item 9 do pedido: "atender
+   ao requisito mínimo de segurança definido pelo sistema") — definido aqui
+   como regra única, usada tanto no primeiro acesso quanto na troca de
+   senha normal e na criação de usuário pelo Administrador. */ const REQUISITO_SENHA_MSG =
+  "A nova senha deve ter pelo menos 6 caracteres, incluindo ao menos 1 letra e 1 número.";
+function senhaAtendeRequisitoMinimo(senha) {
+  const s = String(senha || "");
+  return s.length >= 6 && /[a-zA-Z]/.test(s) && /[0-9]/.test(s);
+}
+/** trocarSenhaUsuario: valida e grava a nova senha (em hash) + limpa
+ *  precisaTrocarSenha. Retorna { ok, message? }. Não confere a senha atual
+ *  aqui (quem chama — o modal "Alterar senha" — já validou antes contra o
+ *  hash do usuário logado; o primeiro acesso não pede senha atual, pois a
+ *  usuária acabou de digitá-la pra entrar). */ async function trocarSenhaUsuario(
+  userId,
+  novaSenha,
+) {
+  if (!novaSenha)
+    return { ok: false, message: "Informe a nova senha." };
+  if (!senhaAtendeRequisitoMinimo(novaSenha))
+    return { ok: false, message: REQUISITO_SENHA_MSG };
+  const senhaHash = await hashSenha(novaSenha);
+  const ok = await updateUserDoc(userId, {
+    senhaHash,
+    precisaTrocarSenha: false,
+  });
+  if (!ok)
+    return {
+      ok: false,
+      message: "Não foi possível alterar a senha. Verifique os dados informados.",
+    };
+  return { ok: true };
 }
 /* Sessão persistida no navegador (pedido explícito da Iasmin, 2026-09-18):
    antes, um simples F5 derrubava o login (o estado `authenticated` vivia só
@@ -2458,17 +2790,22 @@ function savePortalSession(user) {
     // localStorage indisponível — segue sem persistir, sem quebrar o login/logout
   }
 }
-/* Modo noturno (pedido explícito da Iasmin, 2026-09-24): botão manual na
-   barra lateral, que a pessoa controla — nunca acompanha automaticamente o
-   sistema/navegador. A escolha é guardada no navegador (mesmo padrão de
-   PORTAL_SESSION_STORAGE_KEY acima) e persiste entre recarregamentos;
-   leitura/escrita falhando nunca quebra o portal, só não lembra a
-   preferência entre sessões. */ const PORTAL_THEME_STORAGE_KEY =
+/* Modo noturno (pedido explícito da Iasmin, 2026-09-24; ampliado em
+   2026-09-25 com a opção "Automático" em Meu Perfil → Preferências): botão
+   manual na barra lateral continua controlando o tema diretamente — nunca
+   acompanhava automaticamente o sistema/navegador, e isso não muda pra
+   quem nunca mexeu na preferência (o padrão salvo continua sendo o tema
+   atual, "light", exatamente como antes). "Automático" é uma opção NOVA
+   que a usuária escolhe explicitamente em Meu Perfil; só a partir daí o
+   portal passa a seguir `prefers-color-scheme` do sistema. A escolha é
+   guardada no navegador (mesmo padrão de PORTAL_SESSION_STORAGE_KEY
+   acima) e persiste entre recarregamentos; leitura/escrita falhando nunca
+   quebra o portal, só não lembra a preferência entre sessões. */ const PORTAL_THEME_STORAGE_KEY =
   "grupoprima_portal_tema";
 function loadPortalTheme() {
   try {
     const raw = localStorage.getItem(PORTAL_THEME_STORAGE_KEY);
-    return raw === "dark" ? "dark" : "light";
+    return raw === "dark" || raw === "auto" ? raw : "light";
   } catch (e) {
     return "light";
   }
@@ -2529,6 +2866,17 @@ const AUDIT_ACTION_LABELS = {
   baixou_zip_lote: "Baixou ZIP da solicitação em lote",
   concluiu_lote: "Concluiu solicitação de envio em lote",
   atualizou_solicitacao_lote: "Atualizou solicitação de envio em lote",
+  // Novas ações — "Meu Perfil" e sistema de permissões (pedido da Iasmin,
+  // 2026-09-25).
+  trocou_senha: "Alterou a própria senha",
+  atualizou_preferencias: "Atualizou preferências",
+  criou_usuario: "Criou usuário",
+  editou_usuario: "Editou usuário",
+  alterou_perfil_usuario: "Alterou perfil de usuário",
+  ativou_usuario: "Ativou usuário",
+  desativou_usuario: "Desativou usuário",
+  redefiniu_senha_usuario: "Redefiniu senha de usuário",
+  excluiu_usuario: "Excluiu usuário",
 };
 /** RESTDB_POLL_INTERVAL_MS: fora do Artifact não existe um canal de tempo
  *  real (onSnapshot de verdade) sem adicionar uma dependência nova
@@ -12002,7 +12350,12 @@ function avisoFonteExterna(descricao) {
   const [basesEdit, setBasesEdit] = useState(h.bases || []);
   const [confirmandoExclusao, setConfirmandoExclusao] = useState(false);
   const [excluindo, setExcluindo] = useState(false);
-  const isAdmin = currentUser?.perfil === "admin";
+  // homologacoesInterno: mudar status, excluir a solicitação e revelar as
+  // credenciais da plataforma do cliente são a "área interna/restrita"
+  // que o Comercial não deve acessar (item 4 do pedido de permissões) —
+  // sempre foi exclusivo do Administrador, mesmo antes de existir o
+  // perfil Comercial.
+  const isAdmin = can(currentUser, "homologacoesInterno");
   const { atrasada, diasRestantes } = computePrazoInfo(
     h.prazoRetorno,
     h.status,
@@ -20777,42 +21130,8 @@ function AuditLogView({ companies }) {
 }
 /* =========================================================================
    TELA DE LOGIN
-   ========================================================================= */ function LoginScreen({
-  onLogin,
-}) {
-  const [email, setEmail] = useState("");
-  const [senha, setSenha] = useState("");
-  const [showSenha, setShowSenha] = useState(false);
-  const [error, setError] = useState("");
-  const [status, setStatus] = useState("idle"); // idle | success
-  function handleSubmit() {
-    setError("");
-    const result = authenticate({ email, senha });
-    if (!result.ok) {
-      setError(result.message);
-      return;
-    }
-    setStatus("success");
-    setAuditSessionUser(result.user?.nome || result.user?.email || null);
-    logDocumentAction("login", { email: email.trim() }); // pequena transição antes de revelar o portal, conforme pedido
-    setTimeout(() => onLogin(result.user), 260);
-  }
-  function handleFieldKeyDown(e) {
-    if (e.key === "Enter") {
-      e.preventDefault();
-      handleSubmit();
-    }
-  }
-  return /*#__PURE__*/ React.createElement(
-    "div",
-    {
-      className:
-        "login-screen" + (status === "success" ? " login-screen-leaving" : ""),
-    },
-    /*#__PURE__*/ React.createElement(
-      "style",
-      null,
-      `
+   ========================================================================= */ const LOGIN_SCREEN_CSS =
+  `
         .login-screen {
           --azul: #003753; --azul-2: #0A4A6B; --verde: #6BFE9C; --cinza-frio: #E2E2E5; --carvao: #5C5F61; --branco-frio: #F3F3F6;
           color-scheme: light;
@@ -20863,6 +21182,11 @@ function AuditLogView({ companies }) {
         .login-password-toggle:hover, .login-password-toggle:focus-visible { color: var(--texto); background: rgba(0,55,83,0.06); }
         .login-field input[type="password"], .login-field input[data-pwvisible="true"] { padding-right: 40px; }
         .login-error { display: flex; align-items: center; gap: 7px; background: rgba(214,69,69,0.1); color: #a13333; font-size: 12px; font-weight: 600; padding: 10px 12px; border-radius: 8px; margin-bottom: 16px; }
+        .login-hint { display: flex; align-items: flex-start; gap: 7px; background: rgba(0,55,83,0.06); color: var(--azul); font-size: 12px; font-weight: 600; padding: 10px 12px; border-radius: 8px; margin-bottom: 16px; line-height: 1.4; }
+        .login-success-note { display: flex; align-items: center; gap: 7px; background: rgba(107,254,156,0.14); color: #1c7a45; font-size: 12px; font-weight: 600; padding: 10px 12px; border-radius: 8px; margin-bottom: 16px; }
+        .portal-root[data-theme="dark"] .login-error { background: rgba(214,69,69,0.24); color: #FF9B9B; }
+        .portal-root[data-theme="dark"] .login-hint { background: rgba(111,187,227,0.20); color: #6FBBE3; }
+        .portal-root[data-theme="dark"] .login-success-note { background: rgba(107,254,156,0.22); color: #7FE6A0; }
         .login-submit {
           width: 100%; background: var(--azul); color: #ffffff; border: none; padding: 14px; border-radius: 9px;
           font-family: 'Archivo', sans-serif; font-weight: 900; font-size: 13px; letter-spacing: 0.08em; text-transform: uppercase;
@@ -20871,9 +21195,52 @@ function AuditLogView({ companies }) {
         .login-submit:hover { filter: brightness(1.15); }
         .login-submit:active { transform: scale(0.99); }
         .login-submit:disabled { opacity: 0.75; cursor: default; }
+        .login-submit-secondary { background: none; color: var(--carvao); box-shadow: none; text-transform: none; font-family: inherit; font-weight: 700; letter-spacing: 0; margin-top: 10px; }
+        .login-submit-secondary:hover { filter: none; color: var(--texto); }
         .login-footer { margin-top: 24px; padding-top: 18px; border-top: 1px solid var(--cinza-frio); font-size: 10.5px; color: var(--carvao); text-align: center; letter-spacing: 0.02em; }
-      `,
-    ),
+      `;
+function LoginScreen({
+  onLogin,
+}) {
+  const [email, setEmail] = useState("");
+  const [senha, setSenha] = useState("");
+  const [showSenha, setShowSenha] = useState(false);
+  const [error, setError] = useState("");
+  const [status, setStatus] = useState("idle"); // idle | loading | success
+  // authenticate() agora é assíncrona (consulta a coleção "users" + calcula
+  // o hash da senha) — "loading" cobre esse intervalo sem travar a UI.
+  async function handleSubmit() {
+    if (status === "loading" || status === "success") return;
+    setError("");
+    setStatus("loading");
+    const result = await authenticate({ email, senha }).catch(() => ({
+      ok: false,
+      message: "Não foi possível verificar seu acesso agora. Tente novamente.",
+    }));
+    if (!result.ok) {
+      setStatus("idle");
+      setError(result.message);
+      return;
+    }
+    setStatus("success");
+    setAuditSessionUser(result.user?.nome || result.user?.email || null);
+    logDocumentAction("login", { email: email.trim() }); // pequena transição antes de revelar o portal, conforme pedido
+    registrarAcessoUsuario(result.user?.id);
+    setTimeout(() => onLogin(result.user), 260);
+  }
+  function handleFieldKeyDown(e) {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      handleSubmit();
+    }
+  }
+  return /*#__PURE__*/ React.createElement(
+    "div",
+    {
+      className:
+        "login-screen" + (status === "success" ? " login-screen-leaving" : ""),
+    },
+    /*#__PURE__*/ React.createElement("style", null, LOGIN_SCREEN_CSS),
     /*#__PURE__*/ React.createElement("link", {
       rel: "preconnect",
       href: "https://fonts.googleapis.com",
@@ -20977,9 +21344,9 @@ function AuditLogView({ companies }) {
             className: "login-submit",
             type: "button",
             onClick: handleSubmit,
-            disabled: status === "success",
+            disabled: status !== "idle",
           },
-          status === "success" ? "Entrando..." : "Entrar",
+          status !== "idle" ? "Entrando..." : "Entrar",
         ),
       ),
       /*#__PURE__*/ React.createElement(
@@ -20988,6 +21355,1425 @@ function AuditLogView({ companies }) {
         "Grupoprima Logística · Ambiente corporativo",
       ),
     ),
+  );
+}
+/* =========================================================================
+   PRIMEIRO ACESSO — troca de senha obrigatória (item 10 do pedido da
+   Iasmin, 2026-09-25). Toda conta nova entra com a senha inicial padrão
+   ("grupoprima123", ver `PORTAL_PASSWORD`) e `precisaTrocarSenha: true`.
+   Enquanto esse campo for true, GrupoprimaPortal mostra esta tela no lugar
+   do portal (mesmo esquema visual do login, reaproveitando LOGIN_SCREEN_CSS)
+   — tornando a troca obrigatória antes de continuar, como pedido
+   explicitamente ("se tecnicamente possível... tornar obrigatório").
+   Não pede "senha atual": a usuária acabou de digitá-la pra entrar. */ function PrimeiroAcessoScreen(
+  { user, onSenhaTrocada },
+) {
+  const [novaSenha, setNovaSenha] = useState("");
+  const [confirmarSenha, setConfirmarSenha] = useState("");
+  const [showSenha, setShowSenha] = useState(false);
+  const [error, setError] = useState("");
+  const [status, setStatus] = useState("idle"); // idle | loading | success
+  async function handleSubmit() {
+    if (status !== "idle") return;
+    setError("");
+    if (!novaSenha) {
+      setError("Informe a nova senha.");
+      return;
+    }
+    if (confirmarSenha !== novaSenha) {
+      setError("A confirmação deve ser exatamente igual à nova senha.");
+      return;
+    }
+    setStatus("loading");
+    const result = await trocarSenhaUsuario(user?.id, novaSenha).catch(() => ({
+      ok: false,
+      message: "Não foi possível alterar a senha. Verifique os dados informados.",
+    }));
+    if (!result.ok) {
+      setStatus("idle");
+      setError(result.message);
+      return;
+    }
+    logDocumentAction("trocou_senha", { contexto: "primeiro_acesso" });
+    setStatus("success");
+    setTimeout(() => onSenhaTrocada(), 500);
+  }
+  function handleKeyDown(e) {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      handleSubmit();
+    }
+  }
+  return /*#__PURE__*/ React.createElement(
+    "div",
+    {
+      className:
+        "login-screen" + (status === "success" ? " login-screen-leaving" : ""),
+    },
+    /*#__PURE__*/ React.createElement("style", null, LOGIN_SCREEN_CSS),
+    /*#__PURE__*/ React.createElement(
+      "div",
+      { className: "login-card" },
+      /*#__PURE__*/ React.createElement(
+        "div",
+        { className: "login-logo-wrap" },
+        /*#__PURE__*/ React.createElement("img", {
+          className: "login-logo",
+          src: GRUPOPRIMA_LOGO,
+          alt: "Grupoprima",
+        }),
+      ),
+      /*#__PURE__*/ React.createElement(
+        "h1",
+        { className: "login-title" },
+        "Atualize sua senha",
+      ),
+      /*#__PURE__*/ React.createElement(
+        "p",
+        { className: "login-sub" },
+        "Por segurança, recomendamos alterar sua senha inicial antes de continuar.",
+      ),
+      status === "success"
+        ? /*#__PURE__*/ React.createElement(
+            "div",
+            { className: "login-success-note" },
+            /*#__PURE__*/ React.createElement(CheckCircle2, { size: 14 }),
+            " Senha alterada com sucesso.",
+          )
+        : null,
+      error &&
+        /*#__PURE__*/ React.createElement(
+          "div",
+          { className: "login-error" },
+          /*#__PURE__*/ React.createElement(AlertOctagon, { size: 14 }),
+          " ",
+          error,
+        ),
+      !error &&
+        status !== "success" &&
+        /*#__PURE__*/ React.createElement(
+          "div",
+          { className: "login-hint" },
+          /*#__PURE__*/ React.createElement(Lock, { size: 14 }),
+          " ",
+          REQUISITO_SENHA_MSG,
+        ),
+      /*#__PURE__*/ React.createElement(
+        "div",
+        null,
+        /*#__PURE__*/ React.createElement(
+          "div",
+          { className: "login-field" },
+          /*#__PURE__*/ React.createElement("label", null, "Nova senha"),
+          /*#__PURE__*/ React.createElement(
+            "div",
+            { className: "login-field-input-wrap" },
+            /*#__PURE__*/ React.createElement(Lock, { size: 15 }),
+            /*#__PURE__*/ React.createElement("input", {
+              type: showSenha ? "text" : "password",
+              "data-pwvisible": showSenha ? "true" : "false",
+              autoComplete: "new-password",
+              autoFocus: true,
+              value: novaSenha,
+              onChange: (e) => setNovaSenha(e.target.value),
+              onKeyDown: handleKeyDown,
+              placeholder: "Digite a nova senha",
+            }),
+            /*#__PURE__*/ React.createElement(
+              "button",
+              {
+                type: "button",
+                className: "login-password-toggle",
+                onClick: () => setShowSenha((v) => !v),
+                "aria-label": showSenha ? "Ocultar senha" : "Mostrar senha",
+                "aria-pressed": showSenha,
+              },
+              showSenha
+                ? /*#__PURE__*/ React.createElement(EyeOff, { size: 15 })
+                : /*#__PURE__*/ React.createElement(Eye, { size: 15 }),
+            ),
+          ),
+        ),
+        /*#__PURE__*/ React.createElement(
+          "div",
+          { className: "login-field" },
+          /*#__PURE__*/ React.createElement(
+            "label",
+            null,
+            "Confirmar nova senha",
+          ),
+          /*#__PURE__*/ React.createElement(
+            "div",
+            { className: "login-field-input-wrap" },
+            /*#__PURE__*/ React.createElement(Lock, { size: 15 }),
+            /*#__PURE__*/ React.createElement("input", {
+              type: showSenha ? "text" : "password",
+              "data-pwvisible": showSenha ? "true" : "false",
+              autoComplete: "new-password",
+              value: confirmarSenha,
+              onChange: (e) => setConfirmarSenha(e.target.value),
+              onKeyDown: handleKeyDown,
+              placeholder: "Repita a nova senha",
+            }),
+          ),
+        ),
+        /*#__PURE__*/ React.createElement(
+          "button",
+          {
+            className: "login-submit",
+            type: "button",
+            onClick: handleSubmit,
+            disabled: status !== "idle",
+          },
+          status !== "idle" ? "Salvando..." : "Definir nova senha",
+        ),
+      ),
+      /*#__PURE__*/ React.createElement(
+        "div",
+        { className: "login-footer" },
+        "Grupoprima Logística · Ambiente corporativo",
+      ),
+    ),
+  );
+}
+/** PasswordFieldWithToggle: campo de senha com ícone de mostrar/ocultar —
+ *  pedido explícito no modal "Alterar senha" (item 9) pros 3 campos. Função
+ *  auxiliar (não componente próprio) pra evitar remount a cada tecla. */ function renderCampoSenha(
+  { label, value, onChange, show, onToggleShow, placeholder, autoFocus, autoComplete },
+) {
+  return /*#__PURE__*/ React.createElement(
+    "div",
+    { className: "login-field" },
+    /*#__PURE__*/ React.createElement("label", null, label),
+    /*#__PURE__*/ React.createElement(
+      "div",
+      { className: "login-field-input-wrap", style: { width: "100%" } },
+      /*#__PURE__*/ React.createElement("input", {
+        type: show ? "text" : "password",
+        "data-pwvisible": show ? "true" : "false",
+        value: value,
+        onChange: (e) => onChange(e.target.value),
+        placeholder: placeholder,
+        autoFocus: !!autoFocus,
+        autoComplete: autoComplete || "off",
+        style: { paddingLeft: 14 },
+      }),
+      /*#__PURE__*/ React.createElement(
+        "button",
+        {
+          type: "button",
+          className: "login-password-toggle",
+          onClick: onToggleShow,
+          "aria-label": show ? "Ocultar senha" : "Mostrar senha",
+          "aria-pressed": show,
+        },
+        show
+          ? /*#__PURE__*/ React.createElement(EyeOff, { size: 15 })
+          : /*#__PURE__*/ React.createElement(Eye, { size: 15 }),
+      ),
+    ),
+  );
+}
+/* =========================================================================
+   MODAL "ALTERAR SENHA" — item 9 do pedido da Iasmin (2026-09-25). Usado
+   tanto em Meu Perfil → Dados de acesso (qualquer um dos 3 perfis, todos
+   podem alterar a própria senha) quanto, indiretamente, pelo Administrador
+   ao redefinir a senha de outra pessoa em "Gerenciar usuários" (nesse caso
+   a senha simplesmente volta pra inicial — ver ResetPasswordUsuario em
+   UsersManagementView, um fluxo mais simples que não passa por aqui).
+   ========================================================================= */ function ChangePasswordModal(
+  { user, onClose, onNotify, onChanged, contexto = "voluntaria" },
+) {
+  const [senhaAtual, setSenhaAtual] = useState("");
+  const [novaSenha, setNovaSenha] = useState("");
+  const [confirmarSenha, setConfirmarSenha] = useState("");
+  const [showAtual, setShowAtual] = useState(false);
+  const [showNova, setShowNova] = useState(false);
+  const [showConfirmar, setShowConfirmar] = useState(false);
+  const [erro, setErro] = useState("");
+  const [status, setStatus] = useState("idle"); // idle | loading | success
+  async function handleSubmit(e) {
+    if (e) e.preventDefault();
+    if (status !== "idle") return;
+    setErro("");
+    if (!senhaAtual) {
+      setErro("Informe sua senha atual.");
+      return;
+    }
+    if (!novaSenha) {
+      setErro("Informe a nova senha.");
+      return;
+    }
+    if (confirmarSenha !== novaSenha) {
+      setErro("A confirmação deve ser exatamente igual à nova senha.");
+      return;
+    }
+    if (novaSenha === senhaAtual) {
+      setErro("A nova senha não pode ser igual à senha atual.");
+      return;
+    }
+    if (!senhaAtendeRequisitoMinimo(novaSenha)) {
+      setErro(REQUISITO_SENHA_MSG);
+      return;
+    }
+    setStatus("loading");
+    const usuarios = await listUsersDb();
+    const registro = usuarios.find((u) => u.id === user?.id);
+    const hashAtual = await hashSenha(senhaAtual);
+    if (!registro || hashAtual !== registro.senhaHash) {
+      setStatus("idle");
+      setErro(
+        "Não foi possível alterar a senha. Verifique os dados informados.",
+      );
+      return;
+    }
+    const result = await trocarSenhaUsuario(user.id, novaSenha);
+    if (!result.ok) {
+      setStatus("idle");
+      setErro(result.message);
+      return;
+    }
+    logDocumentAction("trocou_senha", { contexto });
+    setStatus("success");
+    onNotify && onNotify("Senha alterada com sucesso.", "info");
+    setTimeout(() => onChanged && onChanged(), 700);
+  }
+  return /*#__PURE__*/ React.createElement(
+    "div",
+    { className: "docs-modal-overlay", onClick: onClose },
+    /*#__PURE__*/ React.createElement("style", null, LOGIN_SCREEN_CSS),
+    /*#__PURE__*/ React.createElement(
+      "div",
+      {
+        className: "docs-modal homolog-form-modal",
+        onClick: (e) => e.stopPropagation(),
+      },
+      /*#__PURE__*/ React.createElement(
+        "div",
+        { className: "docs-modal-head" },
+        /*#__PURE__*/ React.createElement(
+          "div",
+          null,
+          /*#__PURE__*/ React.createElement(
+            "div",
+            { className: "docs-modal-title" },
+            /*#__PURE__*/ React.createElement(Lock, { size: 16 }),
+            " Alterar senha",
+          ),
+          /*#__PURE__*/ React.createElement(
+            "div",
+            { className: "docs-modal-sub" },
+            user?.nome,
+          ),
+        ),
+        /*#__PURE__*/ React.createElement(
+          "button",
+          { className: "icon-btn-dark", onClick: onClose, "aria-label": "Fechar" },
+          /*#__PURE__*/ React.createElement(X, { size: 18 }),
+        ),
+      ),
+      /*#__PURE__*/ React.createElement(
+        "form",
+        { className: "docs-modal-body", onSubmit: handleSubmit },
+        status === "success" &&
+          /*#__PURE__*/ React.createElement(
+            "div",
+            { className: "login-success-note" },
+            /*#__PURE__*/ React.createElement(CheckCircle2, { size: 14 }),
+            " Senha alterada com sucesso.",
+          ),
+        erro &&
+          /*#__PURE__*/ React.createElement(
+            "div",
+            { className: "login-error" },
+            /*#__PURE__*/ React.createElement(AlertTriangle, { size: 14 }),
+            " ",
+            erro,
+          ),
+        renderCampoSenha({
+          label: "Senha atual",
+          value: senhaAtual,
+          onChange: setSenhaAtual,
+          show: showAtual,
+          onToggleShow: () => setShowAtual((v) => !v),
+          placeholder: "Digite sua senha atual",
+          autoFocus: true,
+          autoComplete: "current-password",
+        }),
+        renderCampoSenha({
+          label: "Nova senha",
+          value: novaSenha,
+          onChange: setNovaSenha,
+          show: showNova,
+          onToggleShow: () => setShowNova((v) => !v),
+          placeholder: "Digite a nova senha",
+          autoComplete: "new-password",
+        }),
+        renderCampoSenha({
+          label: "Confirmar nova senha",
+          value: confirmarSenha,
+          onChange: setConfirmarSenha,
+          show: showConfirmar,
+          onToggleShow: () => setShowConfirmar((v) => !v),
+          placeholder: "Repita a nova senha",
+          autoComplete: "new-password",
+        }),
+        /*#__PURE__*/ React.createElement(
+          "div",
+          { className: "login-hint" },
+          /*#__PURE__*/ React.createElement(Lock, { size: 14 }),
+          " ",
+          REQUISITO_SENHA_MSG,
+        ),
+        /*#__PURE__*/ React.createElement(
+          "div",
+          { className: "homolog-form-actions" },
+          /*#__PURE__*/ React.createElement(
+            "button",
+            {
+              type: "button",
+              className: "filters-clear-btn",
+              onClick: onClose,
+              style: { flex: "none" },
+            },
+            "Cancelar",
+          ),
+          /*#__PURE__*/ React.createElement(
+            "button",
+            {
+              type: "submit",
+              className: "doc-download-btn",
+              disabled: status !== "idle",
+            },
+            status === "loading" ? "Salvando..." : "Alterar senha",
+          ),
+        ),
+      ),
+    ),
+  );
+}
+/* =========================================================================
+   "MEU PERFIL" — pedido explícito da Iasmin, 2026-09-25. Segue a mesma
+   composição de header+section-block das demais telas (nunca um estilo
+   visual novo) — ver docs de arquitetura no início do arquivo. */ const PERFIL_LABELS =
+  {
+    admin: "Administrador",
+    comercial: "Comercial",
+    usuario: "Usuário",
+  };
+function iniciaisNome(nome) {
+  const partes = (nome || "").trim().split(/\s+/).filter(Boolean);
+  if (partes.length === 0) return "?";
+  if (partes.length === 1) return partes[0].slice(0, 2).toUpperCase();
+  return (partes[0][0] + partes[partes.length - 1][0]).toUpperCase();
+}
+/** descreverSessaoAtual: leitura best-effort do navigator.userAgent — não
+ *  há (nem poderia haver, sem um backend de sessões real) uma lista de
+ *  dispositivos/sessões de verdade; é só a sessão local atual, como pedido
+ *  no item 13 ("Dispositivo", "Navegador"). */ function descreverSessaoAtual() {
+  const ua = (typeof navigator !== "undefined" && navigator.userAgent) || "";
+  let navegador = "Navegador";
+  if (/Edg\//.test(ua)) navegador = "Microsoft Edge";
+  else if (/Chrome\//.test(ua) && !/Chromium/.test(ua)) navegador = "Google Chrome";
+  else if (/Firefox\//.test(ua)) navegador = "Mozilla Firefox";
+  else if (/Safari\//.test(ua) && !/Chrome/.test(ua)) navegador = "Safari";
+  let dispositivo = "Computador";
+  if (/iPhone|iPad|iPod/.test(ua)) dispositivo = "iPhone/iPad";
+  else if (/Android/.test(ua)) dispositivo = /Mobile/.test(ua) ? "Celular Android" : "Tablet Android";
+  else if (/Macintosh/.test(ua)) dispositivo = "Mac";
+  else if (/Windows/.test(ua)) dispositivo = "Windows";
+  else if (/Linux/.test(ua)) dispositivo = "Linux";
+  return { navegador, dispositivo };
+}
+/* Ações de auditoria relevantes pro card "Atividade recente" — item 12 do
+   pedido explicitamente lista os exemplos abaixo ("apenas informações
+   relevantes de segurança e acesso"). Não é a Auditoria completa (essa
+   continua exclusiva do Administrador) — é só o subconjunto relacionado a
+   login/senha/preferências/documentos, filtrado pro PRÓPRIO usuário. */ const ATIVIDADE_PERFIL_ACOES =
+  new Set([
+    "login",
+    "logout",
+    "trocou_senha",
+    "atualizou_preferencias",
+    "visualizou_documento",
+    "baixou_documento",
+  ]);
+function ProfileView({
+  currentUser,
+  themePreference,
+  onSetThemeChoice,
+  onNotify,
+  onUpdateCurrentUser,
+  onLogout,
+  onOpenUsersManagement,
+}) {
+  const [registro, setRegistro] = useState(null);
+  const [changePasswordOpen, setChangePasswordOpen] = useState(false);
+  const [notificacoes, setNotificacoes] = useState(
+    currentUser?.preferencias?.notificacoes !== false,
+  );
+  const [atividade, setAtividade] = useState([]);
+  const [mostrarTudoAtividade, setMostrarTudoAtividade] = useState(false);
+  async function carregarRegistro() {
+    const usuarios = await listUsersDb();
+    setRegistro(usuarios.find((u) => u.id === currentUser?.id) || null);
+  }
+  useEffect(() => {
+    carregarRegistro();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentUser?.id]);
+  useEffect(() => {
+    let unsub = null;
+    let cancelled = false;
+    getDb().then((db) => {
+      if (cancelled || !db) return;
+      unsub = db.collection("audit_log").onSnapshot(
+        (snap) => {
+          if (cancelled) return;
+          const meu = ((snap && snap.docs) || [])
+            .map((d) => d.data())
+            .filter(
+              (e) =>
+                e &&
+                e.usuario === currentUser?.nome &&
+                ATIVIDADE_PERFIL_ACOES.has(e.action),
+            )
+            .sort((a, b) => new Date(b.at) - new Date(a.at));
+          setAtividade(meu);
+        },
+        () => {},
+      );
+    });
+    return () => {
+      cancelled = true;
+      if (unsub) unsub();
+    };
+  }, [currentUser?.nome]);
+  function handleToggleNotificacoes() {
+    const next = !notificacoes;
+    setNotificacoes(next);
+    const novasPreferencias = {
+      ...(registro?.preferencias || DEFAULT_PREFERENCIAS_USUARIO),
+      notificacoes: next,
+    };
+    updateUserDoc(currentUser.id, { preferencias: novasPreferencias }).then(
+      (ok) => {
+        if (ok) {
+          onUpdateCurrentUser({ preferencias: novasPreferencias });
+          setRegistro((prev) =>
+            prev ? { ...prev, preferencias: novasPreferencias } : prev,
+          );
+          logDocumentAction("atualizou_preferencias", {
+            campo: "notificacoes",
+            valor: next,
+          });
+        } else {
+          setNotificacoes(!next);
+          onNotify &&
+            onNotify("Não foi possível salvar a preferência agora.");
+        }
+      },
+    );
+  }
+  function handleThemeChoice(choice) {
+    if (choice === themePreference) return;
+    onSetThemeChoice(choice);
+    logDocumentAction("atualizou_preferencias", { campo: "tema", valor: choice });
+  }
+  const perfilLabel = PERFIL_LABELS[currentUser?.perfil] || currentUser?.perfil;
+  const sessao = descreverSessaoAtual();
+  const atividadeExibida = atividade.slice(0, mostrarTudoAtividade ? 50 : 5);
+  const THEME_OPTIONS = [
+    { value: "auto", label: "Automático" },
+    { value: "light", label: "Claro" },
+    { value: "dark", label: "Escuro" },
+  ];
+  return /*#__PURE__*/ React.createElement(
+    "div",
+    { className: "view profile-view" },
+    /*#__PURE__*/ React.createElement(
+      "header",
+      { className: "view-header view-header-compact" },
+      /*#__PURE__*/ React.createElement(
+        "div",
+        null,
+        /*#__PURE__*/ React.createElement("p", { className: "eyebrow-pill" }, "Conta"),
+        /*#__PURE__*/ React.createElement("h1", null, "Meu Perfil"),
+        /*#__PURE__*/ React.createElement(
+          "p",
+          { className: "lede" },
+          "Gerencie suas informações de acesso e preferências do portal.",
+        ),
+      ),
+    ),
+    /*#__PURE__*/ React.createElement(
+      "section",
+      { className: "section-block" },
+      /*#__PURE__*/ React.createElement(
+        "div",
+        { className: "section-block-head" },
+        /*#__PURE__*/ React.createElement(
+          "h3",
+          { className: "dash-title" },
+          "Informações do usuário",
+        ),
+      ),
+      /*#__PURE__*/ React.createElement(
+        "div",
+        { className: "profile-user-card" },
+        /*#__PURE__*/ React.createElement(
+          "div",
+          { className: "profile-avatar" },
+          iniciaisNome(currentUser?.nome),
+        ),
+        /*#__PURE__*/ React.createElement(
+          "div",
+          { className: "profile-user-info" },
+          /*#__PURE__*/ React.createElement(
+            "div",
+            { className: "profile-user-name" },
+            currentUser?.nome,
+          ),
+          /*#__PURE__*/ React.createElement(
+            "div",
+            { className: "profile-user-email" },
+            currentUser?.email,
+          ),
+          /*#__PURE__*/ React.createElement(
+            "div",
+            { className: "profile-user-meta" },
+            /*#__PURE__*/ React.createElement(
+              "span",
+              {
+                className:
+                  "status-badge " +
+                  (registro?.status === "inativo" ? "status-vencido" : "status-ok"),
+              },
+              registro?.status === "inativo" ? "Inativo" : "Ativo",
+            ),
+            /*#__PURE__*/ React.createElement(
+              "span",
+              { className: "profile-user-meta-item" },
+              "Perfil: ",
+              perfilLabel,
+            ),
+          ),
+          /*#__PURE__*/ React.createElement(
+            "div",
+            { className: "profile-user-meta profile-user-meta-secondary" },
+            /*#__PURE__*/ React.createElement(
+              "span",
+              null,
+              "Criado em ",
+              registro?.criadoEm
+                ? formatAuditWhen(new Date(registro.criadoEm))
+                : "—",
+            ),
+            /*#__PURE__*/ React.createElement(
+              "span",
+              null,
+              "Último acesso ",
+              registro?.ultimoAcesso
+                ? formatAuditWhen(new Date(registro.ultimoAcesso))
+                : "—",
+            ),
+          ),
+        ),
+      ),
+    ),
+    can(currentUser, "alterarPropriaSenha") &&
+      /*#__PURE__*/ React.createElement(
+        "section",
+        { className: "section-block" },
+        /*#__PURE__*/ React.createElement(
+          "div",
+          { className: "section-block-head" },
+          /*#__PURE__*/ React.createElement(
+            "h3",
+            { className: "dash-title" },
+            "Dados de acesso",
+          ),
+        ),
+        /*#__PURE__*/ React.createElement(
+          "div",
+          { className: "profile-access-row" },
+          /*#__PURE__*/ React.createElement(
+            "div",
+            null,
+            /*#__PURE__*/ React.createElement(
+              "div",
+              { className: "profile-field-label" },
+              "Senha",
+            ),
+            /*#__PURE__*/ React.createElement(
+              "div",
+              { className: "profile-field-value" },
+              "Senha definida",
+            ),
+          ),
+          /*#__PURE__*/ React.createElement(
+            "button",
+            {
+              className: "doc-download-btn",
+              onClick: () => setChangePasswordOpen(true),
+            },
+            /*#__PURE__*/ React.createElement(Lock, { size: 14 }),
+            " Alterar senha",
+          ),
+        ),
+      ),
+    can(currentUser, "alterarPropriasPreferencias") &&
+      /*#__PURE__*/ React.createElement(
+        "section",
+        { className: "section-block" },
+        /*#__PURE__*/ React.createElement(
+          "div",
+          { className: "section-block-head" },
+          /*#__PURE__*/ React.createElement(
+            "h3",
+            { className: "dash-title" },
+            "Preferências",
+          ),
+        ),
+        /*#__PURE__*/ React.createElement(
+          "div",
+          { className: "profile-pref-row" },
+          /*#__PURE__*/ React.createElement(
+            "div",
+            { className: "profile-field-label" },
+            "Tema",
+          ),
+          /*#__PURE__*/ React.createElement(
+            "div",
+            { className: "pref-choice-group" },
+            THEME_OPTIONS.map((opt) =>
+              /*#__PURE__*/ React.createElement(
+                "button",
+                {
+                  key: opt.value,
+                  type: "button",
+                  className:
+                    "pref-choice" +
+                    (themePreference === opt.value ? " active" : ""),
+                  onClick: () => handleThemeChoice(opt.value),
+                },
+                opt.label,
+              ),
+            ),
+          ),
+        ),
+        /*#__PURE__*/ React.createElement(
+          "div",
+          { className: "profile-pref-row" },
+          /*#__PURE__*/ React.createElement(
+            "div",
+            null,
+            /*#__PURE__*/ React.createElement(
+              "div",
+              { className: "profile-field-label" },
+              "Notificações",
+            ),
+            /*#__PURE__*/ React.createElement(
+              "div",
+              { className: "profile-field-hint" },
+              "Receber notificações do portal",
+            ),
+          ),
+          /*#__PURE__*/ React.createElement(
+            "button",
+            {
+              type: "button",
+              className: "toggle-switch" + (notificacoes ? " on" : ""),
+              onClick: handleToggleNotificacoes,
+              role: "switch",
+              "aria-checked": notificacoes,
+              "aria-label": "Receber notificações do portal",
+            },
+            /*#__PURE__*/ React.createElement("span", {
+              className: "toggle-switch-knob",
+            }),
+          ),
+        ),
+      ),
+    /*#__PURE__*/ React.createElement(
+      "section",
+      { className: "section-block" },
+      /*#__PURE__*/ React.createElement(
+        "div",
+        { className: "section-block-head" },
+        /*#__PURE__*/ React.createElement(
+          "h3",
+          { className: "dash-title" },
+          "Atividade recente",
+        ),
+      ),
+      atividadeExibida.length === 0
+        ? /*#__PURE__*/ React.createElement(
+            "p",
+            { className: "empty-note" },
+            "Nenhuma atividade registrada ainda.",
+          )
+        : /*#__PURE__*/ React.createElement(
+            "div",
+            { className: "profile-activity-list" },
+            atividadeExibida.map((e, i) =>
+              /*#__PURE__*/ React.createElement(
+                "div",
+                { key: i, className: "profile-activity-item" },
+                /*#__PURE__*/ React.createElement(
+                  "span",
+                  { className: "profile-activity-action" },
+                  AUDIT_ACTION_LABELS[e.action] || e.action,
+                ),
+                /*#__PURE__*/ React.createElement(
+                  "span",
+                  { className: "profile-activity-when" },
+                  formatAuditWhen(new Date(e.at)),
+                ),
+              ),
+            ),
+          ),
+      atividade.length > 5 &&
+        /*#__PURE__*/ React.createElement(
+          "button",
+          {
+            className: "link-btn",
+            style: { marginTop: 10 },
+            onClick: () => setMostrarTudoAtividade((v) => !v),
+          },
+          mostrarTudoAtividade ? "Ver menos" : "Ver atividade completa",
+        ),
+    ),
+    /*#__PURE__*/ React.createElement(
+      "section",
+      { className: "section-block" },
+      /*#__PURE__*/ React.createElement(
+        "div",
+        { className: "section-block-head" },
+        /*#__PURE__*/ React.createElement(
+          "h3",
+          { className: "dash-title" },
+          "Sessão atual",
+        ),
+      ),
+      /*#__PURE__*/ React.createElement(
+        "div",
+        { className: "profile-session-row" },
+        /*#__PURE__*/ React.createElement(
+          "div",
+          { className: "profile-session-info" },
+          /*#__PURE__*/ React.createElement(Monitor, { size: 18 }),
+          /*#__PURE__*/ React.createElement(
+            "div",
+            null,
+            /*#__PURE__*/ React.createElement(
+              "div",
+              { className: "profile-field-value" },
+              sessao.dispositivo,
+              " · ",
+              sessao.navegador,
+            ),
+            /*#__PURE__*/ React.createElement(
+              "div",
+              { className: "profile-field-hint" },
+              "Acesso em ",
+              registro?.ultimoAcesso
+                ? formatAuditWhen(new Date(registro.ultimoAcesso))
+                : "agora",
+              " · ",
+              /*#__PURE__*/ React.createElement(
+                "span",
+                { className: "status-badge status-ok" },
+                "Sessão atual",
+              ),
+            ),
+          ),
+        ),
+        /*#__PURE__*/ React.createElement(
+          "button",
+          {
+            className: "filters-clear-btn",
+            style: { flex: "none" },
+            onClick: onLogout,
+          },
+          /*#__PURE__*/ React.createElement(LogOut, { size: 14 }),
+          " Sair da conta",
+        ),
+      ),
+    ),
+    can(currentUser, "gerenciarUsuarios") &&
+      /*#__PURE__*/ React.createElement(
+        "section",
+        { className: "section-block" },
+        /*#__PURE__*/ React.createElement(
+          "div",
+          { className: "section-block-head" },
+          /*#__PURE__*/ React.createElement(
+            "h3",
+            { className: "dash-title" },
+            "Gerenciar usuários",
+          ),
+        ),
+        /*#__PURE__*/ React.createElement(
+          "p",
+          { className: "lede", style: { margin: "0 0 12px" } },
+          "Crie contas, altere perfis de acesso e gerencie o status de cada usuário do portal.",
+        ),
+        /*#__PURE__*/ React.createElement(
+          "button",
+          { className: "doc-download-btn", onClick: onOpenUsersManagement },
+          /*#__PURE__*/ React.createElement(UserPlus, { size: 14 }),
+          " Gerenciar usuários",
+        ),
+      ),
+    changePasswordOpen &&
+      /*#__PURE__*/ React.createElement(ChangePasswordModal, {
+        user: currentUser,
+        onClose: () => setChangePasswordOpen(false),
+        onNotify: onNotify,
+        onChanged: () => {
+          setChangePasswordOpen(false);
+          carregarRegistro();
+        },
+      }),
+  );
+}
+/* =========================================================================
+   "GERENCIAR USUÁRIOS" — item 14 do pedido da Iasmin (2026-09-25), área
+   exclusiva do Administrador. Alcançada a partir de Meu Perfil → seção
+   "Gerenciar usuários" (não é um item novo na barra lateral — mantém o
+   menu enxuto). Reaproveita company-table (mesmo padrão de listagem já
+   usado no resto do portal) + docs-modal (formulário de criar/editar).
+   ========================================================================= */ const USER_STATUS_META =
+  {
+    ativo: { label: "Ativo", className: "status-ok" },
+    inativo: { label: "Inativo", className: "status-vencido" },
+  };
+function UserFormModal({ mode, initial, onClose, onSave }) {
+  const [nome, setNome] = useState(initial?.nome || "");
+  const [email, setEmail] = useState(initial?.email || "");
+  const [perfil, setPerfil] = useState(initial?.perfil || "usuario");
+  const [erro, setErro] = useState("");
+  const [status, setStatus] = useState("idle");
+  async function handleSubmit(e) {
+    if (e) e.preventDefault();
+    if (status !== "idle") return;
+    setErro("");
+    if (!nome.trim()) {
+      setErro("Informe o nome completo.");
+      return;
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
+      setErro("Informe um e-mail em formato válido.");
+      return;
+    }
+    setStatus("loading");
+    const result = await onSave({ nome: nome.trim(), email: email.trim(), perfil });
+    if (result && result.ok === false) {
+      setStatus("idle");
+      setErro(result.message || "Não foi possível salvar o usuário.");
+      return;
+    }
+    setStatus("success");
+  }
+  return /*#__PURE__*/ React.createElement(
+    "div",
+    { className: "docs-modal-overlay", onClick: onClose },
+    /*#__PURE__*/ React.createElement("style", null, LOGIN_SCREEN_CSS),
+    /*#__PURE__*/ React.createElement(
+      "div",
+      {
+        className: "docs-modal homolog-form-modal",
+        onClick: (e) => e.stopPropagation(),
+      },
+      /*#__PURE__*/ React.createElement(
+        "div",
+        { className: "docs-modal-head" },
+        /*#__PURE__*/ React.createElement(
+          "div",
+          null,
+          /*#__PURE__*/ React.createElement(
+            "div",
+            { className: "docs-modal-title" },
+            /*#__PURE__*/ React.createElement(UserPlus, { size: 16 }),
+            " ",
+            mode === "editar" ? "Editar usuário" : "Novo usuário",
+          ),
+          mode === "novo" &&
+            /*#__PURE__*/ React.createElement(
+              "div",
+              { className: "docs-modal-sub" },
+              "Entra com a senha inicial padrão do portal",
+            ),
+        ),
+        /*#__PURE__*/ React.createElement(
+          "button",
+          { className: "icon-btn-dark", onClick: onClose, "aria-label": "Fechar" },
+          /*#__PURE__*/ React.createElement(X, { size: 18 }),
+        ),
+      ),
+      /*#__PURE__*/ React.createElement(
+        "form",
+        { className: "docs-modal-body", onSubmit: handleSubmit },
+        erro &&
+          /*#__PURE__*/ React.createElement(
+            "div",
+            { className: "login-error" },
+            /*#__PURE__*/ React.createElement(AlertTriangle, { size: 14 }),
+            " ",
+            erro,
+          ),
+        /*#__PURE__*/ React.createElement(
+          "div",
+          { className: "homolog-field" },
+          /*#__PURE__*/ React.createElement("label", null, "Nome completo"),
+          /*#__PURE__*/ React.createElement("input", {
+            type: "text",
+            value: nome,
+            onChange: (e) => setNome(e.target.value),
+            placeholder: "Nome e sobrenome",
+            autoFocus: true,
+          }),
+        ),
+        /*#__PURE__*/ React.createElement(
+          "div",
+          { className: "homolog-field" },
+          /*#__PURE__*/ React.createElement("label", null, "E-mail corporativo"),
+          /*#__PURE__*/ React.createElement("input", {
+            type: "email",
+            value: email,
+            onChange: (e) => setEmail(e.target.value),
+            placeholder: "nome@grupoprimalog.com.br",
+            disabled: mode === "editar",
+          }),
+        ),
+        /*#__PURE__*/ React.createElement(
+          "div",
+          { className: "homolog-field" },
+          /*#__PURE__*/ React.createElement("label", null, "Perfil de acesso"),
+          /*#__PURE__*/ React.createElement(
+            "select",
+            {
+              value: perfil,
+              onChange: (e) => setPerfil(e.target.value),
+            },
+            /*#__PURE__*/ React.createElement("option", { value: "admin" }, "Administrador"),
+            /*#__PURE__*/ React.createElement("option", { value: "comercial" }, "Comercial"),
+            /*#__PURE__*/ React.createElement("option", { value: "usuario" }, "Usuário"),
+          ),
+        ),
+        /*#__PURE__*/ React.createElement(
+          "div",
+          { className: "homolog-form-actions" },
+          /*#__PURE__*/ React.createElement(
+            "button",
+            {
+              type: "button",
+              className: "filters-clear-btn",
+              onClick: onClose,
+              style: { flex: "none" },
+            },
+            "Cancelar",
+          ),
+          /*#__PURE__*/ React.createElement(
+            "button",
+            {
+              type: "submit",
+              className: "doc-download-btn",
+              disabled: status !== "idle",
+            },
+            status === "loading" ? "Salvando..." : "Salvar",
+          ),
+        ),
+      ),
+    ),
+  );
+}
+function UsersManagementView({ currentUser, onNotify, onBack }) {
+  const [usuarios, setUsuarios] = useState(null);
+  const [formMode, setFormMode] = useState(null); // null | "novo" | "editar"
+  const [usuarioEditando, setUsuarioEditando] = useState(null);
+  const [confirmandoExclusao, setConfirmandoExclusao] = useState(null);
+  async function carregar() {
+    const lista = await listUsersDb();
+    setUsuarios(lista.slice().sort((a, b) => (a.nome || "").localeCompare(b.nome || "")));
+  }
+  useEffect(() => {
+    carregar();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  // Defesa em profundidade (item 15 do pedido): mesmo que alguém chegue
+  // nesta view sem passar pelo botão (ex.: manipulando o estado da página
+  // diretamente), a tela nunca renderiza a listagem/ações administrativas
+  // pra quem não tem a permissão "gerenciarUsuarios".
+  if (!can(currentUser, "gerenciarUsuarios")) {
+    return /*#__PURE__*/ React.createElement(
+      "div",
+      { className: "view" },
+      /*#__PURE__*/ React.createElement(
+        "p",
+        { className: "empty-note" },
+        "Você não tem permissão para acessar esta área.",
+      ),
+    );
+  }
+  async function handleCriar({ nome, email, perfil }) {
+    const usuariosAtuais = await listUsersDb();
+    if (usuariosAtuais.some((u) => u.email.toLowerCase() === email.toLowerCase())) {
+      return { ok: false, message: "Já existe um usuário com este e-mail." };
+    }
+    const senhaHash = await hashSenha(PORTAL_PASSWORD);
+    const novo = {
+      id: slugUserId(email),
+      nome,
+      email,
+      perfil,
+      senhaHash,
+      precisaTrocarSenha: true,
+      status: "ativo",
+      criadoEm: new Date().toISOString(),
+      criadoPor: currentUser?.nome || currentUser?.email || "admin",
+      ultimoAcesso: null,
+      preferencias: DEFAULT_PREFERENCIAS_USUARIO,
+    };
+    const ok = await salvarUsuarioDb(novo);
+    if (!ok) return { ok: false, message: "Não foi possível criar o usuário agora." };
+    logDocumentAction("criou_usuario", { usuarioCriado: email, perfil });
+    onNotify && onNotify(`Usuário ${nome} criado com a senha inicial padrão.`, "info");
+    setFormMode(null);
+    carregar();
+    return { ok: true };
+  }
+  async function handleEditar(userId, { nome, perfil }) {
+    const anterior = usuarios.find((u) => u.id === userId);
+    const ok = await updateUserDoc(userId, { nome, perfil });
+    if (!ok) return { ok: false, message: "Não foi possível salvar as alterações agora." };
+    logDocumentAction("editou_usuario", { usuarioEditado: anterior?.email });
+    if (anterior && anterior.perfil !== perfil) {
+      logDocumentAction("alterou_perfil_usuario", {
+        usuarioEditado: anterior.email,
+        de: anterior.perfil,
+        para: perfil,
+      });
+    }
+    setFormMode(null);
+    setUsuarioEditando(null);
+    carregar();
+    return { ok: true };
+  }
+  async function handleAlternarStatus(u) {
+    if (u.id === currentUser.id) {
+      onNotify && onNotify("Você não pode desativar o seu próprio acesso.");
+      return;
+    }
+    const novoStatus = u.status === "inativo" ? "ativo" : "inativo";
+    const ok = await updateUserDoc(u.id, { status: novoStatus });
+    if (!ok) {
+      onNotify && onNotify("Não foi possível atualizar o status agora.");
+      return;
+    }
+    logDocumentAction(
+      novoStatus === "inativo" ? "desativou_usuario" : "ativou_usuario",
+      { usuarioAlvo: u.email },
+    );
+    carregar();
+  }
+  async function handleRedefinirSenha(u) {
+    const senhaHash = await hashSenha(PORTAL_PASSWORD);
+    const ok = await updateUserDoc(u.id, {
+      senhaHash,
+      precisaTrocarSenha: true,
+    });
+    if (!ok) {
+      onNotify && onNotify("Não foi possível redefinir a senha agora.");
+      return;
+    }
+    logDocumentAction("redefiniu_senha_usuario", { usuarioAlvo: u.email });
+    onNotify &&
+      onNotify(
+        `Senha de ${u.nome} redefinida para a senha inicial padrão.`,
+        "info",
+      );
+    carregar();
+  }
+  async function handleExcluir(u) {
+    if (u.id === currentUser.id) {
+      onNotify && onNotify("Você não pode excluir o seu próprio usuário.");
+      setConfirmandoExclusao(null);
+      return;
+    }
+    const ok = await excluirUsuarioDb(u.id);
+    setConfirmandoExclusao(null);
+    if (!ok) {
+      onNotify && onNotify("Não foi possível excluir o usuário agora.");
+      return;
+    }
+    logDocumentAction("excluiu_usuario", { usuarioAlvo: u.email });
+    carregar();
+  }
+  return /*#__PURE__*/ React.createElement(
+    "div",
+    { className: "view" },
+    /*#__PURE__*/ React.createElement(
+      "header",
+      { className: "view-header view-header-compact" },
+      /*#__PURE__*/ React.createElement(
+        "div",
+        null,
+        /*#__PURE__*/ React.createElement(
+          "button",
+          { className: "link-btn", onClick: onBack, style: { marginBottom: 8 } },
+          /*#__PURE__*/ React.createElement(ArrowLeft, { size: 14 }),
+          " Meu Perfil",
+        ),
+        /*#__PURE__*/ React.createElement("h1", null, "Gerenciar usuários"),
+        /*#__PURE__*/ React.createElement(
+          "p",
+          { className: "lede" },
+          "Crie contas, altere perfis de acesso e gerencie o status de cada usuário do portal.",
+        ),
+      ),
+      /*#__PURE__*/ React.createElement(
+        "button",
+        {
+          className: "doc-download-btn",
+          onClick: () => setFormMode("novo"),
+        },
+        /*#__PURE__*/ React.createElement(UserPlus, { size: 14 }),
+        " Novo usuário",
+      ),
+    ),
+    /*#__PURE__*/ React.createElement(
+      "div",
+      { className: "table-wrap desktop-only" },
+      /*#__PURE__*/ React.createElement(
+        "table",
+        { className: "company-table" },
+        /*#__PURE__*/ React.createElement(
+          "thead",
+          null,
+          /*#__PURE__*/ React.createElement(
+            "tr",
+            null,
+            /*#__PURE__*/ React.createElement("th", null, "Nome"),
+            /*#__PURE__*/ React.createElement("th", null, "E-mail"),
+            /*#__PURE__*/ React.createElement("th", null, "Perfil"),
+            /*#__PURE__*/ React.createElement("th", null, "Status"),
+            /*#__PURE__*/ React.createElement("th", null, "Último acesso"),
+            /*#__PURE__*/ React.createElement("th", null, "Criado em"),
+            /*#__PURE__*/ React.createElement("th", null, "Ações"),
+          ),
+        ),
+        /*#__PURE__*/ React.createElement(
+          "tbody",
+          null,
+          (usuarios || []).map((u) =>
+            /*#__PURE__*/ React.createElement(
+              "tr",
+              { key: u.id },
+              /*#__PURE__*/ React.createElement("td", null, u.nome),
+              /*#__PURE__*/ React.createElement("td", null, u.email),
+              /*#__PURE__*/ React.createElement(
+                "td",
+                null,
+                PERFIL_LABELS[u.perfil] || u.perfil,
+              ),
+              /*#__PURE__*/ React.createElement(
+                "td",
+                null,
+                /*#__PURE__*/ React.createElement(
+                  "span",
+                  {
+                    className:
+                      "status-badge " +
+                      (USER_STATUS_META[u.status]?.className || "status-ok"),
+                  },
+                  USER_STATUS_META[u.status]?.label || "Ativo",
+                ),
+              ),
+              /*#__PURE__*/ React.createElement(
+                "td",
+                null,
+                u.ultimoAcesso ? formatAuditWhen(new Date(u.ultimoAcesso)) : "—",
+              ),
+              /*#__PURE__*/ React.createElement(
+                "td",
+                null,
+                u.criadoEm ? formatAuditWhen(new Date(u.criadoEm)) : "—",
+              ),
+              /*#__PURE__*/ React.createElement(
+                "td",
+                null,
+                /*#__PURE__*/ React.createElement(
+                  "div",
+                  { style: { display: "flex", gap: 6, flexWrap: "wrap" } },
+                  /*#__PURE__*/ React.createElement(
+                    "button",
+                    {
+                      className: "doc-view-btn",
+                      onClick: () => {
+                        setUsuarioEditando(u);
+                        setFormMode("editar");
+                      },
+                    },
+                    /*#__PURE__*/ React.createElement(Pencil, { size: 12 }),
+                    " Editar",
+                  ),
+                  /*#__PURE__*/ React.createElement(
+                    "button",
+                    {
+                      className: "doc-view-btn",
+                      onClick: () => handleRedefinirSenha(u),
+                      title: "Volta para a senha inicial padrão",
+                    },
+                    "Redefinir senha",
+                  ),
+                  /*#__PURE__*/ React.createElement(
+                    "button",
+                    {
+                      className: "doc-view-btn",
+                      disabled: u.id === currentUser.id,
+                      title:
+                        u.id === currentUser.id
+                          ? "Você não pode desativar o seu próprio acesso"
+                          : undefined,
+                      onClick: () => handleAlternarStatus(u),
+                    },
+                    u.status === "inativo" ? "Ativar" : "Desativar",
+                  ),
+                  confirmandoExclusao === u.id
+                    ? /*#__PURE__*/ React.createElement(
+                        "span",
+                        { className: "doc-row-delete-confirm" },
+                        /*#__PURE__*/ React.createElement(
+                          "button",
+                          {
+                            className: "doc-row-delete-btn",
+                            onClick: () => handleExcluir(u),
+                          },
+                          "Confirmar exclusão",
+                        ),
+                        /*#__PURE__*/ React.createElement(
+                          "button",
+                          {
+                            className: "doc-view-btn",
+                            onClick: () => setConfirmandoExclusao(null),
+                          },
+                          "Cancelar",
+                        ),
+                      )
+                    : /*#__PURE__*/ React.createElement(
+                        "button",
+                        {
+                          className: "doc-row-delete-btn",
+                          disabled: u.id === currentUser.id,
+                          title:
+                            u.id === currentUser.id
+                              ? "Você não pode excluir o seu próprio usuário"
+                              : undefined,
+                          onClick: () => setConfirmandoExclusao(u.id),
+                        },
+                        /*#__PURE__*/ React.createElement(Trash2, { size: 12 }),
+                        " Excluir",
+                      ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+      usuarios && usuarios.length === 0 &&
+        /*#__PURE__*/ React.createElement(
+          "div",
+          { className: "empty-state" },
+          "Nenhum usuário cadastrado ainda.",
+        ),
+    ),
+    /*#__PURE__*/ React.createElement(
+      "div",
+      { className: "company-cards mobile-only" },
+      (usuarios || []).map((u) =>
+        /*#__PURE__*/ React.createElement(
+          "div",
+          { key: u.id, className: "company-card-mobile" },
+          /*#__PURE__*/ React.createElement(
+            "div",
+            { className: "company-card-mobile-top" },
+            /*#__PURE__*/ React.createElement("strong", null, u.nome),
+            /*#__PURE__*/ React.createElement(
+              "span",
+              {
+                className:
+                  "status-badge " +
+                  (USER_STATUS_META[u.status]?.className || "status-ok"),
+              },
+              USER_STATUS_META[u.status]?.label || "Ativo",
+            ),
+          ),
+          /*#__PURE__*/ React.createElement(
+            "div",
+            { className: "company-card-mobile-row" },
+            /*#__PURE__*/ React.createElement("span", null, "E-mail"),
+            /*#__PURE__*/ React.createElement("span", null, u.email),
+          ),
+          /*#__PURE__*/ React.createElement(
+            "div",
+            { className: "company-card-mobile-row" },
+            /*#__PURE__*/ React.createElement("span", null, "Perfil"),
+            /*#__PURE__*/ React.createElement(
+              "span",
+              null,
+              PERFIL_LABELS[u.perfil] || u.perfil,
+            ),
+          ),
+          /*#__PURE__*/ React.createElement(
+            "div",
+            { style: { display: "flex", gap: 6, flexWrap: "wrap", marginTop: 8 } },
+            /*#__PURE__*/ React.createElement(
+              "button",
+              {
+                className: "doc-view-btn",
+                onClick: () => {
+                  setUsuarioEditando(u);
+                  setFormMode("editar");
+                },
+              },
+              "Editar",
+            ),
+            /*#__PURE__*/ React.createElement(
+              "button",
+              {
+                className: "doc-view-btn",
+                onClick: () => handleRedefinirSenha(u),
+              },
+              "Redefinir senha",
+            ),
+            /*#__PURE__*/ React.createElement(
+              "button",
+              {
+                className: "doc-view-btn",
+                disabled: u.id === currentUser.id,
+                onClick: () => handleAlternarStatus(u),
+              },
+              u.status === "inativo" ? "Ativar" : "Desativar",
+            ),
+          ),
+        ),
+      ),
+    ),
+    formMode &&
+      /*#__PURE__*/ React.createElement(UserFormModal, {
+        mode: formMode,
+        initial: formMode === "editar" ? usuarioEditando : null,
+        onClose: () => {
+          setFormMode(null);
+          setUsuarioEditando(null);
+        },
+        onSave:
+          formMode === "editar"
+            ? (dados) => handleEditar(usuarioEditando.id, dados)
+            : handleCriar,
+      }),
   );
 }
 function GrupoprimaPortal() {
@@ -21041,13 +22827,60 @@ function GrupoprimaPortal() {
   // sem precisar refazer o login a cada F5.
   const [authenticated, setAuthenticated] = useState(() => !!loadPortalSession());
   const [currentUser, setCurrentUser] = useState(() => loadPortalSession());
-  const [theme, setTheme] = useState(() => loadPortalTheme());
+  // themePreference: o que está salvo ("light" | "dark" | "auto"). `theme`
+  // (mais abaixo) é o valor JÁ RESOLVIDO pra "light"/"dark" que o resto do
+  // portal usa (data-theme, ícones) — quando a preferência é "auto", ele
+  // segue prefers-color-scheme do sistema em tempo real.
+  const [themePreference, setThemePreference] = useState(() => loadPortalTheme());
+  const [systemPrefersDark, setSystemPrefersDark] = useState(() => {
+    try {
+      return (
+        typeof window !== "undefined" &&
+        window.matchMedia &&
+        window.matchMedia("(prefers-color-scheme: dark)").matches
+      );
+    } catch (e) {
+      return false;
+    }
+  });
+  useEffect(() => {
+    if (typeof window === "undefined" || !window.matchMedia) return;
+    let mq;
+    try {
+      mq = window.matchMedia("(prefers-color-scheme: dark)");
+    } catch (e) {
+      return;
+    }
+    const handler = (e) => setSystemPrefersDark(e.matches);
+    if (mq.addEventListener) mq.addEventListener("change", handler);
+    else if (mq.addListener) mq.addListener(handler);
+    return () => {
+      if (mq.removeEventListener) mq.removeEventListener("change", handler);
+      else if (mq.removeListener) mq.removeListener(handler);
+    };
+  }, []);
+  const theme =
+    themePreference === "auto"
+      ? systemPrefersDark
+        ? "dark"
+        : "light"
+      : themePreference;
+  // toggleTheme: o botão manual da barra lateral — comportamento igual ao
+  // de antes (alterna light/dark direto). Se a preferência era "auto",
+  // sair dele é intencional aqui: a usuária está pedindo um tema fixo.
   function toggleTheme() {
-    setTheme((prev) => {
-      const next = prev === "dark" ? "light" : "dark";
+    setThemePreference((prev) => {
+      const atual = prev === "auto" ? theme : prev;
+      const next = atual === "dark" ? "light" : "dark";
       savePortalTheme(next);
       return next;
     });
+  }
+  // setThemeChoice: usado só pelo seletor "Automático/Claro/Escuro" em Meu
+  // Perfil → Preferências.
+  function setThemeChoice(choice) {
+    setThemePreference(choice);
+    savePortalTheme(choice);
   }
   const [view, setView] = useState("dashboard");
   const [selectedId, setSelectedId] = useState(null);
@@ -21104,6 +22937,18 @@ function GrupoprimaPortal() {
     setCurrentUser(user || null);
     savePortalSession(user || null);
   }
+  /** updateCurrentUser: mescla um patch no usuário logado (usado depois de
+   *  trocar a própria senha ou alterar as próprias preferências, em "Meu
+   *  Perfil") — mantém o React state e a sessão persistida (localStorage)
+   *  sincronizados, sem precisar refazer login. */ function updateCurrentUser(
+    patch,
+  ) {
+    setCurrentUser((prev) => {
+      const next = { ...(prev || {}), ...patch };
+      savePortalSession(next);
+      return next;
+    });
+  }
   function handleLogout(reason) {
     logDocumentAction("logout", reason ? { motivo: reason } : {});
     setAuditSessionUser(null);
@@ -21145,6 +22990,12 @@ function GrupoprimaPortal() {
   if (!authenticated) {
     return /*#__PURE__*/ React.createElement(LoginScreen, {
       onLogin: handleLogin,
+    });
+  }
+  if (currentUser?.precisaTrocarSenha) {
+    return /*#__PURE__*/ React.createElement(PrimeiroAcessoScreen, {
+      user: currentUser,
+      onSenhaTrocada: () => updateCurrentUser({ precisaTrocarSenha: false }),
     });
   }
   return /*#__PURE__*/ React.createElement(
@@ -21323,6 +23174,12 @@ function GrupoprimaPortal() {
         .nav-item:hover { background: rgba(255,255,255,0.06); color: #fff; }
         .nav-item.active { background: rgba(107,254,156,0.14); color: var(--verde); font-weight: 700; }
         .sidebar-bottom { margin-top: auto; display: flex; flex-direction: column; gap: 10px; padding-top: 14px; border-top: 1px solid rgba(255,255,255,0.1); }
+        /* "Meu Perfil" reposicionado pra cima do "Modo escuro" (pedido da Iasmin,
+           2026-09-25) — mesmo peso visual do botão de tema, bem mais discreto
+           que o .nav-item.active (que usa fundo verde cheio e negrito). */
+        .profile-nav-btn { display: flex; align-items: center; gap: 8px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.14); color: rgba(243,243,246,0.85); font-size: 12px; font-weight: 700; padding: 8px 10px; border-radius: 8px; cursor: pointer; margin: 0 8px; transition: background 0.15s, border-color 0.15s; text-align: left; }
+        .profile-nav-btn:hover { background: rgba(255,255,255,0.12); }
+        .profile-nav-btn.active { background: rgba(107,254,156,0.10); border-color: rgba(107,254,156,0.32); color: var(--verde); }
         .theme-toggle-btn { display: flex; align-items: center; gap: 8px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.14); color: rgba(243,243,246,0.85); font-size: 12px; font-weight: 700; padding: 8px 10px; border-radius: 8px; cursor: pointer; margin: 0 8px; transition: background 0.15s; }
         .theme-toggle-btn:hover { background: rgba(255,255,255,0.12); }
         .sidebar-contact { font-size: 10.5px; line-height: 1.5; color: rgba(243,243,246,0.68); padding: 0 8px; }
@@ -21969,6 +23826,63 @@ function GrupoprimaPortal() {
            pé se beneficia do mesmo padrão de navegação por gaveta.
            ===================================================================== */
 
+        /* =====================================================================
+           "MEU PERFIL" (pedido da Iasmin, 2026-09-25) — só componentes NOVOS
+           (avatar, toggle de notificações, seletor de tema em pílulas); todo
+           o resto da tela (section-block, view-header, docs-modal,
+           company-table, status-badge, doc-view-btn...) já existia e é só
+           reaproveitado, sem nenhuma alteração visual nova aqui.
+           ===================================================================== */
+        .profile-user-card { display: flex; align-items: flex-start; gap: 16px; flex-wrap: wrap; }
+        .profile-avatar {
+          width: 56px; height: 56px; border-radius: 50%; flex-shrink: 0;
+          background: var(--azul); color: #fff; display: flex; align-items: center; justify-content: center;
+          font-family: 'Archivo', sans-serif; font-weight: 800; font-size: 17px; letter-spacing: 0.02em;
+        }
+        .profile-user-info { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+        .profile-user-name { font-size: 15px; font-weight: 800; color: var(--texto); }
+        .profile-user-email { font-size: 12.5px; color: var(--carvao); }
+        .profile-user-meta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 2px; }
+        .profile-user-meta-item { font-size: 12px; font-weight: 700; color: var(--carvao); }
+        .profile-user-meta-secondary { font-size: 11.5px; color: var(--carvao); opacity: 0.85; gap: 14px; }
+        .profile-access-row, .profile-pref-row, .profile-session-row {
+          display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap;
+          padding: 12px 0; border-top: 1px solid var(--cinza-frio);
+        }
+        .profile-access-row:first-of-type, .profile-pref-row:first-of-type, .profile-session-row:first-of-type { border-top: none; padding-top: 0; }
+        .profile-field-label { font-size: 11px; font-weight: 700; letter-spacing: 0.03em; text-transform: uppercase; color: var(--carvao); margin-bottom: 3px; }
+        .profile-field-value { font-size: 13px; font-weight: 700; color: var(--texto); }
+        .profile-field-hint { font-size: 11.5px; color: var(--carvao); }
+        .pref-choice-group { display: inline-flex; background: var(--branco-frio); border-radius: 9px; padding: 3px; gap: 2px; }
+        .pref-choice {
+          border: none; background: none; padding: 7px 13px; border-radius: 7px; font-size: 12px; font-weight: 700;
+          color: var(--carvao); cursor: pointer; transition: background 0.15s, color 0.15s;
+        }
+        .pref-choice:hover { color: var(--texto); }
+        .pref-choice.active { background: var(--azul); color: #fff; }
+        .toggle-switch {
+          position: relative; width: 40px; height: 23px; border-radius: 999px; border: none; cursor: pointer;
+          background: var(--cinza-frio); padding: 0; flex-shrink: 0; transition: background 0.15s;
+        }
+        .toggle-switch.on { background: var(--verde); }
+        .toggle-switch-knob {
+          position: absolute; top: 2.5px; left: 2.5px; width: 18px; height: 18px; border-radius: 50%;
+          background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,0.25); transition: transform 0.15s;
+        }
+        .toggle-switch.on .toggle-switch-knob { transform: translateX(17px); }
+        .profile-activity-list { display: flex; flex-direction: column; }
+        .profile-activity-item {
+          display: flex; align-items: center; justify-content: space-between; gap: 12px;
+          padding: 10px 0; border-top: 1px solid var(--cinza-frio); font-size: 12.5px;
+        }
+        .profile-activity-item:first-child { border-top: none; padding-top: 0; }
+        .profile-activity-action { font-weight: 700; color: var(--texto); }
+        .profile-activity-when { color: var(--carvao); font-size: 11.5px; white-space: nowrap; }
+        .profile-session-info { display: flex; align-items: center; gap: 12px; }
+        .profile-session-info > svg { color: var(--carvao); flex-shrink: 0; }
+        .portal-root[data-theme="dark"] .pref-choice-group { background: rgba(255,255,255,0.06); }
+        .portal-root[data-theme="dark"] .toggle-switch { background: rgba(255,255,255,0.14); }
+
         /* ---- Tablet + Mobile: navegação em drawer (768px e abaixo de 1024px) ---- */
         @media (max-width: 1023px) {
           .mobile-menu-btn { display: flex; }
@@ -22000,6 +23914,15 @@ function GrupoprimaPortal() {
              que reaproveita a mesma .filter-field. Sem esse reforço aqui, os
              campos ficariam pequenos demais pra tocar com o dedo. */
           .filters-modal-body .filter-field { font-size: 11.5px; gap: 6px; }
+          /* "Meu Perfil" no mobile (item 17 do pedido): cards já empilham
+             sozinhos (section-block é block-level), só as LINHAS internas
+             (usuário/senha/preferência/sessão) precisam virar 1 coluna em
+             vez de "label à esquerda, controle à direita". */
+          .profile-access-row, .profile-pref-row, .profile-session-row {
+            flex-direction: column; align-items: flex-start; gap: 10px;
+          }
+          .profile-access-row > button, .profile-session-row > button { width: 100%; justify-content: center; }
+          .profile-user-card { gap: 12px; }
           .filters-modal-body .filter-field input, .filters-modal-body .filter-field select {
             padding: 12px 12px; font-size: 14px;
           }
@@ -22016,7 +23939,7 @@ function GrupoprimaPortal() {
           .nav-item, .mini-download-btn, .doc-download-btn, .doc-view-btn, .chip,
           .zip-bar-btn, .add-doc-btn, .compare-toggle-btn, .filters-btn,
           .mobile-menu-btn, .icon-btn, .icon-btn-dark, .icon-btn-accent,
-          .user-badge-logout, .company-mini-docs-btn { min-height: 40px; }
+          .user-badge-logout, .company-mini-docs-btn, .profile-nav-btn { min-height: 40px; }
         }
 
         /* ---- Tablet: 2 colunas nos grids, mas ainda com espaço de sobra ---- */
@@ -22144,16 +24067,17 @@ function GrupoprimaPortal() {
         " ",
         /*#__PURE__*/ React.createElement("span", null, "Empresas"),
       ),
-      /*#__PURE__*/ React.createElement(
-        "button",
-        {
-          className: "nav-item" + (view === "homologacao" ? " active" : ""),
-          onClick: () => goTo("homologacao"),
-        },
-        /*#__PURE__*/ React.createElement(FileSearch, { size: 16 }),
-        " ",
-        /*#__PURE__*/ React.createElement("span", null, "Homologação"),
-      ),
+      can(currentUser, "homologacoes") &&
+        /*#__PURE__*/ React.createElement(
+          "button",
+          {
+            className: "nav-item" + (view === "homologacao" ? " active" : ""),
+            onClick: () => goTo("homologacao"),
+          },
+          /*#__PURE__*/ React.createElement(FileSearch, { size: 16 }),
+          " ",
+          /*#__PURE__*/ React.createElement("span", null, "Homologação"),
+        ),
       /*#__PURE__*/ React.createElement(
         "button",
         {
@@ -22187,7 +24111,7 @@ function GrupoprimaPortal() {
         " ",
         /*#__PURE__*/ React.createElement("span", null, "Assistente"),
       ),
-      currentUser?.perfil === "admin" &&
+      can(currentUser, "auditoria") &&
         /*#__PURE__*/ React.createElement(
           "button",
           {
@@ -22198,7 +24122,7 @@ function GrupoprimaPortal() {
           " ",
           /*#__PURE__*/ React.createElement("span", null, "Auditoria"),
         ),
-      currentUser?.perfil === "admin" &&
+      can(currentUser, "sincronizarDrive") &&
         /*#__PURE__*/ React.createElement(
           "button",
           {
@@ -22216,6 +24140,17 @@ function GrupoprimaPortal() {
       /*#__PURE__*/ React.createElement(
         "div",
         { className: "sidebar-bottom" },
+        /*#__PURE__*/ React.createElement(
+          "button",
+          {
+            type: "button",
+            className:
+              "profile-nav-btn" + (view === "perfil" ? " active" : ""),
+            onClick: () => goTo("perfil"),
+          },
+          /*#__PURE__*/ React.createElement(UserCircle, { size: 15 }),
+          /*#__PURE__*/ React.createElement("span", null, "Meu Perfil"),
+        ),
         /*#__PURE__*/ React.createElement(
           "button",
           {
@@ -22309,11 +24244,20 @@ function GrupoprimaPortal() {
               "span",
               { className: "user-badge-name" },
               currentUser.nome,
+              // "usuario" não mostra selo de perfil (item 5 do pedido: esse
+              // nível não precisa ser exibido ao lado do nome). Admin/
+              // Comercial mostram, pra deixar claro qual conta está ativa.
               currentUser.perfil === "admin" &&
                 /*#__PURE__*/ React.createElement(
                   "span",
                   { className: "user-badge-role" },
                   "Admin",
+                ),
+              currentUser.perfil === "comercial" &&
+                /*#__PURE__*/ React.createElement(
+                  "span",
+                  { className: "user-badge-role" },
+                  "Comercial",
                 ),
             ),
           /*#__PURE__*/ React.createElement(
@@ -22355,7 +24299,10 @@ function GrupoprimaPortal() {
             onOpenDocuments: openDocumentsModal,
             onNotify: notify,
             onView: setViewer,
-            isAdmin: currentUser?.perfil === "admin",
+            // editarDocumentos/excluirDocumentos/classificarDocumentos têm o
+            // mesmo valor por perfil na matriz de permissões (só admin) —
+            // isAdmin aqui controla justamente esse trio de botões.
+            isAdmin: can(currentUser, "editarDocumentos"),
             openCorporateOnMount: companiesOpenCorporate,
             onCorporateAutoOpenConsumed: () => setCompaniesOpenCorporate(false),
           }),
@@ -22368,9 +24315,10 @@ function GrupoprimaPortal() {
             onNotify: notify,
             onView: setViewer,
             onOpenChat: openChatWithQuery,
-            isAdmin: currentUser?.perfil === "admin",
+            isAdmin: can(currentUser, "editarDocumentos"),
           }),
         view === "homologacao" &&
+          can(currentUser, "homologacoes") &&
           /*#__PURE__*/ React.createElement(HomologacaoView, {
             currentUser: currentUser,
             onNotify: notify,
@@ -22392,12 +24340,12 @@ function GrupoprimaPortal() {
             companies: data.companies,
           }),
         view === "auditoria" &&
-          currentUser?.perfil === "admin" &&
+          can(currentUser, "auditoria") &&
           /*#__PURE__*/ React.createElement(AuditLogView, {
             companies: data.companies,
           }),
         view === "conferencia" &&
-          currentUser?.perfil === "admin" &&
+          can(currentUser, "sincronizarDrive") &&
           /*#__PURE__*/ React.createElement(
             React.Fragment,
             null,
@@ -22411,6 +24359,23 @@ function GrupoprimaPortal() {
               companies: data.companies,
             }),
           ),
+        view === "perfil" &&
+          /*#__PURE__*/ React.createElement(ProfileView, {
+            currentUser: currentUser,
+            themePreference: themePreference,
+            onSetThemeChoice: setThemeChoice,
+            onNotify: notify,
+            onUpdateCurrentUser: updateCurrentUser,
+            onLogout: () => handleLogout("manual"),
+            onOpenUsersManagement: () => setView("usuarios"),
+          }),
+        view === "usuarios" &&
+          can(currentUser, "gerenciarUsuarios") &&
+          /*#__PURE__*/ React.createElement(UsersManagementView, {
+            currentUser: currentUser,
+            onNotify: notify,
+            onBack: () => setView("perfil"),
+          }),
       ),
     ),
     /*#__PURE__*/ React.createElement(ChatDrawer, {
@@ -22424,7 +24389,7 @@ function GrupoprimaPortal() {
       screenContext: { view, company: selectedCompany },
       seedQuery: chatSeed,
       onSeedConsumed: () => setChatSeed(null),
-      isAdmin: currentUser?.perfil === "admin",
+      isAdmin: can(currentUser, "editarDocumentos"),
     }),
     docsModalCompany &&
       /*#__PURE__*/ React.createElement(DocumentsModal, {
