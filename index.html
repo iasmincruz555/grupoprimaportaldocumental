@@ -10702,12 +10702,16 @@ function ChatDrawer({
     "Todos os endereços das bases",
   ];
   if (!open) return null;
+  // 2026-09-25 (pedido da Iasmin: uso simultâneo do assistente e do resto
+  // da página): o .chat-overlay não tem mais fundo escurecido nem captura
+  // cliques (CSS: pointer-events: none) — por isso não há mais onClick de
+  // "fechar ao clicar fora" aqui; fechar é só pelo botão "X" no cabeçalho.
   return /*#__PURE__*/ React.createElement(
     "div",
-    { className: "chat-overlay", onClick: onClose },
+    { className: "chat-overlay" },
     /*#__PURE__*/ React.createElement(
       "div",
-      { className: "chat-drawer", onClick: (e) => e.stopPropagation() },
+      { className: "chat-drawer" },
       /*#__PURE__*/ React.createElement(
         "div",
         { className: "chat-header" },
@@ -21534,11 +21538,17 @@ function GrupoprimaPortal() {
         /* Assistente como painel lateral ancorado à direita (pedido da
            Iasmin, 2026-09-25: "voltar a ser um painel na lateral") — em vez
            de um modal centralizado, o painel agora ocupa a altura inteira
-           da tela, encostado na borda direita, com o fundo escurecido atrás
-           (mesmo comportamento de antes, só a posição/tamanho mudou). No
-           mobile continua como bottom sheet (ver media query abaixo). */
-        .chat-overlay { position: fixed; inset: 0; background: rgba(0,55,83,0.4); display: flex; align-items: stretch; justify-content: flex-end; z-index: 70; padding: 0; }
-        .chat-drawer { position: relative; width: min(420px, 100%); height: 100%; height: 100dvh; background: var(--card-bg); border-radius: 16px 0 0 16px; overflow: hidden; box-shadow: -16px 0 50px rgba(0,0,0,0.35); display: flex; flex-direction: column; z-index: 10; animation: chatDockIn 0.22s ease-out; }
+           da tela, encostado na borda direita. Atualizado em 2026-09-25
+           (pedido da Iasmin: "habilite o funcionamento simultâneo do
+           assistente e do restante das páginas") — o overlay não escurece
+           mais nem captura cliques no restante da tela (pointer-events:
+           none), então o resto do portal continua totalmente clicável/
+           utilizável com o painel aberto; só o próprio .chat-drawer (a
+           faixa visível do painel) recebe eventos de ponteiro. Fechar
+           agora é só pelo botão "X" (não há mais backdrop pra clicar).
+           No mobile continua como bottom sheet (ver media query abaixo). */
+        .chat-overlay { position: fixed; inset: 0; display: flex; align-items: stretch; justify-content: flex-end; z-index: 70; padding: 0; pointer-events: none; }
+        .chat-drawer { position: relative; width: min(420px, 100%); height: 100%; height: 100dvh; background: var(--card-bg); border-radius: 16px 0 0 16px; overflow: hidden; box-shadow: -16px 0 50px rgba(0,0,0,0.35); display: flex; flex-direction: column; z-index: 10; animation: chatDockIn 0.22s ease-out; pointer-events: auto; }
         @keyframes chatDockIn { from { transform: translateX(100%); } to { transform: translateX(0); } }
         @keyframes chatSheetIn { from { transform: translateY(100%); } to { transform: translateY(0); } }
         .chat-header { display: flex; justify-content: space-between; align-items: center; padding: 14px 16px; background: var(--azul); color: #fff; flex-shrink: 0; }
