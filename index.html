@@ -21393,22 +21393,14 @@ function GrupoprimaPortal() {
         .company-mini-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
         .company-mini { text-align: left; background: var(--card-bg); border: 1px solid var(--cinza-frio); border-radius: 10px; padding: 13px; cursor: pointer; transition: border-color 0.15s; }
         .company-mini:hover { border-color: var(--texto); }
-        /* Card "Documentações de abrangência empresarial" — precisa se
-           diferenciar dos cards de Base sem destoar do resto da interface
-           (pedido da Iasmin, 2026-09-25): antes usava uma variável CSS
-           inexistente (--azul-claro), então caía no fallback #eef4fa (quase
-           branco) — ficava sem contraste nenhum no modo escuro. Agora usa um
-           leve gradiente com o verde de marca + borda e barra superior no
-           mesmo tom, mantendo --card-bg como base (funciona nos dois temas). */
-        .company-mini-corporate { background: linear-gradient(160deg, rgba(107,254,156,0.14), var(--card-bg) 62%); border: 1px solid rgba(107,254,156,0.45); position: relative; overflow: hidden; }
-        .company-mini-corporate::before { content: ""; position: absolute; top: 0; left: 0; right: 0; height: 3px; background: var(--verde); }
-        .company-mini-corporate:hover, .company-mini-corporate:focus-visible { border-color: var(--verde); outline: none; }
-        .company-mini-corporate .company-mini-tag { color: var(--texto); }
-        .company-mini-corporate .company-mini-city { color: var(--texto); font-weight: 700; }
-        .company-mini-corporate .company-mini-city svg { color: var(--verde); }
-        .company-mini-corporate .company-mini-foot { color: var(--carvao); font-weight: 700; }
-        .company-mini-corporate .company-mini-docs-btn { background: var(--azul); color: var(--verde); border-color: transparent; font-weight: 800; }
-        .company-mini-corporate .company-mini-docs-btn:hover { background: var(--azul-2); border-color: transparent; }
+        /* Card "Documentações de abrangência empresarial" — antes usava uma
+           variável CSS inexistente (--azul-claro), então caía no fallback
+           #eef4fa (quase branco) e ficava sem contraste nenhum no modo
+           escuro. Uma primeira correção deu um tratamento diferenciado a
+           esse card, mas a Iasmin preferiu igual aos demais (pedido de
+           2026-09-25: "não queria esse em destaque... pode deixar
+           exatamente igual aos outros") — então aqui ele só herda
+           .company-mini normalmente, sem nenhuma regra própria. */
         .company-mini-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
         .company-mini-tag { font-size: 11px; font-weight: 800; color: var(--texto); text-transform: uppercase; letter-spacing: 0.03em; }
         .company-mini-name { font-size: 10px; font-weight: 500; color: var(--carvao); text-transform: none; letter-spacing: normal; opacity: 0.7; }
