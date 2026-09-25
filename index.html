@@ -21339,25 +21339,25 @@ function GrupoprimaPortal() {
         .eyebrow-pill { display: inline-block; font-size: 10.5px; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; color: var(--texto); background: rgba(107,254,156,0.14); border: 1px solid rgba(107,254,156,0.65); padding: 3px 10px; border-radius: 999px; margin: 0 0 8px; }
         .view h1 { font-family: 'Archivo', sans-serif; font-weight: 900; font-size: clamp(20px, 4.5vw, 26px); letter-spacing: -0.01em; margin: 0 0 8px; color: var(--texto); }
         .lede { color: var(--carvao); font-size: clamp(12.5px, 3vw, 14px); margin: 0; max-width: 560px; line-height: 1.5; }
-        .view-header-compact { margin-bottom: 16px; }
+        .view-header-compact { margin-bottom: 20px; }
         .view-header-compact h1 { margin: 0 0 4px; }
 
         .kpi-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 26px; }
         .kpi-grid-4 { margin-bottom: 0; }
         .kpi-grid-5 { grid-template-columns: repeat(5, 1fr); }
-        .kpi-card { background: var(--card-bg); border: 1px solid var(--cinza-frio); border-radius: 10px; padding: 14px 16px; }
-        .kpi-top { display: flex; align-items: center; gap: 7px; color: var(--carvao); margin-bottom: 10px; }
+        .kpi-card { background: var(--card-bg); border: 1px solid var(--cinza-frio); border-radius: 10px; padding: 13px 15px; }
+        .kpi-top { display: flex; align-items: center; gap: 7px; color: var(--carvao); margin-bottom: 8px; }
         .kpi-label { font-size: 12px; font-weight: 600; }
         .kpi-value { font-family: 'Archivo', sans-serif; font-weight: 900; font-size: clamp(20px, 5vw, 28px); color: var(--texto); line-height: 1; }
         .kpi-sub { font-size: 11px; color: var(--carvao); margin-top: 6px; }
         .kpi-accent .kpi-value { color: #C98A00; }
         .kpi-danger .kpi-value { color: #D64545; }
 
-        .kpi-hero-row { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; margin-bottom: 14px; }
-        .kpi-card-hero { padding: 20px 22px; }
+        .kpi-hero-row { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; margin-bottom: 16px; }
+        .kpi-card-hero { padding: 16px 18px; }
         .kpi-card-hero .kpi-label { font-size: 12.5px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.03em; }
 
-        .kpi-new-homolog-btn { display: flex; align-items: center; gap: 8px; background: var(--azul); color: var(--verde); border: none; border-radius: 10px; padding: 14px 16px; font-weight: 700; font-size: 13.5px; cursor: pointer; text-align: left; transition: background 0.15s; }
+        .kpi-new-homolog-btn { display: flex; align-items: center; gap: 8px; background: var(--azul); color: var(--verde); border: none; border-radius: 10px; padding: 13px 15px; font-weight: 700; font-size: 13.5px; cursor: pointer; text-align: left; transition: background 0.15s; }
         .kpi-new-homolog-btn:hover { background: var(--azul-2); }
         .kpi-card-hero .kpi-value { font-size: clamp(28px, 6vw, 38px); }
 
@@ -21393,8 +21393,22 @@ function GrupoprimaPortal() {
         .company-mini-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
         .company-mini { text-align: left; background: var(--card-bg); border: 1px solid var(--cinza-frio); border-radius: 10px; padding: 13px; cursor: pointer; transition: border-color 0.15s; }
         .company-mini:hover { border-color: var(--texto); }
-        .company-mini-corporate { background: var(--azul-claro, #eef4fa); border-style: dashed; }
-        .company-mini-corporate:hover { border-color: var(--texto); border-style: solid; }
+        /* Card "Documentações de abrangência empresarial" — precisa se
+           diferenciar dos cards de Base sem destoar do resto da interface
+           (pedido da Iasmin, 2026-09-25): antes usava uma variável CSS
+           inexistente (--azul-claro), então caía no fallback #eef4fa (quase
+           branco) — ficava sem contraste nenhum no modo escuro. Agora usa um
+           leve gradiente com o verde de marca + borda e barra superior no
+           mesmo tom, mantendo --card-bg como base (funciona nos dois temas). */
+        .company-mini-corporate { background: linear-gradient(160deg, rgba(107,254,156,0.14), var(--card-bg) 62%); border: 1px solid rgba(107,254,156,0.45); position: relative; overflow: hidden; }
+        .company-mini-corporate::before { content: ""; position: absolute; top: 0; left: 0; right: 0; height: 3px; background: var(--verde); }
+        .company-mini-corporate:hover, .company-mini-corporate:focus-visible { border-color: var(--verde); outline: none; }
+        .company-mini-corporate .company-mini-tag { color: var(--texto); }
+        .company-mini-corporate .company-mini-city { color: var(--texto); font-weight: 700; }
+        .company-mini-corporate .company-mini-city svg { color: var(--verde); }
+        .company-mini-corporate .company-mini-foot { color: var(--carvao); font-weight: 700; }
+        .company-mini-corporate .company-mini-docs-btn { background: var(--azul); color: var(--verde); border-color: transparent; font-weight: 800; }
+        .company-mini-corporate .company-mini-docs-btn:hover { background: var(--azul-2); border-color: transparent; }
         .company-mini-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
         .company-mini-tag { font-size: 11px; font-weight: 800; color: var(--texto); text-transform: uppercase; letter-spacing: 0.03em; }
         .company-mini-name { font-size: 10px; font-weight: 500; color: var(--carvao); text-transform: none; letter-spacing: normal; opacity: 0.7; }
@@ -21439,9 +21453,9 @@ function GrupoprimaPortal() {
         .empresa-card-unica-corp-toggle[aria-expanded="true"] { border-color: var(--verde); background: rgba(107,254,156,0.08); }
         .table-wrap { background: var(--card-bg); border: 1px solid var(--cinza-frio); border-radius: 10px; overflow: hidden; }
         .company-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-        .company-table th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--carvao); background: var(--branco-frio); padding: 10px 14px; font-weight: 700; }
-        .company-table td { padding: 12px 14px; border-top: 1px solid var(--cinza-frio); vertical-align: middle; }
-        .company-table tr:not(thead tr) { cursor: pointer; }
+        .company-table th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--carvao); background: var(--branco-frio); padding: 11px 16px; font-weight: 700; border-bottom: 1px solid var(--cinza-frio); }
+        .company-table td { padding: 13px 16px; border-top: 1px solid var(--cinza-frio); vertical-align: middle; }
+        .company-table tr:not(thead tr) { cursor: pointer; transition: background 0.1s; }
         .company-table tr:hover td { background: var(--branco-frio); }
         .cell-company { display: flex; flex-direction: column; gap: 2px; }
         .cell-company-name { font-weight: 700; color: var(--texto); }
@@ -21728,22 +21742,33 @@ function GrupoprimaPortal() {
         .filters-modal-head { display: flex; justify-content: space-between; align-items: center; padding: 14px 18px; border-bottom: 1px solid var(--cinza-frio); font-weight: 800; color: var(--texto); }
         .icon-btn-dark { background: none; border: none; color: var(--carvao); cursor: pointer; }
         .filters-modal-body { padding: 14px 18px; display: flex; flex-direction: column; gap: 14px; }
-        .filter-field { display: flex; flex-direction: column; gap: 6px; font-size: 12px; font-weight: 700; color: var(--texto); }
+        .filter-field { display: flex; flex-direction: column; gap: 4px; font-size: 10.5px; font-weight: 700; letter-spacing: 0.03em; text-transform: uppercase; color: var(--carvao); }
         .filter-field input, .filter-field select {
-          border: 1px solid var(--cinza-frio); border-radius: 8px; padding: 10px 11px; font-size: 13px;
-          color: var(--texto); background: var(--card-bg); outline: none; font-family: inherit; transition: border-color 0.15s;
+          border: 1px solid var(--cinza-frio); border-radius: 7px; padding: 8px 10px; font-size: 12.5px;
+          color: var(--texto); background: var(--branco-frio); outline: none; font-family: inherit; transition: border-color 0.15s;
+          font-weight: 500; text-transform: none; letter-spacing: normal;
         }
         .filter-field input:focus, .filter-field select:focus { border-color: var(--texto); }
         .filters-modal-actions { display: flex; gap: 10px; padding: 14px 18px 20px; }
         .filters-clear-btn { flex: 1; background: var(--branco-frio); border: 1px solid var(--cinza-frio); color: var(--texto); font-weight: 700; padding: 11px; border-radius: 8px; cursor: pointer; }
         .filters-apply-btn { flex: 1; background: var(--azul); border: none; color: var(--verde); font-weight: 800; padding: 11px; border-radius: 8px; cursor: pointer; }
 
-        /* ---- Barra de filtros em destaque (desktop) ---- */
-        .filters-bar { background: var(--card-bg); border: 1px solid var(--cinza-frio); border-radius: 12px; padding: 16px 18px; margin-bottom: 16px; display: flex; align-items: flex-end; gap: 20px; flex-wrap: wrap; }
-        .filters-bar-head { display: flex; align-items: center; gap: 7px; font-family: 'Archivo', sans-serif; font-weight: 900; font-size: 12.5px; letter-spacing: 0.03em; text-transform: uppercase; color: var(--texto); flex-basis: 100%; margin-bottom: 2px; }
-        .filters-bar-fields { display: flex; gap: 16px; flex: 1; flex-wrap: wrap; }
-        .filters-bar-fields .filter-field { min-width: 170px; }
-        .filters-clear-inline { flex: none; padding: 10px 16px; margin-bottom: 0; }
+        /* ---- Barra de filtros em destaque (desktop) ----
+           Redesenho compacto (pedido da Iasmin, 2026-09-25): os filtros são
+           uma ferramenta de apoio, não o elemento principal da página, então
+           viraram uma única linha discreta — rótulo "FILTROS" + campos
+           menores lado a lado + botão "Limpar filtros" compacto — em vez do
+           bloco pesado de duas linhas com campos grandes de antes. Aplica-se
+           a TODAS as telas que reaproveitam .filters-bar (Empresas,
+           Homologação, Envio em Lote, Auditoria, Análise de Clientes), então
+           o ajuste é só aqui — nunca por tela. */
+        .filters-bar { background: var(--card-bg); border: 1px solid var(--cinza-frio); border-radius: 10px; padding: 10px 14px; margin: 22px 0 26px; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+        .filters-bar-head { display: flex; align-items: center; gap: 6px; font-family: 'Archivo', sans-serif; font-weight: 800; font-size: 10.5px; letter-spacing: 0.05em; text-transform: uppercase; color: var(--carvao); flex: 0 0 auto; margin-bottom: 0; white-space: nowrap; }
+        .filters-bar-head svg { width: 13px; height: 13px; flex-shrink: 0; }
+        .filters-bar-fields { display: flex; gap: 10px; flex: 0 1 auto; flex-wrap: wrap; align-items: flex-end; }
+        .filters-bar-fields .filter-field { min-width: 124px; }
+        .filter-field-date { min-width: 136px; }
+        .filters-clear-inline { flex: none; margin-left: auto; padding: 7px 13px; margin-bottom: 0; font-size: 11.5px; }
         @media (min-width: 1024px) {
           .homolog-filters-bar .filters-bar-fields { flex-wrap: nowrap; }
           .homolog-filters-bar .filter-field { min-width: 0; flex: 1 1 0; }
