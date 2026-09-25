@@ -2502,20 +2502,31 @@ function can(user, chave) {
    ---------------------------------------------------------------------
    Evolução de uma etapa anterior em que só havia 1 usuário nomeado
    (Iasmin) e qualquer outro e-mail entrava com uma senha compartilhada.
-   Agora só entra quem tem uma conta criada (pelo Administrador, na tela
-   "Meu Perfil" → "Gerenciar usuários") — mudança de comportamento
-   deliberada, pedida junto com o sistema de permissões (item 14 do
-   pedido: criar usuário é ação exclusiva do Administrador).
+   Depois, passou a só entrar quem tinha uma conta criada pelo
+   Administrador. Agora (pedido da Iasmin, 2026-09-25) as duas formas
+   coexistem: o Administrador continua podendo criar contas em "Gerenciar
+   usuários" (perfil escolhido na hora, senha inicial padrão), E qualquer
+   pessoa com e-mail @PORTAL_EMAIL_DOMAIN pode se autocadastrar direto na
+   tela de login ("Primeiro acesso? Cadastre-se"), escolhendo a própria
+   senha — ver `registrarNovoUsuario`. Autocadastro sempre entra como
+   perfil "usuario" (o menos privilegiado) — só o Administrador pode
+   elevar pra Comercial/Administrador depois, em "Gerenciar usuários".
    Senha: nunca gravada em texto puro — `hashSenha()` usa
    crypto.subtle.digest quando disponível (SHA-256), com um fallback
    simples (não criptográfico, mas nunca texto puro) para ambientes sem
    Web Crypto. `PORTAL_PASSWORD` continua existindo só como a senha inicial
-   padrão de todo usuário recém-criado (item 8 do pedido) — nunca mais
-   comparada diretamente, sempre em hash.
+   padrão de conta criada pelo Administrador (item 8 do pedido original)
+   — nunca mais comparada diretamente, sempre em hash.
    // API REAL AQUI: quando houver backend de autenticação de verdade,
    // authenticate() passa a ser POST /api/auth/login com { email, senha }.
    ========================================================================= */ const PORTAL_PASSWORD =
   "grupoprima123";
+/** PORTAL_EMAIL_DOMAIN: único domínio aceito no autocadastro (pedido
+ *  explícito da Iasmin: "o cadastro pode ser feito apenas por usuários com
+ *  grupoprimalog.com.br"). Não afeta contas criadas pelo Administrador em
+ *  "Gerenciar usuários" — lá o e-mail é sempre uma escolha do
+ *  Administrador, sem essa restrição (ele pode cadastrar quem quiser). */ const PORTAL_EMAIL_DOMAIN =
+  "grupoprimalog.com.br";
 async function hashSenha(senha) {
   const texto = String(senha || "");
   if (
@@ -2651,6 +2662,70 @@ async function findPortalUserAsync(email) {
       perfil: knownUser.perfil,
       precisaTrocarSenha: !!knownUser.precisaTrocarSenha,
       preferencias: knownUser.preferencias || DEFAULT_PREFERENCIAS_USUARIO,
+    },
+  };
+}
+/** registrarNovoUsuario: autocadastro a partir da tela de login ("Primeiro
+ *  acesso? Cadastre-se", pedido da Iasmin, 2026-09-25). Só e-mails
+ *  @PORTAL_EMAIL_DOMAIN passam; a pessoa escolhe a própria senha na hora
+ *  (por isso `precisaTrocarSenha` já nasce `false`, diferente de uma conta
+ *  criada pelo Administrador). Perfil sempre "usuario" — o menos
+ *  privilegiado — só o Administrador eleva depois, se for o caso. Retorna
+ *  { ok:true, user } no mesmo formato de `authenticate()`, pra permitir
+ *  logar direto após o cadastro, sem pedir a senha de novo. */ async function registrarNovoUsuario(
+  { nome, email, senha },
+) {
+  const trimmedNome = (nome || "").trim();
+  const trimmedEmail = (email || "").trim();
+  if (!trimmedNome) return { ok: false, message: "Informe seu nome completo." };
+  if (!trimmedEmail)
+    return { ok: false, message: "Informe seu e-mail corporativo." };
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail))
+    return { ok: false, message: "Informe um e-mail em formato válido." };
+  if (!trimmedEmail.toLowerCase().endsWith("@" + PORTAL_EMAIL_DOMAIN))
+    return {
+      ok: false,
+      message: `O cadastro é permitido apenas para e-mails @${PORTAL_EMAIL_DOMAIN}.`,
+    };
+  if (!senha) return { ok: false, message: "Crie uma senha." };
+  if (!senhaAtendeRequisitoMinimo(senha))
+    return { ok: false, message: REQUISITO_SENHA_MSG };
+  const usuariosAtuais = await listUsersDb();
+  if (
+    usuariosAtuais.some(
+      (u) => (u.email || "").trim().toLowerCase() === trimmedEmail.toLowerCase(),
+    )
+  )
+    return {
+      ok: false,
+      message: "Este e-mail já tem cadastro. Faça login normalmente.",
+    };
+  const senhaHash = await hashSenha(senha);
+  const novo = {
+    id: slugUserId(trimmedEmail),
+    nome: trimmedNome,
+    email: trimmedEmail,
+    perfil: "usuario",
+    senhaHash,
+    precisaTrocarSenha: false,
+    status: "ativo",
+    criadoEm: new Date().toISOString(),
+    criadoPor: "autocadastro",
+    ultimoAcesso: null,
+    preferencias: DEFAULT_PREFERENCIAS_USUARIO,
+  };
+  const ok = await salvarUsuarioDb(novo);
+  if (!ok)
+    return { ok: false, message: "Não foi possível concluir o cadastro agora. Tente novamente." };
+  return {
+    ok: true,
+    user: {
+      id: novo.id,
+      nome: novo.nome,
+      email: novo.email,
+      perfil: novo.perfil,
+      precisaTrocarSenha: false,
+      preferencias: novo.preferencias,
     },
   };
 }
@@ -2869,6 +2944,7 @@ const AUDIT_ACTION_LABELS = {
   // Novas ações — "Meu Perfil" e sistema de permissões (pedido da Iasmin,
   // 2026-09-25).
   trocou_senha: "Alterou a própria senha",
+  cadastrou_propria_conta: "Criou a própria conta (autocadastro)",
   atualizou_preferencias: "Atualizou preferências",
   criou_usuario: "Criou usuário",
   editou_usuario: "Editou usuário",
@@ -4653,6 +4729,30 @@ function formatDocDescricao(doc) {
   if (tamanho) partes.push(tamanho);
   return partes.join(" · ");
 }
+/** formatValidadeResumo: frase objetiva sobre a validade REAL de um
+ *  documento, a partir só do que já está no cadastro (`doc.validade`/
+ *  `doc.status`, preenchidos na indexação a partir do texto real do
+ *  arquivo — `extractDataValidade`/`computeDocStatus` — nunca um valor
+ *  inventado aqui). Fonte única tanto para o cartão do documento
+ *  (DocResultCard) quanto para a resposta do assistente quando a pergunta
+ *  é sobre a validade de um documento específico (pedido explícito da
+ *  Iasmin, 2026-09-25: "quero que o assistente seja capaz de dizer a
+ *  validade de qualquer documento que possua o registro no portal"). */
+function formatValidadeResumo(doc) {
+  if (!doc) return "não informado";
+  if (!doc.validade) return "sem vencimento aplicável";
+  const dias = daysUntil(doc.validade);
+  if (doc.status === "vencido") {
+    return `venceu em ${doc.validade}${dias !== null ? ` (há ${Math.abs(dias)} dia${Math.abs(dias) === 1 ? "" : "s"})` : ""}`;
+  }
+  if (doc.status === "proximo") {
+    return `válido até ${doc.validade}${dias !== null ? ` (vence em ${dias} dia${dias === 1 ? "" : "s"})` : ""}`;
+  }
+  if (doc.status === "nao_identificado") {
+    return `${doc.validade} — data não pôde ser confirmada, verifique o cadastro do documento`;
+  }
+  return `válido até ${doc.validade}`;
+}
 /** DocTituloEditable: título do documento (curto, objetivo, independente do
  *  nome do arquivo original — item 2/6) sempre editável pelo usuário. Salva
  *  diretamente no registro em `documentos_confirmados` (capability "db");
@@ -6251,12 +6351,30 @@ function parseIntent(text) {
     /numero (do )?cnpj|qual\s+(e\s+|eh\s+)?o\s+(numero|n[ºo])\b|quanto\s+e\b/.test(
       t,
     );
+  // Pergunta sobre a VALIDADE/vencimento de um documento ESPECÍFICO (pedido
+  // explícito da Iasmin, 2026-09-25: "quero que o assistente seja capaz de
+  // dizer a validade de qualquer documento que possua o registro no
+  // portal") — ex.: "qual a validade da CND Federal", "quando vence o
+  // alvará de MG", "a apólice RCTR-C está vencida?". Também é um pedido de
+  // puro DADO (a data), não o arquivo — mesmo espírito de `wantsValueOnly`
+  // acima, mas para validade em vez de número de CNPJ. Só entra quando um
+  // tipo/categoria foi reconhecido na frase; sem isso, "documentos
+  // vencidos" genérico continua sendo tratado à parte (panorama da base
+  // inteira, em tryAnalyticQuery) — nunca os dois disputando a mesma
+  // pergunta.
+  const wantsValidadeOnly =
+    /\bvalidade\b|\bvencimento\b|\bvence\b|vence[m]?\s+em\b|venc(eu|ido|ida)\b|v[áa]lid[oa]\s+at[ée]|quando\s+vence|\bexpira/.test(
+      t,
+    );
   if (wantsAll)
     return { intent: "DOWNLOAD_ALL_DOCUMENTS", types, categories, seguroCliente, afeAtividade, anoDocumento };
   if (wantsList)
     return { intent: "LIST_COMPANY_DOCUMENTS", types, categories, seguroCliente, afeAtividade, anoDocumento };
   if (wantsCategories)
     return { intent: "LIST_DOCUMENT_CATEGORIES", types, categories, seguroCliente, afeAtividade, anoDocumento };
+  if (wantsValidadeOnly && (types.length > 0 || categories.length > 0)) {
+    return { intent: "DOCUMENT_FIELD_VALIDADE", types, categories, seguroCliente, afeAtividade, anoDocumento };
+  }
   if (
     (types.length > 1 ||
       categories.length > 1 ||
@@ -8906,7 +9024,11 @@ function DocFamilyHistory({
       visibleVersions.map((v, i) =>
         /*#__PURE__*/ React.createElement(
           "div",
-          { key: v.id, className: "timeline-item" },
+          {
+            key: v.id,
+            id: i === 0 ? "doc-anchor-" + v.id : undefined,
+            className: "timeline-item",
+          },
           /*#__PURE__*/ React.createElement("span", {
             className:
               "timeline-dot" + (i === 0 ? " timeline-dot-current" : ""),
@@ -9021,8 +9143,34 @@ function CompanyDetailView({
   onView,
   onOpenChat,
   isAdmin,
+  docTarget,
+  onDocTargetConsumed,
 }) {
   const [expanded, setExpanded] = useState("cnpj");
+  // docTarget: leva direto a um documento específico clicado no título de um
+  // cartão do chat (pedido explícito da Iasmin, 2026-09-25) — expande a
+  // categoria certa e rola/destaca a linha do documento (id "doc-anchor-" +
+  // doc.id, escrito no doc-row de versão única e na versão ATUAL dentro de
+  // DocFamilyHistory, mais abaixo). Semente consumida uma vez (mesmo
+  // mecanismo de chatSeed/companiesOpenCorporate no App): só age quando o
+  // alvo é desta mesma Base — abrir outra Base por outro caminho enquanto
+  // um alvo antigo ainda não foi consumido nunca rola/destaca à toa.
+  useEffect(() => {
+    if (!docTarget || docTarget.companyId !== company.id) return;
+    setExpanded(docTarget.categoria);
+    const targetId = docTarget.docId;
+    onDocTargetConsumed?.();
+    const timer = setTimeout(() => {
+      const el = document.getElementById("doc-anchor-" + targetId);
+      if (el) {
+        el.scrollIntoView({ behavior: "smooth", block: "center" });
+        el.classList.add("doc-anchor-highlight");
+        setTimeout(() => el.classList.remove("doc-anchor-highlight"), 2400);
+      }
+    }, 80);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [docTarget, company.id]);
   // Documentos de abrangência empresarial (válidos para todas as Bases) NÃO
   // devem ser contados/exibidos aqui como se fossem próprios desta Base —
   // eles têm seu próprio painel em "Bases" ("Documentações de abrangência
@@ -9313,7 +9461,11 @@ function CompanyDetailView({
                       })
                     : /*#__PURE__*/ React.createElement(
                         "div",
-                        { key: family.versions[0].id, className: "doc-row" },
+                        {
+                          key: family.versions[0].id,
+                          id: "doc-anchor-" + family.versions[0].id,
+                          className: "doc-row",
+                        },
                         /*#__PURE__*/ React.createElement(
                           "div",
                           { className: "doc-row-main" },
@@ -9394,10 +9546,23 @@ function CompanyDetailView({
   onNotify,
   onView,
   isAdmin,
+  onOpenDocument,
 }) {
   const [busy, setBusy] = useState(null);
   const catLabel =
     CATEGORIES.find((c) => c.key === doc.categoria)?.label || doc.categoria;
+  // onOpenDocument (pedido explícito da Iasmin, 2026-09-25: "ao clicar no
+  // título de uma documentação que foi solicitada pelo assistente, você é
+  // encaminhado a onde ela está dentro do portal") — só existe quando este
+  // card está sendo exibido dentro do chat (ChatDrawer o passa); em
+  // qualquer outro contexto que reaproveite DocResultCard no futuro sem
+  // fornecer essa função, o título simplesmente continua não-clicável, como
+  // sempre foi.
+  const canLocate = typeof onOpenDocument === "function";
+  function handleLocate(e) {
+    e.stopPropagation();
+    onOpenDocument(company, doc);
+  }
   async function handleDownload() {
     setBusy("download");
     await downloadDocument(company, doc, { onNotify });
@@ -9417,7 +9582,21 @@ function CompanyDetailView({
       /*#__PURE__*/ React.createElement(FileText, { size: 16 }),
       /*#__PURE__*/ React.createElement(
         "span",
-        { className: "doc-card-title" },
+        {
+          className: "doc-card-title" + (canLocate ? " doc-card-title-link" : ""),
+          onClick: canLocate ? handleLocate : undefined,
+          role: canLocate ? "button" : undefined,
+          tabIndex: canLocate ? 0 : undefined,
+          title: canLocate ? "Ver esta documentação no portal" : undefined,
+          onKeyDown: canLocate
+            ? (e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  handleLocate(e);
+                }
+              }
+            : undefined,
+        },
         /*#__PURE__*/ React.createElement(DocTituloEditable, {
           doc: doc,
           onNotify: onNotify,
@@ -9475,6 +9654,8 @@ function CompanyDetailView({
       /*#__PURE__*/ React.createElement("span", null, doc.formato),
       /*#__PURE__*/ React.createElement("span", null, "Emitido em"),
       /*#__PURE__*/ React.createElement("span", null, doc.emissao),
+      /*#__PURE__*/ React.createElement("span", null, "Validade"),
+      /*#__PURE__*/ React.createElement("span", null, formatValidadeResumo(doc)),
       /*#__PURE__*/ React.createElement("span", null, "Versão"),
       /*#__PURE__*/ React.createElement("span", null, doc.versao),
       /*#__PURE__*/ React.createElement("span", null, "Tamanho"),
@@ -9557,7 +9738,7 @@ function DocMiniRow({ company, doc, onNotify }) {
  *  direto), com um botão "Ver mais" que troca a própria linha pelo card
  *  completo de sempre (DocResultCard, sem duplicar nenhuma lógica de
  *  visualizar/baixar/editar título) — "Ver menos" volta pra linha compacta. */
-function DocMultiCompanyRow({ company, doc, onNotify, onView, isAdmin }) {
+function DocMultiCompanyRow({ company, doc, onNotify, onView, isAdmin, onOpenDocument }) {
   const [expanded, setExpanded] = useState(false);
   const [busy, setBusy] = useState(false);
   const baseLabel = company.tipo === "Matriz" ? "Matriz" : `Filial ${company.id}`;
@@ -9580,6 +9761,7 @@ function DocMultiCompanyRow({ company, doc, onNotify, onView, isAdmin }) {
         onNotify,
         onView,
         isAdmin,
+        onOpenDocument,
       }),
     );
   }
@@ -9760,6 +9942,7 @@ function ChatMessage({
   onPdfMergeClick,
   onNotify,
   onOpenCompany,
+  onOpenDocument,
   onView,
   isAdmin,
 }) {
@@ -9790,6 +9973,7 @@ function ChatMessage({
         onNotify: onNotify,
         onView: onView,
         isAdmin: isAdmin,
+        onOpenDocument: onOpenDocument,
       }),
     );
   }
@@ -9888,6 +10072,7 @@ function ChatMessage({
               onNotify: onNotify,
               onView: onView,
               isAdmin: isAdmin,
+              onOpenDocument: onOpenDocument,
             }),
           ),
         ),
@@ -10051,6 +10236,7 @@ function ChatDrawer({
   totals,
   onNotify,
   onOpenCompany,
+  onOpenDocument,
   onView,
   screenContext,
   seedQuery,
@@ -10300,6 +10486,55 @@ function ChatDrawer({
       notFound: notFoundLabels,
       zipState: "idle",
       zipName,
+    });
+    lastFoundRef.current = { company, docs: found };
+    return { found, notFoundLabels };
+  }
+  /** handleValidadeIntent: pergunta de puro DADO sobre a validade/vencimento
+   *  de um documento específico (ex.: "qual a validade da CND Federal",
+   *  "quando vence o alvará de MG", "a apólice RCTR-C está vencida?") —
+   *  pedido explícito da Iasmin, 2026-09-25: antes disso, esse tipo de
+   *  pergunta caía no fluxo normal de entrega (`handleDocumentIntent`), que
+   *  exibe o cartão do documento — mas o cartão nem chegava a mostrar a
+   *  validade, então a pergunta nunca era respondida de verdade. Reaproveita
+   *  a MESMA busca já usada para entrega (searchDocuments) — nunca uma
+   *  lógica paralela de localizar documento — mas responde em TEXTO com a
+   *  validade real de cada documento encontrado (via `formatValidadeResumo`,
+   *  a mesma função que agora também aparece no cartão do documento), sem
+   *  entregar o arquivo — a pessoa pediu o dado, não o arquivo. */
+  function handleValidadeIntent(rawText, parsed, company) {
+    const { found, notFoundLabels } = searchDocuments({
+      company,
+      wantedTypeKeys: parsed.types,
+      wantedCategoryKeys: parsed.categories,
+      seguroCliente: parsed.seguroCliente || null,
+      afeAtividade: parsed.afeAtividade || null,
+      anoDocumento: parsed.anoDocumento || null,
+    });
+    const localLabel = company.tipo === "Matriz" ? "a Matriz" : `a Filial ${company.id}`;
+    if (found.length === 0) {
+      pushMessage({
+        role: "assistant",
+        type: "text",
+        text: `Não localizei ${notFoundLabels.length > 0 ? notFoundLabels.join(", ") : "o documento solicitado"} para ${localLabel} no sistema atual, então não tenho como informar a validade.`,
+      });
+      return { found, notFoundLabels };
+    }
+    const linhas = found.map(
+      (d) => `${docTituloExibido(d)}${d.abrangencia === "empresa" || d.abrangencia === "corporativa" ? " (Empresa — Grupoprima Logística)" : ""}: ${formatValidadeResumo(d)}.`,
+    );
+    const intro =
+      found.length === 1
+        ? `Validade do documento encontrado para ${localLabel}:`
+        : `Validade dos ${found.length} documentos encontrados para ${localLabel}:`;
+    pushMessage({
+      role: "assistant",
+      type: "text",
+      text:
+        `${intro}\n${linhas.join("\n")}` +
+        (notFoundLabels.length > 0
+          ? `\nNão localizado no sistema atual: ${notFoundLabels.join(", ")}.`
+          : ""),
     });
     lastFoundRef.current = { company, docs: found };
     return { found, notFoundLabels };
@@ -10845,6 +11080,23 @@ function ChatDrawer({
         return;
       }
     }
+    if (parsed.intent === "DOCUMENT_FIELD_VALIDADE") {
+      // Mesmo padrão de default-para-Matriz já usado para entrega de
+      // documento sem base citada (pedido explícito da Iasmin, 2026-09-22):
+      // sem base identificada nem pelo texto nem pelo contexto da
+      // conversa, assume a Matriz em vez de travar pedindo esclarecimento.
+      const alvo = company || companies.find((c) => c.tipo === "Matriz") || null;
+      if (!alvo) {
+        pushMessage({
+          role: "assistant",
+          type: "text",
+          text: 'Encontrei o tipo de documento, mas preciso saber de qual base — cite o município, "matriz" ou o número da filial (ex.: "0004").',
+        });
+        return;
+      }
+      handleValidadeIntent(text, parsed, alvo);
+      return;
+    }
     if (
       parsed.intent === "LIST_COMPANY_DOCUMENTS" ||
       parsed.intent === "LIST_DOCUMENT_CATEGORIES"
@@ -11090,6 +11342,7 @@ function ChatDrawer({
             onPdfMergeClick: handlePdfMergeClick,
             onNotify: onNotify,
             onOpenCompany: onOpenCompany,
+            onOpenDocument: onOpenDocument,
             onView: onView,
             isAdmin: isAdmin,
           }),
@@ -11143,6 +11396,7 @@ function ChatDrawer({
  *  exibido — pdf.js decodifica os bytes e desenha no canvas, sem depender
  *  de nenhum visualizador nativo. */ function PdfCanvasViewer({ bytes }) {
   const canvasRef = useRef(null);
+  const textLayerRef = useRef(null);
   const [pdfDoc, setPdfDoc] = useState(null);
   const [pageNum, setPageNum] = useState(1);
   const [numPages, setNumPages] = useState(0);
@@ -11176,6 +11430,7 @@ function ChatDrawer({
   useEffect(() => {
     if (!pdfDoc || !canvasRef.current) return;
     let cancelled = false;
+    let textLayerTask = null;
     pdfDoc
       .getPage(pageNum)
       .then((page) => {
@@ -11194,12 +11449,45 @@ function ChatDrawer({
         canvas.height = viewport.height;
         const ctx = canvas.getContext("2d");
         page.render({ canvasContext: ctx, viewport }).promise.catch(() => {});
+        // Camada de texto selecionável por cima do canvas (pedido da
+        // Iasmin, 2026-09-25: "possível copiar conteúdo de dentro dos
+        // PDFs"). O canvas acima é só pixels desenhados — pdf.js nunca
+        // deixaria copiar texto dali. `renderTextLayer` cria um <span>
+        // invisível (cor transparente) posicionado exatamente sobre cada
+        // palavra real do PDF, usando o texto de verdade embutido no
+        // arquivo — mesma técnica do visualizador oficial do pdf.js, nunca
+        // OCR (isso já existia só como apoio à classificação automática,
+        // nunca visível aqui). Some sozinho, sem quebrar nada, se esta
+        // versão da lib não expuser `renderTextLayer` (build antiga/CDN
+        // fora do ar) — a pré-visualização continua funcionando, só sem
+        // seleção de texto, exatamente como era antes desta mudança.
+        const textLayerDiv = textLayerRef.current;
+        if (
+          textLayerDiv &&
+          typeof window.pdfjsLib.renderTextLayer === "function"
+        ) {
+          textLayerDiv.innerHTML = "";
+          page
+            .getTextContent()
+            .then((textContent) => {
+              if (cancelled || textLayerRef.current !== textLayerDiv) return;
+              textLayerTask = window.pdfjsLib.renderTextLayer({
+                textContent,
+                container: textLayerDiv,
+                viewport,
+                textDivs: [],
+              });
+              textLayerTask.promise.catch(() => {});
+            })
+            .catch(() => {}); // sem texto extraível (ex.: PDF só-imagem/escaneado) — canvas continua igual, só não fica selecionável
+        }
       })
       .catch(() => {
         if (!cancelled) setStatus("error");
       });
     return () => {
       cancelled = true;
+      if (textLayerTask) textLayerTask.cancel();
     };
   }, [pdfDoc, pageNum]);
   if (status === "error") {
@@ -11219,10 +11507,18 @@ function ChatDrawer({
   return /*#__PURE__*/ React.createElement(
     "div",
     { className: "viewer-pdf-wrap" },
-    /*#__PURE__*/ React.createElement("canvas", {
-      ref: canvasRef,
-      className: "viewer-pdf-canvas",
-    }),
+    /*#__PURE__*/ React.createElement(
+      "div",
+      { className: "viewer-pdf-page" },
+      /*#__PURE__*/ React.createElement("canvas", {
+        ref: canvasRef,
+        className: "viewer-pdf-canvas",
+      }),
+      /*#__PURE__*/ React.createElement("div", {
+        ref: textLayerRef,
+        className: "viewer-pdf-textlayer",
+      }),
+    ),
     numPages > 1 &&
       /*#__PURE__*/ React.createElement(
         "div",
@@ -21197,16 +21493,33 @@ function AuditLogView({ companies }) {
         .login-submit:disabled { opacity: 0.75; cursor: default; }
         .login-submit-secondary { background: none; color: var(--carvao); box-shadow: none; text-transform: none; font-family: inherit; font-weight: 700; letter-spacing: 0; margin-top: 10px; }
         .login-submit-secondary:hover { filter: none; color: var(--texto); }
+        /* Link pequeno "Primeiro acesso? Cadastre-se" / "Já tem conta? Entrar"
+           (pedido da Iasmin, 2026-09-25) — deliberadamente discreto (texto
+           simples, sem virar outro botão cheio), logo abaixo do botão
+           principal. */
+        .login-alt-link { display: block; width: 100%; text-align: center; background: none; border: none; padding: 0; margin-top: 16px; font-size: 12.5px; font-weight: 700; color: var(--carvao); cursor: pointer; }
+        .login-alt-link:hover { color: var(--azul); text-decoration: underline; }
+        .login-domain-hint { font-size: 10.5px; font-weight: 500; color: var(--carvao); margin-top: 4px; }
         .login-footer { margin-top: 24px; padding-top: 18px; border-top: 1px solid var(--cinza-frio); font-size: 10.5px; color: var(--carvao); text-align: center; letter-spacing: 0.02em; }
       `;
 function LoginScreen({
   onLogin,
 }) {
+  const [mode, setMode] = useState("login"); // "login" | "cadastro" — item pedido pela Iasmin, 2026-09-25
+  const [nome, setNome] = useState("");
   const [email, setEmail] = useState("");
   const [senha, setSenha] = useState("");
+  const [confirmarSenha, setConfirmarSenha] = useState("");
   const [showSenha, setShowSenha] = useState(false);
+  const [showConfirmarSenha, setShowConfirmarSenha] = useState(false);
   const [error, setError] = useState("");
   const [status, setStatus] = useState("idle"); // idle | loading | success
+  function entrarComoLogado(result) {
+    setStatus("success");
+    setAuditSessionUser(result.user?.nome || result.user?.email || null);
+    registrarAcessoUsuario(result.user?.id);
+    setTimeout(() => onLogin(result.user), 260);
+  }
   // authenticate() agora é assíncrona (consulta a coleção "users" + calcula
   // o hash da senha) — "loading" cobre esse intervalo sem travar a UI.
   async function handleSubmit() {
@@ -21222,17 +21535,43 @@ function LoginScreen({
       setError(result.message);
       return;
     }
-    setStatus("success");
-    setAuditSessionUser(result.user?.nome || result.user?.email || null);
     logDocumentAction("login", { email: email.trim() }); // pequena transição antes de revelar o portal, conforme pedido
-    registrarAcessoUsuario(result.user?.id);
-    setTimeout(() => onLogin(result.user), 260);
+    entrarComoLogado(result);
+  }
+  // registrarNovoUsuario (autocadastro): só @PORTAL_EMAIL_DOMAIN, perfil
+  // sempre "usuario" — ver comentário completo na definição da função.
+  async function handleCadastro() {
+    if (status === "loading" || status === "success") return;
+    setError("");
+    if (senha !== confirmarSenha) {
+      setError("A confirmação deve ser exatamente igual à senha.");
+      return;
+    }
+    setStatus("loading");
+    const result = await registrarNovoUsuario({ nome, email, senha }).catch(() => ({
+      ok: false,
+      message: "Não foi possível concluir o cadastro agora. Tente novamente.",
+    }));
+    if (!result.ok) {
+      setStatus("idle");
+      setError(result.message);
+      return;
+    }
+    logDocumentAction("cadastrou_propria_conta", { email: email.trim() });
+    entrarComoLogado(result);
   }
   function handleFieldKeyDown(e) {
     if (e.key === "Enter") {
       e.preventDefault();
-      handleSubmit();
+      mode === "cadastro" ? handleCadastro() : handleSubmit();
     }
+  }
+  function toggleMode() {
+    if (status === "loading" || status === "success") return;
+    setError("");
+    setSenha("");
+    setConfirmarSenha("");
+    setMode((m) => (m === "login" ? "cadastro" : "login"));
   }
   return /*#__PURE__*/ React.createElement(
     "div",
@@ -21265,12 +21604,14 @@ function LoginScreen({
       /*#__PURE__*/ React.createElement(
         "h1",
         { className: "login-title" },
-        "Portal Documental",
+        mode === "cadastro" ? "Criar conta" : "Portal Documental",
       ),
       /*#__PURE__*/ React.createElement(
         "p",
         { className: "login-sub" },
-        "Acesse o ambiente corporativo",
+        mode === "cadastro"
+          ? `Cadastro disponível para e-mails @${PORTAL_EMAIL_DOMAIN}`
+          : "Acesse o ambiente corporativo",
       ),
       error &&
         /*#__PURE__*/ React.createElement(
@@ -21280,75 +21621,213 @@ function LoginScreen({
           " ",
           error,
         ),
-      /*#__PURE__*/ React.createElement(
-        "div",
-        null,
-        /*#__PURE__*/ React.createElement(
-          "div",
-          { className: "login-field" },
-          /*#__PURE__*/ React.createElement(
-            "label",
+      mode === "cadastro"
+        ? /*#__PURE__*/ React.createElement(
+            "div",
             null,
-            "E-mail corporativo",
-          ),
-          /*#__PURE__*/ React.createElement(
-            "div",
-            { className: "login-field-input-wrap" },
-            /*#__PURE__*/ React.createElement(Mail, { size: 15 }),
-            /*#__PURE__*/ React.createElement("input", {
-              type: "email",
-              autoComplete: "username",
-              autoFocus: true,
-              value: email,
-              onChange: (e) => setEmail(e.target.value),
-              onKeyDown: handleFieldKeyDown,
-              placeholder: "Digite seu e-mail",
-            }),
-          ),
-        ),
-        /*#__PURE__*/ React.createElement(
-          "div",
-          { className: "login-field" },
-          /*#__PURE__*/ React.createElement("label", null, "Senha"),
-          /*#__PURE__*/ React.createElement(
-            "div",
-            { className: "login-field-input-wrap" },
-            /*#__PURE__*/ React.createElement(Lock, { size: 15 }),
-            /*#__PURE__*/ React.createElement("input", {
-              type: showSenha ? "text" : "password",
-              "data-pwvisible": showSenha ? "true" : "false",
-              autoComplete: "current-password",
-              value: senha,
-              onChange: (e) => setSenha(e.target.value),
-              onKeyDown: handleFieldKeyDown,
-              placeholder: "Digite sua senha",
-            }),
+            /*#__PURE__*/ React.createElement(
+              "div",
+              { className: "login-field" },
+              /*#__PURE__*/ React.createElement("label", null, "Nome completo"),
+              /*#__PURE__*/ React.createElement(
+                "div",
+                { className: "login-field-input-wrap" },
+                /*#__PURE__*/ React.createElement(UserCircle, { size: 15 }),
+                /*#__PURE__*/ React.createElement("input", {
+                  type: "text",
+                  autoComplete: "name",
+                  autoFocus: true,
+                  value: nome,
+                  onChange: (e) => setNome(e.target.value),
+                  onKeyDown: handleFieldKeyDown,
+                  placeholder: "Digite seu nome",
+                }),
+              ),
+            ),
+            /*#__PURE__*/ React.createElement(
+              "div",
+              { className: "login-field" },
+              /*#__PURE__*/ React.createElement("label", null, "E-mail corporativo"),
+              /*#__PURE__*/ React.createElement(
+                "div",
+                { className: "login-field-input-wrap" },
+                /*#__PURE__*/ React.createElement(Mail, { size: 15 }),
+                /*#__PURE__*/ React.createElement("input", {
+                  type: "email",
+                  autoComplete: "username",
+                  value: email,
+                  onChange: (e) => setEmail(e.target.value),
+                  onKeyDown: handleFieldKeyDown,
+                  placeholder: `nome@${PORTAL_EMAIL_DOMAIN}`,
+                }),
+              ),
+              /*#__PURE__*/ React.createElement(
+                "div",
+                { className: "login-domain-hint" },
+                `Apenas e-mails @${PORTAL_EMAIL_DOMAIN} podem se cadastrar.`,
+              ),
+            ),
+            /*#__PURE__*/ React.createElement(
+              "div",
+              { className: "login-field" },
+              /*#__PURE__*/ React.createElement("label", null, "Senha"),
+              /*#__PURE__*/ React.createElement(
+                "div",
+                { className: "login-field-input-wrap" },
+                /*#__PURE__*/ React.createElement(Lock, { size: 15 }),
+                /*#__PURE__*/ React.createElement("input", {
+                  type: showSenha ? "text" : "password",
+                  "data-pwvisible": showSenha ? "true" : "false",
+                  autoComplete: "new-password",
+                  value: senha,
+                  onChange: (e) => setSenha(e.target.value),
+                  onKeyDown: handleFieldKeyDown,
+                  placeholder: "Crie uma senha",
+                }),
+                /*#__PURE__*/ React.createElement(
+                  "button",
+                  {
+                    type: "button",
+                    className: "login-password-toggle",
+                    onClick: () => setShowSenha((v) => !v),
+                    "aria-label": showSenha ? "Ocultar senha" : "Mostrar senha",
+                    "aria-pressed": showSenha,
+                  },
+                  showSenha
+                    ? /*#__PURE__*/ React.createElement(EyeOff, { size: 15 })
+                    : /*#__PURE__*/ React.createElement(Eye, { size: 15 }),
+                ),
+              ),
+            ),
+            /*#__PURE__*/ React.createElement(
+              "div",
+              { className: "login-field" },
+              /*#__PURE__*/ React.createElement("label", null, "Confirmar senha"),
+              /*#__PURE__*/ React.createElement(
+                "div",
+                { className: "login-field-input-wrap" },
+                /*#__PURE__*/ React.createElement(Lock, { size: 15 }),
+                /*#__PURE__*/ React.createElement("input", {
+                  type: showConfirmarSenha ? "text" : "password",
+                  "data-pwvisible": showConfirmarSenha ? "true" : "false",
+                  autoComplete: "new-password",
+                  value: confirmarSenha,
+                  onChange: (e) => setConfirmarSenha(e.target.value),
+                  onKeyDown: handleFieldKeyDown,
+                  placeholder: "Repita a senha",
+                }),
+                /*#__PURE__*/ React.createElement(
+                  "button",
+                  {
+                    type: "button",
+                    className: "login-password-toggle",
+                    onClick: () => setShowConfirmarSenha((v) => !v),
+                    "aria-label": showConfirmarSenha ? "Ocultar senha" : "Mostrar senha",
+                    "aria-pressed": showConfirmarSenha,
+                  },
+                  showConfirmarSenha
+                    ? /*#__PURE__*/ React.createElement(EyeOff, { size: 15 })
+                    : /*#__PURE__*/ React.createElement(Eye, { size: 15 }),
+                ),
+              ),
+            ),
+            /*#__PURE__*/ React.createElement(
+              "div",
+              { className: "login-hint" },
+              /*#__PURE__*/ React.createElement(Lock, { size: 14 }),
+              " ",
+              REQUISITO_SENHA_MSG,
+            ),
             /*#__PURE__*/ React.createElement(
               "button",
               {
+                className: "login-submit",
                 type: "button",
-                className: "login-password-toggle",
-                onClick: () => setShowSenha((v) => !v),
-                "aria-label": showSenha ? "Ocultar senha" : "Mostrar senha",
-                "aria-pressed": showSenha,
+                onClick: handleCadastro,
+                disabled: status !== "idle",
               },
-              showSenha
-                ? /*#__PURE__*/ React.createElement(EyeOff, { size: 15 })
-                : /*#__PURE__*/ React.createElement(Eye, { size: 15 }),
+              status !== "idle" ? "Criando conta..." : "Criar conta",
+            ),
+            /*#__PURE__*/ React.createElement(
+              "button",
+              { type: "button", className: "login-alt-link", onClick: toggleMode },
+              "Já tem conta? Entrar",
+            ),
+          )
+        : /*#__PURE__*/ React.createElement(
+            "div",
+            null,
+            /*#__PURE__*/ React.createElement(
+              "div",
+              { className: "login-field" },
+              /*#__PURE__*/ React.createElement(
+                "label",
+                null,
+                "E-mail corporativo",
+              ),
+              /*#__PURE__*/ React.createElement(
+                "div",
+                { className: "login-field-input-wrap" },
+                /*#__PURE__*/ React.createElement(Mail, { size: 15 }),
+                /*#__PURE__*/ React.createElement("input", {
+                  type: "email",
+                  autoComplete: "username",
+                  autoFocus: true,
+                  value: email,
+                  onChange: (e) => setEmail(e.target.value),
+                  onKeyDown: handleFieldKeyDown,
+                  placeholder: "Digite seu e-mail",
+                }),
+              ),
+            ),
+            /*#__PURE__*/ React.createElement(
+              "div",
+              { className: "login-field" },
+              /*#__PURE__*/ React.createElement("label", null, "Senha"),
+              /*#__PURE__*/ React.createElement(
+                "div",
+                { className: "login-field-input-wrap" },
+                /*#__PURE__*/ React.createElement(Lock, { size: 15 }),
+                /*#__PURE__*/ React.createElement("input", {
+                  type: showSenha ? "text" : "password",
+                  "data-pwvisible": showSenha ? "true" : "false",
+                  autoComplete: "current-password",
+                  value: senha,
+                  onChange: (e) => setSenha(e.target.value),
+                  onKeyDown: handleFieldKeyDown,
+                  placeholder: "Digite sua senha",
+                }),
+                /*#__PURE__*/ React.createElement(
+                  "button",
+                  {
+                    type: "button",
+                    className: "login-password-toggle",
+                    onClick: () => setShowSenha((v) => !v),
+                    "aria-label": showSenha ? "Ocultar senha" : "Mostrar senha",
+                    "aria-pressed": showSenha,
+                  },
+                  showSenha
+                    ? /*#__PURE__*/ React.createElement(EyeOff, { size: 15 })
+                    : /*#__PURE__*/ React.createElement(Eye, { size: 15 }),
+                ),
+              ),
+            ),
+            /*#__PURE__*/ React.createElement(
+              "button",
+              {
+                className: "login-submit",
+                type: "button",
+                onClick: handleSubmit,
+                disabled: status !== "idle",
+              },
+              status !== "idle" ? "Entrando..." : "Entrar",
+            ),
+            /*#__PURE__*/ React.createElement(
+              "button",
+              { type: "button", className: "login-alt-link", onClick: toggleMode },
+              "Primeiro acesso? Cadastre-se",
             ),
           ),
-        ),
-        /*#__PURE__*/ React.createElement(
-          "button",
-          {
-            className: "login-submit",
-            type: "button",
-            onClick: handleSubmit,
-            disabled: status !== "idle",
-          },
-          status !== "idle" ? "Entrando..." : "Entrar",
-        ),
-      ),
       /*#__PURE__*/ React.createElement(
         "div",
         { className: "login-footer" },
@@ -21794,6 +22273,7 @@ function iniciaisNome(nome) {
     "login",
     "logout",
     "trocou_senha",
+    "cadastrou_propria_conta",
     "atualizou_preferencias",
     "visualizou_documento",
     "baixou_documento",
@@ -22910,6 +23390,16 @@ function GrupoprimaPortal() {
     setCompaniesOpenCorporate(true);
     setView("companies");
   }
+  // companyDocTarget: mesmo padrão "semente consumida uma vez" de
+  // companiesOpenCorporate acima — pedido explícito da Iasmin, 2026-09-25:
+  // "ao clicar no título de uma documentação que foi solicitada pelo
+  // assistente, você é encaminhado a onde ela está dentro do portal".
+  // Carrega qual documento (docId/categoria) deve ficar em destaque assim
+  // que a página da Base abrir — CompanyDetailView consome e reseta via
+  // onDocTargetConsumed (mesmo mecanismo de onSeedConsumed/
+  // onCorporateAutoOpenConsumed), então navegar de novo por outro caminho
+  // (nav lateral, busca) não reabre/rola sozinho pra um documento antigo.
+  const [companyDocTarget, setCompanyDocTarget] = useState(null);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [toast, setToast] = useState(null);
   const [docsModalCompanyId, setDocsModalCompanyId] = useState(null); // docsModalFilter: { type: "vencido"|"proximo"|"flagged", label } | null — setado
@@ -22980,6 +23470,22 @@ function GrupoprimaPortal() {
     id,
   ) {
     openCompany(id);
+    setChatOpen(false);
+  }
+  /** openDocumentFromChat: mesma ideia de openCompanyFromChat acima, mas
+   *  leva direto ao DOCUMENTO específico clicado no título de um cartão do
+   *  chat (pedido explícito da Iasmin, 2026-09-25) — abre a Base certa E já
+   *  deixa a categoria daquele documento expandida, com a linha dele em
+   *  destaque (ver companyDocTarget/CompanyDetailView). */
+  function openDocumentFromChat(company, doc) {
+    if (company && doc) {
+      setCompanyDocTarget({
+        companyId: company.id,
+        docId: doc.id,
+        categoria: doc.categoria,
+      });
+    }
+    openCompany(company.id);
     setChatOpen(false);
   }
   function notify(text, tone = "error") {
@@ -23359,6 +23865,17 @@ function GrupoprimaPortal() {
         .empty-note { font-size: 12.5px; color: var(--carvao); padding-top: 10px; margin: 0; }
         .doc-row { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; padding: 12px 0; border-top: 1px solid var(--cinza-frio); }
         .doc-row:first-child { border-top: none; }
+        /* doc-anchor-highlight (pedido explícito da Iasmin, 2026-09-25):
+           pulso temporário na linha do documento pra onde o clique no
+           título de um cartão do chat levou a pessoa — some sozinho depois
+           de alguns segundos, nunca fica marcado permanentemente. Aplicada
+           tanto no doc-row (versão única) quanto no timeline-item
+           (DocFamilyHistory, versão atual). */
+        .doc-anchor-highlight { animation: docAnchorPulse 2.4s ease-out; border-radius: 8px; }
+        @keyframes docAnchorPulse {
+          0% { background: rgba(107,254,156,0.28); box-shadow: 0 0 0 3px rgba(107,254,156,0.28); }
+          100% { background: transparent; box-shadow: 0 0 0 3px rgba(107,254,156,0); }
+        }
         .doc-row-main { display: flex; gap: 10px; }
         .doc-row-main svg { margin-top: 2px; color: var(--texto); flex-shrink: 0; }
         .doc-row-title { font-size: 13px; font-weight: 700; color: var(--texto); }
@@ -23422,6 +23939,13 @@ function GrupoprimaPortal() {
 
         .doc-card { background: var(--card-bg); border: 1px solid var(--cinza-frio); border-radius: 10px; padding: 11px 12px; margin-top: 2px; }
         .doc-card-head { display: flex; align-items: center; gap: 7px; font-weight: 800; font-size: 12.5px; color: var(--texto); margin-bottom: 8px; }
+        /* doc-card-title-link (pedido explícito da Iasmin, 2026-09-25):
+           clicar no título de um documento entregue pelo assistente leva
+           direto até ele dentro do portal (Base certa, categoria já
+           expandida, linha em destaque) — só existe dentro do chat. */
+        .doc-card-title-link { cursor: pointer; border-radius: 4px; }
+        .doc-card-title-link:hover { text-decoration: underline; text-decoration-color: var(--azul-2); }
+        .doc-card-title-link:focus-visible { outline: 2px solid var(--foco); outline-offset: 2px; }
         .doc-card-grid { display: grid; grid-template-columns: 74px 1fr; row-gap: 4px; column-gap: 6px; font-size: 11.5px; color: var(--carvao); margin-bottom: 10px; }
         .doc-card-grid span:nth-child(odd) { font-weight: 700; color: var(--texto); }
         .doc-badge { background: rgba(0,55,83,0.08); color: var(--texto); border-radius: 999px; padding: 1px 7px; font-size: 10.5px; font-weight: 700; }
@@ -23522,7 +24046,15 @@ function GrupoprimaPortal() {
         .office-slide-block { border: 1px solid var(--cinza-frio); border-radius: 8px; padding: 12px 14px; margin-bottom: 12px; background: var(--card-bg); }
         .office-slide-block h4 { margin: 0 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--texto); }
         .office-slide-block p { margin: 0; font-size: 13px; line-height: 1.5; color: var(--carvao); }
-        .viewer-pdf-canvas { max-width: 100%; box-shadow: 0 2px 10px rgba(0,0,0,0.15); }
+        .viewer-pdf-page { position: relative; max-width: 100%; }
+        .viewer-pdf-canvas { max-width: 100%; box-shadow: 0 2px 10px rgba(0,0,0,0.15); display: block; }
+        /* Camada de texto invisível sobreposta ao canvas — permite selecionar
+           e copiar o texto real do PDF (pedido da Iasmin, 2026-09-25). Segue o
+           padrão oficial do pdf.js (web/pdf_viewer.css): spans posicionados em
+           cima da página, cor transparente, só a seleção fica visível. */
+        .viewer-pdf-textlayer { position: absolute; left: 0; top: 0; right: 0; bottom: 0; overflow: hidden; line-height: 1; text-align: initial; }
+        .viewer-pdf-textlayer span, .viewer-pdf-textlayer br { color: transparent; position: absolute; white-space: pre; cursor: text; transform-origin: 0% 0%; }
+        .viewer-pdf-textlayer ::selection, .viewer-pdf-textlayer ::-moz-selection { background: rgba(10,74,107,0.35); }
         .viewer-pdf-pager { position: sticky; bottom: 0; display: flex; align-items: center; gap: 10px; margin-top: 12px; padding: 6px 14px; background: rgba(0,55,83,0.92); color: #fff; border-radius: 20px; font-size: 12px; }
         .viewer-pdf-pager button { background: transparent; border: none; color: #fff; cursor: pointer; display: flex; align-items: center; padding: 2px; }
         .viewer-pdf-pager button:disabled { opacity: 0.35; cursor: default; }
@@ -24316,6 +24848,8 @@ function GrupoprimaPortal() {
             onView: setViewer,
             onOpenChat: openChatWithQuery,
             isAdmin: can(currentUser, "editarDocumentos"),
+            docTarget: companyDocTarget,
+            onDocTargetConsumed: () => setCompanyDocTarget(null),
           }),
         view === "homologacao" &&
           can(currentUser, "homologacoes") &&
@@ -24385,6 +24919,7 @@ function GrupoprimaPortal() {
       totals: data,
       onNotify: notify,
       onOpenCompany: openCompanyFromChat,
+      onOpenDocument: openDocumentFromChat,
       onView: setViewer,
       screenContext: { view, company: selectedCompany },
       seedQuery: chatSeed,
