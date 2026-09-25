@@ -11397,6 +11397,7 @@ function ChatDrawer({
  *  de nenhum visualizador nativo. */ function PdfCanvasViewer({ bytes }) {
   const canvasRef = useRef(null);
   const textLayerRef = useRef(null);
+  const wrapRef = useRef(null);
   const [pdfDoc, setPdfDoc] = useState(null);
   const [pageNum, setPageNum] = useState(1);
   const [numPages, setNumPages] = useState(0);
@@ -11437,8 +11438,19 @@ function ChatDrawer({
         if (cancelled) return;
         const canvas = canvasRef.current;
         if (!canvas) return;
-        const containerWidth =
-          (canvas.parentElement && canvas.parentElement.clientWidth) || 800;
+        // containerWidth precisa vir do WRAP externo (.viewer-pdf-wrap,
+        // largura real da área de visualização), nunca de
+        // canvas.parentElement (.viewer-pdf-page) — esse div só existe pra
+        // ancorar a camada de texto por cima do canvas (ver comentário
+        // abaixo) e encolhe pro tamanho ATUAL do próprio canvas (flex +
+        // align-items:center), o que criava um loop: o canvas nasce pequeno
+        // (300px, tamanho padrão do HTML) → containerWidth lido do pai
+        // encolhido fica pequeno → o canvas recalculado continua pequeno
+        // para sempre. Bug real relatado pela Iasmin em 2026-09-25
+        // ("as documentações estão minúsculas") logo depois da camada de
+        // texto ser adicionada — corrigido lendo a largura do wrap, que
+        // sempre ocupa 100% da área de visualização de verdade.
+        const containerWidth = (wrapRef.current && wrapRef.current.clientWidth) || 800;
         const baseViewport = page.getViewport({ scale: 1 });
         const scale = Math.min(
           2.2,
@@ -11506,7 +11518,7 @@ function ChatDrawer({
   }
   return /*#__PURE__*/ React.createElement(
     "div",
-    { className: "viewer-pdf-wrap" },
+    { className: "viewer-pdf-wrap", ref: wrapRef },
     /*#__PURE__*/ React.createElement(
       "div",
       { className: "viewer-pdf-page" },
