@@ -21154,6 +21154,7 @@ function GrupoprimaPortal() {
           --azul: #003753;
           --azul-2: #0A4A6B;
           --verde: #6BFE9C;
+          --foco: #6FBBE3;
           --cinza-frio: #E2E2E5;
           --carvao: #5C5F61;
           --branco-frio: #F3F3F6;
@@ -21275,7 +21276,13 @@ function GrupoprimaPortal() {
         .portal-root select:focus-visible,
         .portal-root textarea:focus-visible,
         .portal-root [tabindex]:focus-visible {
-          outline: 2px solid var(--verde); outline-offset: 2px; border-radius: 4px;
+          /* Era var(--verde) — a Iasmin achou o verde "muito chamativo" no
+             foco da barra de pesquisa (pedido de 2026-09-25). Trocado por um
+             azul claro mais discreto (--foco), fixo nos dois temas (mesma
+             lógica de --azul/--verde: cor de indicação, não precisa
+             inverter). Vale pra todo campo com foco no portal, não só a
+             busca, pra manter um padrão único de acessibilidade. */
+          outline: 2px solid var(--foco); outline-offset: 2px; border-radius: 4px;
         }
         .portal-root input[type="checkbox"], .portal-root input[type="radio"] { accent-color: var(--texto); }
 
@@ -21524,8 +21531,16 @@ function GrupoprimaPortal() {
         .pill { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 700; padding: 4px 9px; border-radius: 999px; white-space: nowrap; }
         .pill-dot { width: 6px; height: 6px; border-radius: 50%; }
 
-        .chat-overlay { position: fixed; inset: 0; background: rgba(0,55,83,0.4); display: flex; align-items: center; justify-content: center; z-index: 70; padding: 24px; }
-        .chat-drawer { position: relative; width: min(420px, 100%); height: min(640px, 88vh); height: min(640px, 88dvh); background: var(--card-bg); border-radius: 16px; overflow: hidden; box-shadow: 0 24px 60px rgba(0,0,0,0.35); display: flex; flex-direction: column; z-index: 10; }
+        /* Assistente como painel lateral ancorado à direita (pedido da
+           Iasmin, 2026-09-25: "voltar a ser um painel na lateral") — em vez
+           de um modal centralizado, o painel agora ocupa a altura inteira
+           da tela, encostado na borda direita, com o fundo escurecido atrás
+           (mesmo comportamento de antes, só a posição/tamanho mudou). No
+           mobile continua como bottom sheet (ver media query abaixo). */
+        .chat-overlay { position: fixed; inset: 0; background: rgba(0,55,83,0.4); display: flex; align-items: stretch; justify-content: flex-end; z-index: 70; padding: 0; }
+        .chat-drawer { position: relative; width: min(420px, 100%); height: 100%; height: 100dvh; background: var(--card-bg); border-radius: 16px 0 0 16px; overflow: hidden; box-shadow: -16px 0 50px rgba(0,0,0,0.35); display: flex; flex-direction: column; z-index: 10; animation: chatDockIn 0.22s ease-out; }
+        @keyframes chatDockIn { from { transform: translateX(100%); } to { transform: translateX(0); } }
+        @keyframes chatSheetIn { from { transform: translateY(100%); } to { transform: translateY(0); } }
         .chat-header { display: flex; justify-content: space-between; align-items: center; padding: 14px 16px; background: var(--azul); color: #fff; flex-shrink: 0; }
         .chat-header-title { display: flex; align-items: center; gap: 7px; font-weight: 700; font-size: 13px; }
         .chat-header-title svg { color: var(--verde); }
@@ -21967,9 +21982,17 @@ function GrupoprimaPortal() {
             gap: 8px;
           }
           .content { padding: 18px 16px 40px; }
-          .chat-overlay { padding: 0; align-items: flex-end; }
-          .chat-drawer { width: 100%; height: 90vh; height: 90dvh; border-radius: 16px 16px 0 0; }
+          .chat-overlay { padding: 0; align-items: flex-end; justify-content: center; }
+          .chat-drawer { width: 100%; height: 90vh; height: 90dvh; border-radius: 16px 16px 0 0; animation: chatSheetIn 0.22s ease-out; }
           .chat-input-row { padding-bottom: calc(12px + env(safe-area-inset-bottom)); }
+          /* O painel de filtros compacto (pedido de 2026-09-25) é só pra
+             desktop — no mobile quem abre é o modal (.filters-modal-body),
+             que reaproveita a mesma .filter-field. Sem esse reforço aqui, os
+             campos ficariam pequenos demais pra tocar com o dedo. */
+          .filters-modal-body .filter-field { font-size: 11.5px; gap: 6px; }
+          .filters-modal-body .filter-field input, .filters-modal-body .filter-field select {
+            padding: 12px 12px; font-size: 14px;
+          }
           .viewer-overlay { padding: 0; }
           .viewer-modal { width: 100%; height: 100%; height: 100dvh; border-radius: 0; }
           .docs-modal-overlay { padding: 12px; }
