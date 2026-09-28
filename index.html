@@ -20184,7 +20184,21 @@ function EnvioLoteFormModal({ companies, onClose, onCreate }) {
       setErro("Cole/digite a lista de documentações ou envie um arquivo com o pedido do cliente.");
       return;
     }
-    onCreate({ cliente: clienteNome.trim(), baseIds, itens: itensDoChecklist });
+    // textoSolicitacaoOriginal/arquivoSolicitacaoOriginalNome (pedido
+    // explícito da Iasmin, 2026-09-28: "adicione um botão pra que seja
+    // possível também ver qual foi a solicitação do usuário") — guarda o
+    // texto BRUTO exatamente como foi digitado/colado, ou o texto já
+    // extraído do arquivo enviado (nunca os itens já interpretados pela
+    // checklist), pra "Ver solicitação original" em EnvioLoteDetailView
+    // mostrar o pedido real do cliente, sem depender da interpretação do
+    // portal.
+    onCreate({
+      cliente: clienteNome.trim(),
+      baseIds,
+      itens: itensDoChecklist,
+      textoSolicitacaoOriginal: texto,
+      arquivoSolicitacaoOriginalNome: modoEntrada === "arquivo" ? arquivoInfo?.nome || null : null,
+    });
   }
   return React.createElement(
     "div",
@@ -20505,6 +20519,15 @@ function EnvioLoteDetailView({ item, companies, onBack, onNotify, onView, onUpda
   const [observacoes, setObservacoes] = useState(item.observacoes || "");
   const [confirmandoExclusao, setConfirmandoExclusao] = useState(false);
   const [excluindo, setExcluindo] = useState(false);
+  // verOriginalOpen: modal com o texto BRUTO da solicitação original do
+  // usuário (pedido explícito da Iasmin, 2026-09-28: "adicione um botão pra
+  // que seja possível também ver qual foi a solicitação do usuário pra o
+  // envio das documentações em lote") — mostra `textoSolicitacaoOriginal`
+  // tal como foi digitado/colado ou extraído do arquivo enviado, nunca a
+  // interpretação já feita pelo portal (que já aparece em "Documentações
+  // solicitadas" logo abaixo). Disponível pra qualquer perfil que já pode
+  // ver a solicitação (não é uma ação administrativa como excluir).
+  const [verOriginalOpen, setVerOriginalOpen] = useState(false);
   // isAdmin: exclusão da solicitação restrita a Administrador (pedido
   // explícito da Iasmin, 2026-09-28), mesmo gate já usado pra excluir um
   // documento do catálogo (DocRowActions) — nunca aberto pros perfis
@@ -20702,25 +20725,40 @@ function EnvioLoteDetailView({ item, companies, onBack, onNotify, onView, onUpda
         (item.baseIds || []).map((bId) => companyLabelFor(companiesPorId.get(bId))).filter(Boolean).join(", "),
         item.concluidoEm ? ` · concluído em ${formatAuditWhen(new Date(item.concluidoEm))}` : "",
       ),
-      isAdmin &&
+      React.createElement(
+        "div",
+        { className: "lote-status-actions" },
+        // Ver solicitação original: pedido explícito da Iasmin
+        // (2026-09-28) — mostra o texto BRUTO digitado/colado ou extraído
+        // do arquivo enviado na criação, nunca a interpretação já feita
+        // pelo portal. Disponível pra qualquer perfil (não é ação
+        // administrativa).
         React.createElement(
-          "div",
-          { className: "lote-status-actions" },
-          // Excluir: pedido explícito da Iasmin (2026-09-28), mesmo padrão
-          // de "Excluir homologação" — sempre disponível (independente do
-          // status da solicitação), nunca um clique único.
-          !confirmandoExclusao &&
-            React.createElement(
-              "button",
-              {
-                className: "doc-view-btn lote-delete-btn",
-                onClick: () => setConfirmandoExclusao(true),
-                title: "Excluir esta solicitação de envio em lote (Administrador)",
-              },
-              React.createElement(XCircle, { size: 14 }),
-              " Excluir solicitação",
-            ),
+          "button",
+          {
+            className: "doc-view-btn",
+            onClick: () => setVerOriginalOpen(true),
+            title: "Ver o texto original da solicitação feita pelo usuário",
+          },
+          React.createElement(Eye, { size: 14 }),
+          " Ver solicitação original",
         ),
+        // Excluir: pedido explícito da Iasmin (2026-09-28), mesmo padrão
+        // de "Excluir homologação" — sempre disponível (independente do
+        // status da solicitação), nunca um clique único.
+        isAdmin &&
+          !confirmandoExclusao &&
+          React.createElement(
+            "button",
+            {
+              className: "doc-view-btn lote-delete-btn",
+              onClick: () => setConfirmandoExclusao(true),
+              title: "Excluir esta solicitação de envio em lote (Administrador)",
+            },
+            React.createElement(XCircle, { size: 14 }),
+            " Excluir solicitação",
+          ),
+      ),
       isAdmin &&
         confirmandoExclusao &&
         React.createElement(
@@ -20756,6 +20794,79 @@ function EnvioLoteDetailView({ item, companies, onBack, onNotify, onView, onUpda
           ),
         ),
     ),
+    // Modal "Ver solicitação original" (pedido explícito da Iasmin,
+    // 2026-09-28) — mesmo padrão visual dos outros modais do portal
+    // (docs-modal-overlay/docs-modal). Só mostra o texto BRUTO guardado em
+    // `item.textoSolicitacaoOriginal`; nunca reconstrói ou reinterpreta a
+    // partir de `documentacoesSolicitadas` (que já é a versão processada).
+    verOriginalOpen &&
+      React.createElement(
+        "div",
+        { className: "docs-modal-overlay", onClick: () => setVerOriginalOpen(false) },
+        React.createElement(
+          "div",
+          { className: "docs-modal homolog-form-modal", onClick: (e) => e.stopPropagation() },
+          React.createElement(
+            "div",
+            { className: "docs-modal-head" },
+            React.createElement(
+              "div",
+              null,
+              React.createElement(
+                "div",
+                { className: "docs-modal-title" },
+                React.createElement(Eye, { size: 16 }),
+                " Solicitação original",
+              ),
+              React.createElement(
+                "div",
+                { className: "docs-modal-sub" },
+                `Texto exatamente como foi digitado/colado (ou extraído do arquivo enviado) ao criar esta solicitação para "${item.cliente}" — nunca a interpretação que o portal fez dele.`,
+              ),
+            ),
+            React.createElement(
+              "button",
+              { className: "icon-btn-dark", onClick: () => setVerOriginalOpen(false), "aria-label": "Fechar" },
+              React.createElement(X, { size: 18 }),
+            ),
+          ),
+          React.createElement(
+            "div",
+            { className: "docs-modal-body" },
+            item.arquivoSolicitacaoOriginalNome &&
+              React.createElement(
+                "div",
+                { className: "homolog-anexo-item", style: { marginBottom: 10 } },
+                React.createElement(FileText, { size: 14 }),
+                React.createElement("span", { className: "homolog-anexo-nome" }, "Enviado via arquivo: ", item.arquivoSolicitacaoOriginalNome),
+              ),
+            (item.textoSolicitacaoOriginal || "").trim()
+              ? React.createElement(
+                  "pre",
+                  {
+                    style: {
+                      whiteSpace: "pre-wrap",
+                      wordBreak: "break-word",
+                      fontFamily: "inherit",
+                      fontSize: 13,
+                      lineHeight: 1.5,
+                      margin: 0,
+                      background: "rgba(15,30,45,0.03)",
+                      border: "1px solid var(--cinza-frio)",
+                      borderRadius: 8,
+                      padding: 12,
+                    },
+                  },
+                  item.textoSolicitacaoOriginal,
+                )
+              : React.createElement(
+                  "p",
+                  { className: "homolog-bases-hint" },
+                  "Não há registro do texto original desta solicitação — ela foi criada antes desta função existir, ou as documentações foram adicionadas manualmente, uma a uma.",
+                ),
+          ),
+        ),
+      ),
     React.createElement(
       "div",
       { className: "lote-section" },
@@ -20984,7 +21095,7 @@ function EnvioLoteView({ currentUser, onNotify, onView, companies }) {
       "info",
     );
   }
-  function handleCreate({ cliente, baseIds, itens }) {
+  function handleCreate({ cliente, baseIds, itens, textoSolicitacaoOriginal, arquivoSolicitacaoOriginalNome }) {
     const id = generateLoteId();
     const agora = new Date().toISOString();
     const documentacoesSolicitadas = itens.map((it) => {
@@ -21018,6 +21129,14 @@ function EnvioLoteView({ currentUser, onNotify, onView, companies }) {
       processadoEm: null,
       concluidoEm: null,
       observacoes: null,
+      // textoSolicitacaoOriginal/arquivoSolicitacaoOriginalNome (pedido da
+      // Iasmin, 2026-09-28) — texto bruto digitado/colado ou extraído do
+      // arquivo enviado, guardado tal como veio (nunca os itens já
+      // interpretados), pra "Ver solicitação original" em
+      // EnvioLoteDetailView. Uma solicitação criada antes desta função
+      // existir simplesmente não tem este campo — tratado à parte lá.
+      textoSolicitacaoOriginal: textoSolicitacaoOriginal || "",
+      arquivoSolicitacaoOriginalNome: arquivoSolicitacaoOriginalNome || null,
     };
     persist(item);
     setModalOpen(false);
