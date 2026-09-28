@@ -3777,7 +3777,7 @@ async function createDocumentPackageMultiBase(numerados, opts = {}) {
     // realmente indicam esse tipo específico de documento (mesmo critério já
     // usado em CATEGORY_ALIASES para a categoria "cadastral").
     {
-      key: "cadastral",
+      key: "cnpj",
       label: "Cartão CNPJ",
       match: /cart[a]o cnpj|comprovante de inscri[c]ao|situa[c]ao cadastral/,
     }, // Documentos societários deixaram de ser tratados todos genericamente como
@@ -3786,19 +3786,19 @@ async function createDocumentPackageMultiBase(numerados, opts = {}) {
     // Social" genérico, porque frases reais como "ALTERAÇÃO E CONSOLIDAÇÃO DO
     // CONTRATO SOCIAL" contêm as duas palavras "contrato social" e não devem
     // cair no rótulo genérico.
-    { key: "societaria", label: "Distrato Social", match: /distrato/ },
+    { key: "contratos_sociais", label: "Distrato Social", match: /distrato/ },
     {
-      key: "societaria",
+      key: "contratos_sociais",
       label: "Requerimento de Empresário",
       match: /requerimento de empresari/,
     },
     {
-      key: "societaria",
+      key: "contratos_sociais",
       label: "Consolidação do Contrato Social",
       match: /consolida[c]ao( do contrato social)?/,
     },
     {
-      key: "societaria",
+      key: "contratos_sociais",
       label: "Alteração Contratual",
       // Correção (pedido da Iasmin, 2026-09-17 — "contratos sociais sem
       // título"): a Grupoprima também nomeia alterações reais como "ACS"
@@ -3811,10 +3811,10 @@ async function createDocumentPackageMultiBase(numerados, opts = {}) {
       match:
         /altera[c]ao contratual|\d+\s*[oaºª°]?[\s_.-]*(altera[c]ao|acs)/,
     },
-    { key: "societaria", label: "Contrato Social", match: /contrato social/ },
-    { key: "societaria", label: "Estatuto Social", match: /estatuto/ },
-    { key: "societaria", label: "Ata Societária", match: /\bata\b/ },
-    { key: "societaria", label: "Procuração", match: /procura[c]ao/ }, // Fiscal e Tributária — CNDs por esfera, sempre com o nome específico
+    { key: "contratos_sociais", label: "Contrato Social", match: /contrato social/ },
+    { key: "contratos_sociais", label: "Estatuto Social", match: /estatuto/ },
+    { key: "contratos_sociais", label: "Ata Societária", match: /\bata\b/ },
+    { key: "contratos_sociais", label: "Procuração", match: /procura[c]ao/ }, // Fiscal e Tributária — CNDs por esfera, sempre com o nome específico
     // (nunca genérico "certidão"), para não colidir com outras certidões.
     // "certid\w* negativ\w*" (em vez do antigo "certidao negativa" fixo, só
     // singular) corrigido em 2026-09-21: uma checklist real da Iasmin
@@ -3823,8 +3823,23 @@ async function createDocumentPackageMultiBase(numerados, opts = {}) {
     // (certid-a-o) não é substring de "certidoes" normalizado
     // (certid-o-e-s), então o prefixo exigia singular exato. \w* aceita as
     // duas formas sem exigir lista de variações.
+    // `key` corrigido de "fiscal_tributaria" (categoria antiga, dividida em
+    // 2026-09-14 — ver comentário grande acima de CATEGORY_ALIASES) para
+    // "certidoes_negativas" (categoria real de hoje) em 2026-09-28: até
+    // então era só um rótulo morto (nada em CATEGORIES bate com
+    // "fiscal_tributaria"), mascarado porque searchDocuments zerava
+    // globalmente toda categoria pedida sempre que QUALQUER tipo específico
+    // era reconhecido — sem olhar se as chaves batiam. Ajustar essa regra
+    // pra ser por categoria (mesmo pedido de 2026-09-28, ver comentário em
+    // searchDocuments) expôs o rótulo morto: um pedido por "CND FGTS"
+    // (tipo, key correta agora) deixou de zerar a categoria
+    // "certidoes_negativas" (que "cnd" também aciona sozinho), voltando a
+    // trazer as 4 CNDs juntas — regressão real pega pela suíte de testes
+    // antes de qualquer entrega. Mesma causa raiz corrigida também para
+    // "Cartão CNPJ" (era "cadastral") e toda a família societária (era
+    // "societaria", agora "contratos_sociais").
     {
-      key: "fiscal_tributaria",
+      key: "certidoes_negativas",
       label: "CND Federal",
       // "regularidade fiscal"/"certidao conjunta" incorporados em 2026-09-21
       // (bug real relatado pela Iasmin: "CND Federal está escrita, temos
@@ -3842,12 +3857,12 @@ async function createDocumentPackageMultiBase(numerados, opts = {}) {
         /certid\w* negativ\w*.*(federal|receita federal)|cnd federal|regularidade fiscal|certidao conjunta/,
     },
     {
-      key: "fiscal_tributaria",
+      key: "certidoes_negativas",
       label: "CND Estadual",
       match: /certid\w* negativ\w*.*estadual|cnd estadual|\bsefaz\b|\bicms\b/,
     },
     {
-      key: "fiscal_tributaria",
+      key: "certidoes_negativas",
       label: "CND Municipal",
       match: /certid\w* negativ\w*.*municipal|cnd municipal/,
     },
@@ -3860,13 +3875,13 @@ async function createDocumentPackageMultiBase(numerados, opts = {}) {
       // um pedido por ela aparece corretamente como "não localizado" até
       // que um real venha a ser sincronizado. Nome oficial mais comum é
       // "Certificado de Regularidade do FGTS" (CRF), daí o segundo ramo.
-      key: "fiscal_tributaria",
+      key: "certidoes_negativas",
       label: "CND FGTS",
       match:
         /certid\w* negativ\w*.*fgts|cnd (do )?fgts|regularidade.*fgts|\bcrf\b.*fgts|fgts.*\bcrf\b/,
     },
     {
-      key: "fiscal_tributaria",
+      key: "certidoes_negativas",
       // Rótulo mudado de "CNDT" para "CND Trabalhista" em 2026-09-22 (bug
       // real relatado pela Iasmin: pedir "CND trabalhista" reconhecia o
       // TIPO certo — a correção do dia anterior, logo acima, já resolvia
@@ -4183,14 +4198,6 @@ async function createDocumentPackageMultiBase(numerados, opts = {}) {
     },
     { key: "outros", label: "Outro documento", match: /outros documentos/ },
   ];
-/** SEGUROS_GERAIS_TYPES / PGR_TYPE: usados só pelo atalho de "seguros"
- *  genérico dentro de `parseIntent` (ver `pediuSegurosGenerico`, logo
- *  abaixo) — nunca duplicam os regex de reconhecimento já definidos acima
- *  em DOC_TYPE_KEYWORDS, só reaproveitam as mesmas entradas por rótulo. */
-const SEGUROS_GERAIS_TYPES = DOC_TYPE_KEYWORDS.filter(
-  (k) => k.label === "Apólice RCTR-C" || k.label === "Apólice RC-DC",
-);
-const PGR_TYPE = DOC_TYPE_KEYWORDS.find((k) => k.label === "PGR");
 /** TIPO_LABEL_SINONIMOS_LEGADOS: quando o rótulo CANÔNICO de um tipo (o que
  *  aparece acima em DOC_TYPE_KEYWORDS, usado pro reconhecimento do PEDIDO)
  *  precisa mudar pra ficar mais claro ou consistente com os demais, um
@@ -5086,13 +5093,28 @@ function findCompaniesInQuery(q, companies) {
   // diferente. Mesma regra já documentada acima ("tipo específico ... nunca
   // a categoria inteira") e já aplicada no envio em lote
   // (`matchChecklistItemToCompany`, item 1: tipo específico é sempre o
-  // critério primário) — aqui só passa a valer também pro chat: quando pelo
-  // menos um TIPO específico foi reconhecido no pedido, a expansão por
-  // categoria inteira é ignorada nesta busca (a categoria só volta a valer
-  // quando NENHUM tipo específico foi identificado — pedido de categoria de
-  // verdade, ex.: "quais licenças temos", "toda a documentação de seguros").
-  const categoryKeysEfetivos =
-    wantedTypeKeys.length > 0 ? [] : wantedCategoryKeys;
+  // critério primário) — quando um TIPO específico DA MESMA categoria foi
+  // reconhecido no pedido, a expansão daquela categoria é ignorada nesta
+  // busca (a categoria só volta a valer quando NENHUM tipo específico DELA
+  // foi identificado — pedido de categoria de verdade, ex.: "quais licenças
+  // temos", "toda a documentação de seguros"). Ajustado em 2026-09-28
+  // (pedido explícito da Iasmin) pra ser POR CATEGORIA, não global: antes,
+  // reconhecer QUALQUER tipo (de qualquer categoria) zerava a expansão de
+  // TODAS as categorias pedidas na mesma frase — o que quebrava "seguro e
+  // PGR" (a PGR é reconhecida como tipo de uma categoria diferente,
+  // "Segurança, Qualidade e Compliance", e zerava a categoria "seguros"
+  // sem motivo, sumindo com as apólices). Agora só a categoria à qual o
+  // tipo reconhecido pertence é zerada — preserva o comportamento original
+  // pros casos que motivaram a regra (CND FGTS, Ibama), porque ali o tipo e
+  // a categoria batida são exatamente a mesma. O rótulo genérico "Apólice"
+  // (sem RCTR-C/RC-DC) nunca conta como "tipo específico" aqui — ele só bate
+  // por causa da palavra solta "apólice(s)" no próprio pedido de categoria
+  // ("apólices de seguro e PGR" também reconhece esse rótulo à toa) e nunca
+  // corresponde a nenhum documento real cadastrado.
+  const categoryKeysEfetivos = wantedCategoryKeys.filter(
+    (catKey) =>
+      !wantedTypeKeys.some((t) => t.key === catKey && t.label !== "Apólice"),
+  );
   wantedTypeKeys.forEach((t) => {
     const labelsAceitos = tipoLabelsAceitos(t.label);
     let matches = company.documentos.filter((d) => labelsAceitos.includes(d.tipo));
@@ -5142,10 +5164,35 @@ function findCompaniesInQuery(q, companies) {
       const clientePrefix = seguroCliente
         ? `seguro_cliente_${slugifyDocFamily(seguroCliente)}`
         : null;
-      matches = clientePrefix
-        ? matches.filter((d) => (d.docFamily || "").startsWith(clientePrefix))
-        : matches.filter((d) => (d.subcategoria || "geral") !== "clientes_especificos");
-      if (seguroCliente) notFoundLabel = `Seguro ${seguroCliente}`;
+      if (clientePrefix) {
+        matches = matches.filter((d) => (d.docFamily || "").startsWith(clientePrefix));
+        notFoundLabel = `Seguro ${seguroCliente}`;
+      } else {
+        // Pedido GENÉRICO da categoria inteira "seguros" (sem cliente
+        // específico, sem tipo específico reconhecido — senão nem chegaria
+        // aqui, ver categoryKeysEfetivos acima): pedido explícito da Iasmin,
+        // 2026-09-28 — "ao solicitar 'apólices'/'seguros'/'apólice de
+        // seguro'... somente o RCTR-C e o RC-DC devem ser enviados".
+        // Restringe às duas apólices reais, nunca a categoria inteira como
+        // cadastrada no portal (que pode incluir a PGR por particularidade
+        // do cadastro real — ela é de "Segurança, Qualidade e Compliance",
+        // nunca deveria aparecer aqui — e outros tipos avulsos como Endosso/
+        // Certificado de Seguro/Condições Particulares, que só devem
+        // aparecer quando pedidos pelo próprio tipo, nunca por tabela). A
+        // PGR entra junto só quando citada explicitamente na MESMA
+        // pergunta — nesse caso ela chega pelo laço de TIPO acima (categoria
+        // diferente, nunca zerada por esta regra — ver comentário de
+        // categoryKeysEfetivos).
+        const rotulosApoliceGeral = [
+          ...tipoLabelsAceitos("Apólice RCTR-C"),
+          ...tipoLabelsAceitos("Apólice RC-DC"),
+        ];
+        matches = matches.filter(
+          (d) =>
+            (d.subcategoria || "geral") !== "clientes_especificos" &&
+            rotulosApoliceGeral.includes(d.tipo),
+        );
+      }
     }
     if (matches.length === 0) {
       if (!notFoundLabels.includes(`Documentos ${notFoundLabel}`))
@@ -6322,52 +6369,13 @@ function gerarChecklistViaRegras(texto) {
 }
 function parseIntent(text) {
   const t = normalize(text);
-  let types = detectRequestedTypes(text);
-  let categories = detectRequestedCategories(text); // seguroCliente (pedido explícito da Iasmin, 2026-09-17): quando a
+  const types = detectRequestedTypes(text);
+  const categories = detectRequestedCategories(text); // seguroCliente (pedido explícito da Iasmin, 2026-09-17): quando a
   // categoria "seguros" é pedida junto de um cliente conhecido ("seguro da
   // Nestlé"), searchDocuments precisa saber disso pra buscar só os
   // documentos daquele cliente — nunca os gerais da empresa junto. Sem
   // cliente citado, fica null (comportamento padrão: só os gerais).
   const seguroCliente = detectSeguroClienteEspecificoNome(text);
-  // pediuSegurosGenerico (pedido explícito da Iasmin, 2026-09-28): um
-  // pedido GENÉRICO de "seguros"/"apólices"/"apólice de seguro" (sem citar
-  // um tipo específico já reconhecido da própria categoria — RCTR-C, RC-DC,
-  // Endosso, Certificado de Seguro, Condições Particulares — e sem cliente
-  // específico, ver seguroCliente acima) deve entregar SOMENTE as duas
-  // apólices reais que a empresa sempre precisa entregar (Apólice RCTR-C e
-  // Apólice RC-DC) — NUNCA a PGR junto, mesmo que ela esteja cadastrada sob
-  // a categoria "Seguros" no portal (é uma particularidade do cadastro
-  // real, não do pedido da pessoa). A PGR só entra quando citada
-  // explicitamente na MESMA pergunta ("apólices de seguro e PGR", "seguro e
-  // gerenciamento/gestão de risco"): nesse caso as duas apólices E a PGR
-  // são entregues juntas. Resolvido trocando `types`/`categories` por um
-  // pedido explícito das duas apólices (+ PGR, se citada) em vez de deixar
-  // a expansão por `d.categoria === "seguros"` (que traria qualquer coisa
-  // cadastrada sob essa categoria, PGR incluída) seguir seu curso normal.
-  // "Apólice" (o rótulo genérico, sem RCTR-C/RC-DC) não conta como tipo
-  // específico aqui — ele só bate por causa da palavra solta "apólice(s)"
-  // no próprio pedido genérico ("Apólices de seguro e PGR" também reconhece
-  // esse rótulo), então ignorá-lo é o que garante que esse mesmo pedido
-  // ainda dispare a regra abaixo em vez de ser tratado como "já específico".
-  const pediuSegurosGenerico =
-    !seguroCliente &&
-    categories.includes("seguros") &&
-    !types.some((k) => k.key === "seguros" && k.label !== "Apólice");
-  if (pediuSegurosGenerico) {
-    const jaTemPgr = types.some((k) => k.label === "PGR");
-    // Preserva qualquer OUTRO tipo não relacionado a seguros já reconhecido
-    // na mesma pergunta (ex.: "seguros e alvará de MG") — só o rótulo
-    // genérico "Apólice" e uma eventual PGR já detectada são descartados
-    // daqui, pra entrar de novo logo abaixo já na posição certa (PGR só se
-    // realmente pedida).
-    const outrosTypes = types.filter((k) => k.key !== "seguros" && k.label !== "PGR");
-    types = [
-      ...outrosTypes,
-      ...SEGUROS_GERAIS_TYPES,
-      ...(jaTemPgr && PGR_TYPE ? [PGR_TYPE] : []),
-    ];
-    categories = categories.filter((c) => c !== "seguros");
-  }
   // afeAtividade (pedido explícito da Iasmin, 2026-09-18): mesma lógica do
   // seguroCliente acima, mas para diferenciar AFEs por atividade/categoria
   // de produto ("AFE de saneantes" x "AFE de cosméticos") — sem atividade
@@ -6453,6 +6461,19 @@ function parseIntent(text) {
   // (wantsValueOnly).
   if (!wantsValueOnly && (types.length === 1 || categories.length === 1)) {
     return { intent: "DOWNLOAD_DOCUMENT", types, categories, seguroCliente, afeAtividade, anoDocumento };
+  }
+  // Mesma regra acima, generalizada pra MAIS de um tipo/categoria citado
+  // junto na mesma frase, ainda sem nenhum verbo de ação (pedido explícito
+  // da Iasmin, 2026-09-28: "Apólices de seguro e PGR" dita pura, sem
+  // "manda"/"baixe", ainda precisa entregar os documentos — do contrário
+  // caía aqui em SEARCH_INFO, que `send()` não trata em nenhum branch e
+  // acaba caindo no aviso de "conversa livre indisponível", regressão real
+  // relatada por ela: "ainda não está funcionando o que falamos"). Só entra
+  // quando NENHUM branch anterior (incluindo o de download/zip/find com
+  // múltiplos itens, mais acima) já resolveu — ou seja, especificamente o
+  // caso de 2+ tipos/categorias reconhecidos sem nenhum verbo de ação.
+  if (!wantsValueOnly && types.length + categories.length > 1) {
+    return { intent: "DOWNLOAD_MULTIPLE_DOCUMENTS", types, categories, seguroCliente, afeAtividade, anoDocumento };
   }
   return { intent: "SEARCH_INFO", types, categories, seguroCliente, afeAtividade, anoDocumento };
 }
