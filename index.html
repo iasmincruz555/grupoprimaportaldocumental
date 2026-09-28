@@ -2165,6 +2165,53 @@ function safeFileSlug(s) {
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
   return bytes;
 }
+/** EXTENSAO_POR_MIME_TYPE / garantirExtensaoArquivo: quando o nome original
+ *  do arquivo não está disponível (documento sem `arquivo.nomeOriginal`
+ *  gravado), `fetchDocumentFile` sempre caiu de volta pro RÓTULO DO TIPO
+ *  documental (`doc.tipo`, ex.: "Faturamento", "ANTT/RNTRC") como nome do
+ *  arquivo — um rótulo nunca tem extensão. Sem extensão, o arquivo final no
+ *  ZIP virava um arquivo "genérico" pro Windows/macOS (ícone de página em
+ *  branco, tipo "Arquivo"/"File" em vez do ícone e app corretos do PDF) —
+ *  bug real relatado pela Iasmin, 2026-09-28: "não entendi pq o faturamento
+ *  e a ANTT os arquivos estão quebrados" (os bytes em si nunca foram
+ *  alterados — sempre o binário original, intacto — só faltava dizer ao
+ *  sistema operacional qual programa abre aquele arquivo). Corrigido na
+ *  FONTE (aqui, dentro de fetchDocumentFile) pra nunca devolver um nome sem
+ *  extensão reconhecível: quando falta, deriva uma a partir do `mimeType`
+ *  real do arquivo (que a Drive/o upload sempre informam) — nunca um chute
+ *  às cegas, e nunca mexe no nome quando ele já tem uma extensão. */
+const EXTENSAO_POR_MIME_TYPE = {
+  "application/pdf": "pdf",
+  "image/jpeg": "jpg",
+  "image/jpg": "jpg",
+  "image/png": "png",
+  "image/webp": "webp",
+  "image/gif": "gif",
+  "image/heic": "heic",
+  "image/tiff": "tif",
+  "application/msword": "doc",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+  "application/vnd.ms-excel": "xls",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
+  "application/vnd.ms-powerpoint": "ppt",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation": "pptx",
+  "text/csv": "csv",
+  "text/plain": "txt",
+  "application/zip": "zip",
+  "application/rtf": "rtf",
+};
+function garantirExtensaoArquivo(filename, mimeType) {
+  const nome = String(filename || "").trim();
+  // Já tem uma extensão de verdade (algo depois do último ponto, sem espaço
+  // — descarta falso positivo tipo "Grupoprima Ltda." terminando em ponto
+  // solto): mantém o nome exatamente como veio, nunca mexe.
+  const partes = nome.split(".");
+  const possivelExt = partes.length > 1 ? partes[partes.length - 1] : "";
+  if (possivelExt && /^[a-zA-Z0-9]{1,6}$/.test(possivelExt)) return nome;
+  const extInferida = EXTENSAO_POR_MIME_TYPE[mimeType];
+  if (!extInferida) return nome; // mimeType desconhecido: nunca inventa uma extensão às cegas.
+  return nome ? `${nome}.${extInferida}` : `documento.${extInferida}`;
+}
 /** fetchDocumentFile: busca o binário ORIGINAL do documento — hoje, direto
  *  do Google Drive (pasta oficial), usando o conector que a própria
  *  usuária já autorizou. Retorna sempre o arquivo exatamente como está no
@@ -2209,7 +2256,7 @@ function safeFileSlug(s) {
       const blob = new Blob([bytes], { type: mimeType });
       return {
         blob,
-        filename: doc.arquivo.nomeOriginal || doc.tipo,
+        filename: garantirExtensaoArquivo(doc.arquivo.nomeOriginal || doc.tipo, mimeType),
         mimeType,
         bytes,
       };
@@ -2217,10 +2264,11 @@ function safeFileSlug(s) {
     const local = uploadedFileRegistry.get(doc.id);
     if (local) {
       const bytes = new Uint8Array(await local.arrayBuffer());
+      const mimeTypeLocal = doc.arquivo?.mimeType || local.type;
       return {
         blob: local,
-        filename: doc.arquivo?.nomeOriginal || local.name || doc.tipo,
-        mimeType: doc.arquivo?.mimeType || local.type,
+        filename: garantirExtensaoArquivo(doc.arquivo?.nomeOriginal || local.name || doc.tipo, mimeTypeLocal),
+        mimeType: mimeTypeLocal,
         bytes,
       };
     }
@@ -2263,7 +2311,7 @@ function safeFileSlug(s) {
         const blob = new Blob([bytes], { type: mimeType });
         return {
           blob,
-          filename: doc.arquivo.nomeOriginal || doc.tipo,
+          filename: garantirExtensaoArquivo(doc.arquivo.nomeOriginal || doc.tipo, mimeType),
           mimeType,
           bytes,
         };
@@ -2340,7 +2388,10 @@ function safeFileSlug(s) {
   const mimeType =
     doc.arquivo.mimeType || payload.mimeType || "application/octet-stream";
   const blob = new Blob([bytes], { type: mimeType });
-  const filename = doc.arquivo.nomeOriginal || payload.title || doc.tipo;
+  const filename = garantirExtensaoArquivo(
+    doc.arquivo.nomeOriginal || payload.title || doc.tipo,
+    mimeType,
+  );
   return { blob, filename, mimeType, bytes };
 }
 /** entregaArquivo: entrega o Blob ao usuário. Dois caminhos reais, nunca
@@ -2941,6 +2992,7 @@ const AUDIT_ACTION_LABELS = {
   baixou_zip_lote: "Baixou ZIP da solicitação em lote",
   concluiu_lote: "Concluiu solicitação de envio em lote",
   atualizou_solicitacao_lote: "Atualizou solicitação de envio em lote",
+  excluiu_solicitacao_lote: "Excluiu solicitação de envio em lote",
   // Novas ações — "Meu Perfil" e sistema de permissões (pedido da Iasmin,
   // 2026-09-25).
   trocou_senha: "Alterou a própria senha",
@@ -4398,24 +4450,52 @@ function tipoLabelsAceitos(label) {
   );
   return atividade.match.test(texto);
 }
-/** detectAnoDocumento: extrai um ano de 4 dígitos (20xx) citado num pedido do
- *  CHAT — usado pra diferenciar documentos de tipos em
- *  SEM_SUBSTITUICAO_TIPOS que se repetem ano a ano sem se substituir (ex.:
- *  "DRE de 2024", "Balanço de 2023"), pedido explícito da Iasmin,
- *  2026-09-18. Sem ano citado, fica null — o pedido genérico do tipo (ex.:
- *  "me manda o DRE") deve trazer TODOS os anos disponíveis, nunca só o mais
- *  recente (nenhum é "o atual"). */ function detectAnoDocumento(text) {
-  const m = String(text || "").match(/\b20\d{2}\b/);
-  return m ? m[0] : null;
+/** detectAnoDocumento: extrai os anos de 4 dígitos (20xx) citados num pedido
+ *  (chat ou linha de checklist do Envio em Lote) — usado pra diferenciar
+ *  documentos de tipos em SEM_SUBSTITUICAO_TIPOS que se repetem ano a ano
+ *  sem se substituir (ex.: "DRE de 2024", "Balanço de 2023"). Sem ano
+ *  citado, devolve null (o pedido genérico do tipo, ex.: "me manda o DRE",
+ *  deve trazer TODOS os anos disponíveis, nunca só o mais recente — nenhum
+ *  é "o atual"). Com UM ano citado, devolve esse ano como STRING (contrato
+ *  original, mantido de propósito — outros pontos do código comparam
+ *  `anoDocumento === "2024"` diretamente). Estendido em 2026-09-28 (pedido
+ *  explícito da Iasmin) pra reconhecer MAIS DE UM ano na mesma frase
+ *  ("Faturamento 2025 e 2024", "Balanço patrimonial 2025, 2024 e 2023") —
+ *  antes só o primeiro ano citado era reconhecido, e os demais eram
+ *  silenciosamente ignorados (bug real: pedir "2025 e 2024" só trazia
+ *  2025): nesse caso (2+ anos), devolve um ARRAY com cada ano, na ordem em
+ *  que aparecem no texto, sem repetição — todo chamador que precisa dessa
+ *  distinção usa `Array.isArray(anoDocumento)` (ver
+ *  matchChecklistItemToCompany); os demais (docTextMentionsAno,
+ *  formatAnosLabel) aceitam string OU array igualmente. */
+function detectAnoDocumento(text) {
+  const anos = [
+    ...new Set((String(text || "").match(/\b20\d{2}\b/g) || [])),
+  ];
+  if (anos.length === 0) return null;
+  return anos.length === 1 ? anos[0] : anos;
+}
+/** formatAnosLabel: um ano só (string) ou uma lista de anos
+ *  (`detectAnoDocumento`) formatado por extenso pra compor rótulos de "não
+ *  encontrado" — "2025", "2025 e 2024", "2025, 2024 e 2023". */
+function formatAnosLabel(anoOuAnos) {
+  const lista = Array.isArray(anoOuAnos) ? anoOuAnos : anoOuAnos ? [anoOuAnos] : [];
+  if (lista.length <= 1) return lista[0] || "";
+  return `${lista.slice(0, -1).join(", ")} e ${lista[lista.length - 1]}`;
 }
 /** docTextMentionsAno: testa se UM DOCUMENTO (título/nome do arquivo/
- *  descrição) cita um ano específico — usado junto com detectAnoDocumento
- *  pra filtrar documentos de Contabilidade (e, quando aplicável, Seguros)
- *  pelo ano pedido no chat. */ function docTextMentionsAno(d, ano) {
+ *  descrição) cita ALGUM dos anos pedidos — usado junto com
+ *  detectAnoDocumento pra filtrar documentos de Contabilidade (e, quando
+ *  aplicável, Seguros) pelo(s) ano(s) pedido(s) no chat/checklist. Aceita
+ *  tanto um ano só (string) quanto uma lista de anos (array) — um documento
+ *  basta citar QUALQUER UM deles pra contar (é assim que "2025 e 2024" traz
+ *  os dois documentos, cada um citando só o seu próprio ano). */
+function docTextMentionsAno(d, anoOuAnos) {
   const texto = [d.titulo, d.arquivo?.nomeOriginal, d.descricao]
     .filter(Boolean)
     .join(" ");
-  return texto.includes(ano);
+  const anos = Array.isArray(anoOuAnos) ? anoOuAnos : [anoOuAnos];
+  return anos.some((ano) => ano && texto.includes(ano));
 }
 /** anoDeDocumentoContabil: extrai o ano (número) de UM documento de
  *  Contabilidade, para ordenar os subgrupos "Balanços Patrimoniais/DREs/
@@ -5323,7 +5403,7 @@ function refinarMatchesPorRegraDeTipoEspecifico(
   }
   if (SEM_SUBSTITUICAO_TIPOS.has(tipoLabel) && anoDocumento) {
     out = out.filter((d) => docTextMentionsAno(d, anoDocumento));
-    sufixo += ` ${anoDocumento}`;
+    sufixo += ` ${formatAnosLabel(anoDocumento)}`;
   }
   return { matches: out, sufixo };
 }
@@ -5405,6 +5485,32 @@ function matchChecklistItemToCompany(item, company) {
     if (atuais.length === 0) return { status: "nao_localizado", candidatos: [] };
     if (atuais.length === 1)
       return { status: "encontrado", doc: atuais[0], candidatos: atuais };
+    // Tipo de SEM_SUBSTITUICAO_TIPOS (Faturamento, DRE, Balanço, Balancete,
+    // Demonstração Contábil, AFE, Apólice RCTR-C/RC-DC) com mais de um
+    // documento restante: NUNCA ambíguo — é exatamente o mesmo raciocínio
+    // já aplicado pelo chat (searchDocuments/`semSubstituicao`, ver
+    // comentário lá): documentos desses tipos não se "arquivam" uns aos
+    // outros (cada ano de Faturamento/Balanço é seu próprio documento
+    // válido, cada AFE de atividade diferente idem), então mais de um
+    // candidato aqui nunca significa incerteza sobre QUAL documento a
+    // pessoa quer — significa que ela quer TODOS os que sobraram depois do
+    // refinamento acima (todos os anos, quando nenhum foi citado; só os
+    // anos citados, quando foram — refinarMatchesPorRegraDeTipoEspecifico
+    // já filtrou isso). Cada um vira seu próprio arquivo no ZIP (mesmo
+    // padrão de "grupo" já usado pra categoria inteira). Antes deste ajuste
+    // (pedido explícito da Iasmin, 2026-09-28), SÓ o chat tinha esse
+    // comportamento — o Envio em Lote caía na heurística de desempate
+    // abaixo, que quase sempre falhava pra este caso (nenhuma pista
+    // distingue "2025" de "2024" sozinha, já que cada uma bate em só um
+    // candidato) e devolvia "ambíguo": tanto um pedido explícito de vários
+    // anos ("Faturamento 2025 e 2024", que antes só trazia 2025 — bug
+    // relatado com prints) quanto um pedido SEM ano nenhum, quando já
+    // existe mais de um ano cadastrado (ex.: só "Faturamento", que deveria
+    // trazer todos os anos automaticamente, igual ao chat, nunca pedir
+    // confirmação manual).
+    if (SEM_SUBSTITUICAO_TIPOS.has(item.tipoSugerido)) {
+      return { status: "grupo", candidatos: atuais };
+    }
     // Só palavras que aparecem em ALGUNS títulos, não em TODOS, servem de
     // desempate — uma palavra comum a todos os candidatos (ex.: "apólice",
     // quando o próprio tipo já é "Apólice") não distingue nada, e contá-la
@@ -5433,15 +5539,36 @@ function matchChecklistItemToCompany(item, company) {
       const clienteNome = detectSeguroClienteEspecificoNome(
         item.descricaoOriginal || "",
       );
-      brutos = clienteNome
-        ? brutos.filter((d) =>
-            (d.docFamily || "").startsWith(
-              `seguro_cliente_${slugifyDocFamily(clienteNome)}`,
-            ),
-          )
-        : brutos.filter(
-            (d) => (d.subcategoria || "geral") !== "clientes_especificos",
-          );
+      if (clienteNome) {
+        brutos = brutos.filter((d) =>
+          (d.docFamily || "").startsWith(
+            `seguro_cliente_${slugifyDocFamily(clienteNome)}`,
+          ),
+        );
+      } else {
+        // Pedido genérico da categoria inteira "seguros" (sem cliente
+        // específico): mesma regra já aplicada no chat (searchDocuments,
+        // pedido explícito da Iasmin, 2026-09-28 — "ao solicitar 'apólices'/
+        // 'seguros'/'apólice de seguro'... somente o RCTR-C e o RC-DC devem
+        // ser enviados") — nunca a categoria inteira como cadastrada (que
+        // pode trazer PGR por particularidade do cadastro real, ou Endosso/
+        // Certificado de Seguro/Condições Particulares, que só devem
+        // aparecer quando pedidos pelo próprio tipo/item, nunca por
+        // checklist genérico de "seguro"). Regressão real: um item de
+        // checklist "Seguros" trazia PGR + RCTR-C + RC-DC juntos no Envio em
+        // Lote, mesmo já corrigido no chat — as duas implementações não
+        // podem divergir (mesma regra documentada acima, no topo de
+        // matchChecklistItemToCompany).
+        const rotulosApoliceGeral = [
+          ...tipoLabelsAceitos("Apólice RCTR-C"),
+          ...tipoLabelsAceitos("Apólice RC-DC"),
+        ];
+        brutos = brutos.filter(
+          (d) =>
+            (d.subcategoria || "geral") !== "clientes_especificos" &&
+            rotulosApoliceGeral.includes(d.tipo),
+        );
+      }
     }
     const atuais = currentDocsFor(brutos);
     if (atuais.length === 0) return { status: "nao_localizado", candidatos: [] };
@@ -16528,6 +16655,31 @@ function isArquivoDeHomologacao(arquivo) {
     ARQUIVOS_HOMOLOGACAO_FOLDER_NAME,
   );
 }
+/** isArquivoDeEnvioLote: mesmo raciocínio de isArquivoDeHomologacao acima
+ *  (pedido original da Iasmin, 2026-09-21, sobre "Enviados pelo Portal"),
+ *  agora para a pasta raiz do Drive alimentada pelo fluxo de "Envio de
+ *  Documentações em Lote" — pedido explícito da Iasmin, 2026-09-28: "ao
+ *  fazer a nova sincronização, elas aparecem [...] Isso não deve acontecer,
+ *  tal como foi definido antes com os arquivos enviados na homologação.
+ *  Eles não fazem parte dessa leva de documentos a serem analisados na
+ *  sincronização". O ZIP final de cada solicitação e qualquer anexo
+ *  recebido do cliente (ambos gravados via `tryPersistUploadedFile` com
+ *  `opts.pasta` apontando pra dentro de `NOME_PASTA_ENVIO_LOTE_DRIVE/
+ *  <cliente>/<id da solicitação>` — ver pastaLoteParaSolicitacao/
+ *  processarLote, mais abaixo neste arquivo) nunca devem entrar na
+ *  classificação, na fila de conferência nem nos totais de uma
+ *  sincronização — só continuam acessíveis pela própria aba de Envio em
+ *  Lote, exatamente como já acontece com os anexos de Homologação. Lê
+ *  `NOME_PASTA_ENVIO_LOTE_DRIVE` (declarada mais abaixo, junto do resto do
+ *  Envio em Lote) só dentro do corpo da função — nunca no nível do módulo —
+ *  porque esta função é definida ANTES daquela constante no arquivo, e só é
+ *  efetivamente chamada bem depois de todo o script já ter carregado (num
+ *  clique de sincronização), quando a constante já está inicializada. */
+function isArquivoDeEnvioLote(arquivo) {
+  if (!arquivo) return false;
+  if (arquivo.title === NOME_PASTA_ENVIO_LOTE_DRIVE) return true;
+  return (arquivo.folderPath || []).includes(NOME_PASTA_ENVIO_LOTE_DRIVE);
+}
 /** ARQUIVOS_EXCLUIDOS_COLLECTION: registra, pelo `driveFileId`, todo
  *  documento que a usuária excluiu manualmente do portal
  *  (`excluirDocumentoConfirmado`) — pedido explícito da Iasmin, 2026-09-21:
@@ -16572,8 +16724,10 @@ async function fetchArquivosExcluidosIds(db) {
  *  (`id`,`title`,`mimeType`,`fileSize`,`folderPath`), para que
  *  `classificarArquivo` e o restante da pipeline funcionem sem distinguir
  *  a origem dos dados. Arquivos (e a própria pasta, quando listada por
- *  engano como arquivo) dentro de "Enviados pelo Portal" nunca entram aqui
- *  — ver ARQUIVOS_HOMOLOGACAO_FOLDER_NAME/isArquivoDeHomologacao acima. */ async function listDriveFilesViaProxy() {
+ *  engano como arquivo) dentro de "Enviados pelo Portal" OU de
+ *  "ENVIO DE DOCUMENTAÇÕES EM LOTE" nunca entram aqui — ver
+ *  ARQUIVOS_HOMOLOGACAO_FOLDER_NAME/isArquivoDeHomologacao/
+ *  isArquivoDeEnvioLote acima. */ async function listDriveFilesViaProxy() {
   const resp = await fetch(`${DRIVE_PROXY_URL}/files?t=${Date.now()}`, {
     headers: DRIVE_PROXY_KEY ? { "X-Portal-Key": DRIVE_PROXY_KEY } : {},
     cache: "no-store",
@@ -16592,7 +16746,7 @@ async function fetchArquivosExcluidosIds(db) {
       fileSize: a.tamanho || null,
       folderPath: a.pasta ? a.pasta.split(" / ") : [],
     }))
-    .filter((a) => !isArquivoDeHomologacao(a));
+    .filter((a) => !isArquivoDeHomologacao(a) && !isArquivoDeEnvioLote(a));
 }
 /** renderPdfFirstPageToBlob: renderiza a 1ª página do PDF (bytes reais) num
  *  canvas e devolve um PNG — usado só pelo botão manual "Analisar com IA"
@@ -16733,7 +16887,9 @@ function SyncView({ companies, onNotify }) {
       // quando `files` veio de lá (idempotente) — mas essencial pro caminho
       // alternativo via crawlDriveFolder/mcp, que não passa por aquela
       // função e por isso não seria filtrado sem esta linha.
-      files = (files || []).filter((f) => !isArquivoDeHomologacao(f));
+      files = (files || []).filter(
+        (f) => !isArquivoDeHomologacao(f) && !isArquivoDeEnvioLote(f),
+      );
       // Arquivos excluídos manualmente do portal (ver
       // ARQUIVOS_EXCLUIDOS_COLLECTION/registrarArquivoExcluido) nunca
       // voltam numa sincronização futura — pedido explícito da Iasmin,
@@ -19641,6 +19797,16 @@ function EnvioLoteStyles() {
       .lote-etapa-item.ok { color: #0b4a2c; }
       .lote-etapa-item.erro { color: #a13333; }
       .lote-versao-zip { display:flex; align-items:center; justify-content: space-between; gap: 8px; border: 1px solid var(--cinza-frio); border-radius: 8px; padding: 8px 12px; margin-bottom: 6px; font-size: 12.5px; }
+      /* Ação de exclusão da solicitação (pedido explícito da Iasmin,
+         2026-09-28) — mesmo padrão visual/CSS já usado no botão de
+         Homologação (.homolog-status-actions/.homolog-delete-btn/
+         .homolog-delete-confirm em HomologacaoDetailView), reaproveitando
+         .doc-row-delete-confirm* (já globais) pra caixa de confirmação em
+         si. */
+      .lote-status-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
+      .lote-delete-btn { color: var(--vermelho, #b3261e); border-color: rgba(179,38,30,0.35); }
+      .lote-delete-btn:hover { border-color: var(--vermelho, #b3261e); }
+      .lote-delete-confirm { max-width: 420px; text-align: left; margin-top: 10px; }
     `,
   );
 }
@@ -19716,6 +19882,28 @@ async function processarLote(solicitacao, { companies, usuarioProcessamento, dep
   const itensAtualizados = (solicitacao.documentacoesSolicitadas || []).map((item) => {
     const statusPorBase = { ...(item.statusPorBase || {}) };
     const resolvidosDoItem = [];
+    // Documento de abrangência empresarial (Contratos Sociais, Contabilidade,
+    // Seguros gerais, Planos/Procedimentos/Manuais, e qualquer outro marcado
+    // "empresa"/"corporativa") é o MESMO arquivo físico repetido em
+    // `company.documentos` de cada base a que se aplica (mesmo `id` — ver
+    // useDerived/confirmados acima), nunca um documento diferente por base.
+    // Sem esta deduplicação, pedir esse documento pra "Matriz e Filial 0004"
+    // casava com ele 2x (uma vez por base) e ele entrava 2x no ZIP com
+    // números diferentes, como se fossem arquivos distintos — bug real
+    // relatado pela Iasmin, 2026-09-28 ("documentos abrangentes de toda
+    // empresa [...] não precisam ser repetidos, só basta enviar uma vez pra
+    // as filiais selecionadas"). `statusPorBase` continua sendo marcado pra
+    // CADA base normalmente logo abaixo (cada base realmente "tem" esse
+    // documento) — só a entrada no ZIP é que nunca duplica o mesmo `id`.
+    const idsCorporativosJaIncluidos = new Set();
+    function pushResolvido(doc) {
+      const ehCorporativo = doc.abrangencia === "empresa" || doc.abrangencia === "corporativa";
+      if (ehCorporativo) {
+        if (idsCorporativosJaIncluidos.has(doc.id)) return;
+        idsCorporativosJaIncluidos.add(doc.id);
+      }
+      resolvidosDoItem.push({ doc });
+    }
     Object.keys(statusPorBase).forEach((baseId) => {
       const stAtual = statusPorBase[baseId];
       if (stAtual === "nao_aplicavel") return;
@@ -19748,11 +19936,11 @@ async function processarLote(solicitacao, { companies, usuarioProcessamento, dep
         : { status: "sem_base", candidatos: [] };
       if (r.status === "encontrado") {
         algumRecebivel = true;
-        resolvidosDoItem.push({ doc: r.doc });
+        pushResolvido(r.doc);
         statusPorBase[baseId] = stAtual === "conferido" ? "conferido" : "recebido";
       } else if (r.status === "grupo" || r.status === "ambiguo") {
         algumRecebivel = true;
-        r.candidatos.forEach((doc) => resolvidosDoItem.push({ doc }));
+        r.candidatos.forEach((doc) => pushResolvido(doc));
         statusPorBase[baseId] = stAtual === "conferido" ? "conferido" : "recebido";
       } else if (stAtual === "recebido" || stAtual === "conferido") {
         algumRecebivel = true; // não é mais localizável agora, mas confia na confirmação anterior
@@ -20310,15 +20498,27 @@ function LoteItemCard({ it, companiesPorId, anexosRecebidos, enviandoAnexoChave,
  *  (uma linha por item, expandida por base), compilado da documentação
  *  (contadores derivados ao vivo), etapas do último processamento,
  *  histórico de versões do ZIP e ação de processar/reprocessar. */
-function EnvioLoteDetailView({ item, companies, onBack, onNotify, onView, onUpdate, currentUser }) {
+function EnvioLoteDetailView({ item, companies, onBack, onNotify, onView, onUpdate, onDelete, currentUser }) {
   const [processando, setProcessando] = useState(false);
   const [novoItemNome, setNovoItemNome] = useState("");
   const [enviandoAnexoChave, setEnviandoAnexoChave] = useState(null);
   const [observacoes, setObservacoes] = useState(item.observacoes || "");
+  const [confirmandoExclusao, setConfirmandoExclusao] = useState(false);
+  const [excluindo, setExcluindo] = useState(false);
+  // isAdmin: exclusão da solicitação restrita a Administrador (pedido
+  // explícito da Iasmin, 2026-09-28), mesmo gate já usado pra excluir um
+  // documento do catálogo (DocRowActions) — nunca aberto pros perfis
+  // Comercial/Consulta, mesmo que eles possam criar/processar solicitações
+  // de envio em lote normalmente.
+  const isAdmin = can(currentUser, "excluirDocumentos");
   const companiesPorId = useMemo(() => new Map(companies.map((c) => [c.id, c])), [companies]);
 
   function persistPatch(patch) {
     onUpdate(patch);
+  }
+  async function handleExcluir() {
+    setExcluindo(true);
+    await onDelete?.(item.id);
   }
   function alterarStatus(itemId, baseId, novoStatus) {
     const documentacoesSolicitadas = item.documentacoesSolicitadas.map((it) =>
@@ -20502,6 +20702,59 @@ function EnvioLoteDetailView({ item, companies, onBack, onNotify, onView, onUpda
         (item.baseIds || []).map((bId) => companyLabelFor(companiesPorId.get(bId))).filter(Boolean).join(", "),
         item.concluidoEm ? ` · concluído em ${formatAuditWhen(new Date(item.concluidoEm))}` : "",
       ),
+      isAdmin &&
+        React.createElement(
+          "div",
+          { className: "lote-status-actions" },
+          // Excluir: pedido explícito da Iasmin (2026-09-28), mesmo padrão
+          // de "Excluir homologação" — sempre disponível (independente do
+          // status da solicitação), nunca um clique único.
+          !confirmandoExclusao &&
+            React.createElement(
+              "button",
+              {
+                className: "doc-view-btn lote-delete-btn",
+                onClick: () => setConfirmandoExclusao(true),
+                title: "Excluir esta solicitação de envio em lote (Administrador)",
+              },
+              React.createElement(XCircle, { size: 14 }),
+              " Excluir solicitação",
+            ),
+        ),
+      isAdmin &&
+        confirmandoExclusao &&
+        React.createElement(
+          "div",
+          { className: "doc-row-delete-confirm lote-delete-confirm" },
+          React.createElement(
+            "span",
+            null,
+            `Excluir a solicitação de "${item.cliente}"? Isso remove o registro definitivamente (checklist, anexos recebidos e histórico de processamento) e não pode ser desfeito. Os arquivos já enviados ao Drive não são apagados.`,
+          ),
+          React.createElement(
+            "div",
+            { className: "doc-row-delete-confirm-actions" },
+            React.createElement(
+              "button",
+              {
+                className: "doc-row-delete-confirm-btn",
+                disabled: excluindo,
+                onClick: handleExcluir,
+              },
+              excluindo ? React.createElement(Loader2, { size: 12, className: "spin" }) : null,
+              "Confirmar exclusão",
+            ),
+            React.createElement(
+              "button",
+              {
+                className: "filters-clear-btn filters-clear-inline",
+                disabled: excluindo,
+                onClick: () => setConfirmandoExclusao(false),
+              },
+              "Cancelar",
+            ),
+          ),
+        ),
     ),
     React.createElement(
       "div",
@@ -20706,6 +20959,31 @@ function EnvioLoteView({ currentUser, onNotify, onView, companies }) {
     if (!atual) return;
     persist({ ...atual, ...patch });
   }
+  /** handleDelete: exclusão manual real de uma solicitação de envio em
+   *  lote (pedido explícito da Iasmin, 2026-09-28: "dê também a
+   *  possibilidade de excluir uma solicitação de envio em lote") — mesmo
+   *  padrão exato de `handleDelete` em HomologacaoView: a UI (`items`) é a
+   *  única fonte de verdade, a escrita em "db" é só um espelho best-effort
+   *  (nunca bloqueia a exclusão), e a confirmação explícita fica a cargo de
+   *  EnvioLoteDetailView (nunca um clique único). */
+  function handleDelete(id) {
+    const item = items.find((it) => it.id === id);
+    setItems((prev) => prev.filter((it) => it.id !== id));
+    setSelectedId(null);
+    getDb()
+      .then((db) => {
+        if (!db) return;
+        return db.collection("batch_document_submissions").doc(id).delete().catch(() => {});
+      })
+      .catch(() => {});
+    logDocumentAction("excluiu_solicitacao_lote", {
+      cliente: item?.cliente || "(sem cliente)",
+    });
+    onNotify?.(
+      `Solicitação de "${item?.cliente || "cliente"}" foi excluída.`,
+      "info",
+    );
+  }
   function handleCreate({ cliente, baseIds, itens }) {
     const id = generateLoteId();
     const agora = new Date().toISOString();
@@ -20801,6 +21079,7 @@ function EnvioLoteView({ currentUser, onNotify, onView, companies }) {
       onNotify: onNotify,
       onView: onView,
       onUpdate: (patch) => handleUpdate(selected.id, patch),
+      onDelete: handleDelete,
       currentUser: currentUser,
     });
   }
@@ -23645,7 +23924,8 @@ function GrupoprimaPortal() {
           background: rgba(255,255,255,0.08);
         }
         .portal-root[data-theme="dark"] .doc-row-delete-btn,
-        .portal-root[data-theme="dark"] .homolog-delete-btn {
+        .portal-root[data-theme="dark"] .homolog-delete-btn,
+        .portal-root[data-theme="dark"] .lote-delete-btn {
           border-color: rgba(255,120,120,0.45);
         }
         .portal-root[data-theme="dark"] .doc-row-delete-confirm {
