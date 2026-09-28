@@ -2993,6 +2993,10 @@ const AUDIT_ACTION_LABELS = {
   concluiu_lote: "Concluiu solicitação de envio em lote",
   atualizou_solicitacao_lote: "Atualizou solicitação de envio em lote",
   excluiu_solicitacao_lote: "Excluiu solicitação de envio em lote",
+  // Migração automática de uma vez só (pedido da Iasmin, 2026-09-28) — ver
+  // runReextracaoDataEmissaoVersaoUmaVez.
+  reextraiu_dados_documentos_existentes:
+    "Reextraiu automaticamente data de emissão/versão de documentos já indexados",
   // Novas ações — "Meu Perfil" e sistema de permissões (pedido da Iasmin,
   // 2026-09-25).
   trocou_senha: "Alterou a própria senha",
@@ -4693,10 +4697,36 @@ function extractDataRotulada(text, labelsRegex) {
   if (raw.includes("/")) return raw;
   return extractDataPorExtenso(raw);
 }
+/** extractDataEmissaoDateline: fallback usado só quando não há nenhum
+ *  rótulo explícito de emissão (extractDataRotulada acima não achou nada) —
+ *  reconhece o padrão de "local e data" tradicionalmente usado no
+ *  rodapé/assinatura de documentos brasileiros (ex.: "Campo Grande, 15 de
+ *  março de 2024" ou "Campo Grande - MS, 15 de março de 2024"), restrito ao
+ *  ÚLTIMO TERÇO do texto extraído — aproxima "perto da assinatura" e reduz
+ *  (sem eliminar) o risco de pegar uma data solta do meio do documento.
+ *  Pedido explícito da Iasmin (2026-09-28): ampliar a detecção automática
+ *  de data de emissão mesmo sabendo desse risco pequeno — ela concordou
+ *  explicitamente em aceitá-lo. Só reconhece data POR EXTENSO (nunca
+ *  DD/MM/AAAA solto sem rótulo): um número separado por barras aparece
+ *  demais em outros contextos — CNPJ mal formatado, número de processo
+ *  etc. — pra arriscar sem um rótulo por perto. */
+function extractDataEmissaoDateline(text) {
+  if (!text) return null;
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+  const trecho = trimmed.slice(Math.floor((trimmed.length * 2) / 3));
+  const re =
+    /[A-ZÀ-Ý][A-Za-zà-ÿ]+(?:\s[A-ZÀ-Ý][A-Za-zà-ÿ]+){0,3}(?:\s*[-\/]\s*[A-Z]{2})?\s*,\s*(\d{1,2}\s*(?:de)?\s*[A-Za-zà-ú]+\s*(?:de)?\s*\d{4})\b/;
+  const m = re.exec(trecho);
+  if (!m) return null;
+  return extractDataPorExtenso(m[1]);
+}
 function extractDataEmissao(text) {
-  return extractDataRotulada(
-    text,
-    "data de emiss[ãa]o|emiss[ãa]o|emitid[oa]|expedid[oa]|expedi[çc][ãa]o",
+  return (
+    extractDataRotulada(
+      text,
+      "data de emiss[ãa]o|emiss[ãa]o|emitid[oa]|expedid[oa]|expedi[çc][ãa]o",
+    ) || extractDataEmissaoDateline(text)
   );
 }
 function extractDataValidade(text) {
@@ -14746,7 +14776,30 @@ function ConferenceQueueView({ onNotify, onView, companies }) {
         (snap) => {
           if (cancelled) return;
           setDbBacked(true);
-          setItems(snap.docs.map((d) => d.data()));
+          const docs = snap.docs.map((d) => d.data());
+          setItems(docs);
+          // Limpeza retroativa de itens indevidos (pedido explícito da
+          // Iasmin, 2026-09-28, com print mostrando o ZIP de "ENVIO DE
+          // DOCUMENTAÇÕES EM LOTE → Interbrands" em "Necessita de
+          // conferência", "Detectado em 25/09/2026") — a exclusão de
+          // sincronização (isArquivoDeHomologacao/isArquivoDeEnvioLote, já
+          // aplicada em listDriveFilesViaProxy/handleSync) só impede itens
+          // NOVOS de entrarem na fila; ela nunca removeu os que já tinham
+          // sido gravados numa sincronização ANTERIOR a essa exclusão
+          // existir — exatamente o caso do print (25/09, 3 dias antes da
+          // exclusão ter sido criada, 28/09). Aqui, a cada carga real da
+          // fila (toda vez que a tela abre, sem depender de rodar
+          // "Sincronizar agora" de novo), qualquer item ainda "pendente"
+          // cujo nome/pasta bate com uma das duas pastas excluídas é
+          // apagado de vez do Firestore — nunca mexe em itens já revisados
+          // (ignorados/classificados), que ficam como estão.
+          docs.forEach((it) => {
+            if (it.status !== "pendente") return;
+            const arquivoFake = { title: it.nomeOriginal, folderPath: it.folderPathArr || [] };
+            if (isArquivoDeHomologacao(arquivoFake) || isArquivoDeEnvioLote(arquivoFake)) {
+              col.doc(it.id).delete().catch(() => {});
+            }
+          });
         },
         () => {},
       );
@@ -15629,6 +15682,110 @@ async function analyzeContent(bytes, mimeType, companies) {
     paginasLidas: extracted.paginasLidas,
     totalPaginas: extracted.totalPaginas,
   };
+}
+/** extractTextoParaReextracao: extrai só o TEXTO real do arquivo (texto
+ *  embutido do PDF via pdf.js, com OCR como fallback para PDF escaneado;
+ *  OCR direto para imagem) — mesmo caminho de leitura já usado por
+ *  analyzeContent acima, mas SEM reclassificar categoria/tipo/empresa.
+ *  Usada só pela migração de reextração de data de emissão/versão
+ *  (runReextracaoDataEmissaoVersaoUmaVez, pedido da Iasmin, 2026-09-28):
+ *  ali a categoria do documento já é conhecida — é o registro já
+ *  confirmado — e nunca deve ser re-derivada do conteúdo, o que poderia
+ *  divergir da classificação já confirmada por um administrador. Devolve
+ *  `null` quando não há texto legível (mesmos critérios de
+ *  analyzeContent), nunca um texto vazio fingindo sucesso. */
+async function extractTextoParaReextracao(bytes, mimeType) {
+  const isPdf = mimeType === "application/pdf";
+  const isImage =
+    typeof mimeType === "string" && mimeType.indexOf("image/") === 0;
+  if (!isPdf && !isImage) return null;
+  if (isImage) {
+    const ocr = await extractTextViaOcrFromImage(bytes, mimeType);
+    if (!ocr.ok || ocr.text.replace(/\s+/g, "").length < 20) return null;
+    return ocr.text;
+  }
+  const extracted = await extractPdfText(bytes);
+  if (extracted.ok && extracted.text.replace(/\s+/g, "").length >= 20)
+    return extracted.text;
+  const ocr = await extractTextViaOcrFromPdf(bytes);
+  if (ocr.ok && ocr.text.replace(/\s+/g, "").length >= 20) return ocr.text;
+  return null;
+}
+/** REEXTRACAO_DATA_VERSAO_FLAG_KEY: chave de localStorage usada só como
+ *  atalho pra não repetir a migração abaixo no MESMO navegador a cada
+ *  carregamento — nunca é o que garante que ela só faz efeito uma vez
+ *  (isso quem garante é ela mesma só processar documentos com
+ *  emissao/versao ainda faltando: uma vez corrigidos, rodar de novo, de
+ *  qualquer navegador, não encontra mais nada a fazer). */
+const REEXTRACAO_DATA_VERSAO_FLAG_KEY =
+  "grupoprima_reextracao_data_versao_2026_09_28";
+/** runReextracaoDataEmissaoVersaoUmaVez: migração automática de UMA VEZ SÓ
+ *  (pedido explícito da Iasmin, 2026-09-28: "Faça automaticamente os que
+ *  já estão no portal, só dessa vez. E os novos já vao ser analisados
+ *  dessa nova forma") — reprocessa documentos JÁ indexados em
+ *  "documentos_confirmados" cuja data de emissão (ou, para contratos
+ *  societários, o número de versão/alteração) não foi identificada na
+ *  classificação original, agora que extractDataEmissao reconhece também
+ *  o padrão de dateline sem rótulo explícito (extractDataEmissaoDateline).
+ *  Reaproveita a MESMA extração de texto/campos já usada pela
+ *  sincronização normal (extractTextoParaReextracao +
+ *  extractDocumentFields/extractVersaoLabel) — nunca uma lógica paralela.
+ *  Nunca toca em nenhum outro campo do registro (categoria, tipo, base,
+ *  abrangência, título etc.) — só emissao/versao, e só quando estavam
+ *  vazios; documentos que já têm um valor NUNCA são sobrescritos. Nunca
+ *  lança, nunca bloqueia a UI — falha de um documento (arquivo
+ *  indisponível, formato sem leitura automática etc.) nunca impede os
+ *  demais. */
+async function runReextracaoDataEmissaoVersaoUmaVez(confirmedDocs) {
+  try {
+    if (localStorage.getItem(REEXTRACAO_DATA_VERSAO_FLAG_KEY) === "concluido")
+      return;
+  } catch (e) {}
+  const pendentes = (confirmedDocs || []).filter(
+    (d) => !d.emissao || (d.categoria === "contratos_sociais" && !d.versao),
+  );
+  if (pendentes.length === 0) {
+    try {
+      localStorage.setItem(REEXTRACAO_DATA_VERSAO_FLAG_KEY, "concluido");
+    } catch (e) {}
+    return;
+  }
+  const db = await getDb().catch(() => null);
+  if (!db) return;
+  let algumCorrigido = false;
+  for (const doc of pendentes) {
+    try {
+      const arquivo = await fetchDocumentFile(doc);
+      const mimeType = arquivo.mimeType || doc.arquivo?.mimeType;
+      const text = await extractTextoParaReextracao(arquivo.bytes, mimeType);
+      if (!text) continue;
+      const patch = {};
+      if (!doc.emissao) {
+        const dataEmissao = extractDataEmissao(text);
+        if (dataEmissao) patch.emissao = dataEmissao;
+      }
+      if (doc.categoria === "contratos_sociais" && !doc.versao) {
+        const versaoSugerida = extractVersaoLabel(doc.categoria, text);
+        if (versaoSugerida) patch.versao = versaoSugerida;
+      }
+      if (Object.keys(patch).length === 0) continue;
+      await db
+        .collection("documentos_confirmados")
+        .doc(doc.id)
+        .set({ ...doc, ...patch });
+      algumCorrigido = true;
+    } catch (e) {
+      // best-effort — segue para o próximo documento.
+    }
+  }
+  try {
+    localStorage.setItem(REEXTRACAO_DATA_VERSAO_FLAG_KEY, "concluido");
+  } catch (e) {}
+  if (algumCorrigido) {
+    logDocumentAction("reextraiu_dados_documentos_existentes", {
+      quantidade: pendentes.length,
+    });
+  }
 }
 /** ETAPA 4 — cruzamento das evidências pela hierarquia de confiança:
  *  1) informação explícita no conteúdo; 2) CNPJ/razão social no conteúdo;
@@ -23748,6 +23905,20 @@ function GrupoprimaPortal() {
   // sem precisar refazer o login a cada F5.
   const [authenticated, setAuthenticated] = useState(() => !!loadPortalSession());
   const [currentUser, setCurrentUser] = useState(() => loadPortalSession());
+  // Migração automática de UMA VEZ SÓ: reextrai data de emissão/versão dos
+  // documentos que já estavam no portal antes desta melhoria (pedido
+  // explícito da Iasmin, 2026-09-28 — ver runReextracaoDataEmissaoVersaoUmaVez,
+  // acima, pra detalhes de como ela nunca repete nem sobrescreve valores já
+  // preenchidos). Só dispara com confirmedDocs já carregado de verdade
+  // (nunca sobre `null`, que só significa "ainda carregando") e com uma
+  // sessão de Administrador autenticada — mesma permissão que já governa
+  // editar documentos, já que isto reescreve campos de registros
+  // existentes. Best-effort: nunca bloqueia a UI, nunca lança.
+  useEffect(() => {
+    if (!confirmedDocs || confirmedDocs.length === 0) return;
+    if (!currentUser || !can(currentUser, "editarDocumentos")) return;
+    runReextracaoDataEmissaoVersaoUmaVez(confirmedDocs).catch(() => {});
+  }, [confirmedDocs, currentUser]);
   // themePreference: o que está salvo ("light" | "dark" | "auto"). `theme`
   // (mais abaixo) é o valor JÁ RESOLVIDO pra "light"/"dark" que o resto do
   // portal usa (data-theme, ícones) — quando a preferência é "auto", ele
