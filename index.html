@@ -4183,6 +4183,14 @@ async function createDocumentPackageMultiBase(numerados, opts = {}) {
     },
     { key: "outros", label: "Outro documento", match: /outros documentos/ },
   ];
+/** SEGUROS_GERAIS_TYPES / PGR_TYPE: usados só pelo atalho de "seguros"
+ *  genérico dentro de `parseIntent` (ver `pediuSegurosGenerico`, logo
+ *  abaixo) — nunca duplicam os regex de reconhecimento já definidos acima
+ *  em DOC_TYPE_KEYWORDS, só reaproveitam as mesmas entradas por rótulo. */
+const SEGUROS_GERAIS_TYPES = DOC_TYPE_KEYWORDS.filter(
+  (k) => k.label === "Apólice RCTR-C" || k.label === "Apólice RC-DC",
+);
+const PGR_TYPE = DOC_TYPE_KEYWORDS.find((k) => k.label === "PGR");
 /** TIPO_LABEL_SINONIMOS_LEGADOS: quando o rótulo CANÔNICO de um tipo (o que
  *  aparece acima em DOC_TYPE_KEYWORDS, usado pro reconhecimento do PEDIDO)
  *  precisa mudar pra ficar mais claro ou consistente com os demais, um
@@ -6314,13 +6322,52 @@ function gerarChecklistViaRegras(texto) {
 }
 function parseIntent(text) {
   const t = normalize(text);
-  const types = detectRequestedTypes(text);
-  const categories = detectRequestedCategories(text); // seguroCliente (pedido explícito da Iasmin, 2026-09-17): quando a
+  let types = detectRequestedTypes(text);
+  let categories = detectRequestedCategories(text); // seguroCliente (pedido explícito da Iasmin, 2026-09-17): quando a
   // categoria "seguros" é pedida junto de um cliente conhecido ("seguro da
   // Nestlé"), searchDocuments precisa saber disso pra buscar só os
   // documentos daquele cliente — nunca os gerais da empresa junto. Sem
   // cliente citado, fica null (comportamento padrão: só os gerais).
   const seguroCliente = detectSeguroClienteEspecificoNome(text);
+  // pediuSegurosGenerico (pedido explícito da Iasmin, 2026-09-28): um
+  // pedido GENÉRICO de "seguros"/"apólices"/"apólice de seguro" (sem citar
+  // um tipo específico já reconhecido da própria categoria — RCTR-C, RC-DC,
+  // Endosso, Certificado de Seguro, Condições Particulares — e sem cliente
+  // específico, ver seguroCliente acima) deve entregar SOMENTE as duas
+  // apólices reais que a empresa sempre precisa entregar (Apólice RCTR-C e
+  // Apólice RC-DC) — NUNCA a PGR junto, mesmo que ela esteja cadastrada sob
+  // a categoria "Seguros" no portal (é uma particularidade do cadastro
+  // real, não do pedido da pessoa). A PGR só entra quando citada
+  // explicitamente na MESMA pergunta ("apólices de seguro e PGR", "seguro e
+  // gerenciamento/gestão de risco"): nesse caso as duas apólices E a PGR
+  // são entregues juntas. Resolvido trocando `types`/`categories` por um
+  // pedido explícito das duas apólices (+ PGR, se citada) em vez de deixar
+  // a expansão por `d.categoria === "seguros"` (que traria qualquer coisa
+  // cadastrada sob essa categoria, PGR incluída) seguir seu curso normal.
+  // "Apólice" (o rótulo genérico, sem RCTR-C/RC-DC) não conta como tipo
+  // específico aqui — ele só bate por causa da palavra solta "apólice(s)"
+  // no próprio pedido genérico ("Apólices de seguro e PGR" também reconhece
+  // esse rótulo), então ignorá-lo é o que garante que esse mesmo pedido
+  // ainda dispare a regra abaixo em vez de ser tratado como "já específico".
+  const pediuSegurosGenerico =
+    !seguroCliente &&
+    categories.includes("seguros") &&
+    !types.some((k) => k.key === "seguros" && k.label !== "Apólice");
+  if (pediuSegurosGenerico) {
+    const jaTemPgr = types.some((k) => k.label === "PGR");
+    // Preserva qualquer OUTRO tipo não relacionado a seguros já reconhecido
+    // na mesma pergunta (ex.: "seguros e alvará de MG") — só o rótulo
+    // genérico "Apólice" e uma eventual PGR já detectada são descartados
+    // daqui, pra entrar de novo logo abaixo já na posição certa (PGR só se
+    // realmente pedida).
+    const outrosTypes = types.filter((k) => k.key !== "seguros" && k.label !== "PGR");
+    types = [
+      ...outrosTypes,
+      ...SEGUROS_GERAIS_TYPES,
+      ...(jaTemPgr && PGR_TYPE ? [PGR_TYPE] : []),
+    ];
+    categories = categories.filter((c) => c !== "seguros");
+  }
   // afeAtividade (pedido explícito da Iasmin, 2026-09-18): mesma lógica do
   // seguroCliente acima, mas para diferenciar AFEs por atividade/categoria
   // de produto ("AFE de saneantes" x "AFE de cosméticos") — sem atividade
@@ -9200,14 +9247,28 @@ function CompanyDetailView({
           { className: "company-header-tag" },
           company.tipo === "Matriz" ? "MATRIZ" : `FILIAL ${company.id}`,
         ),
-        /*#__PURE__*/ React.createElement(
-          "span",
-          {
-            className:
-              "status-badge " + companyStatusMeta(company.status).className,
-          },
-          company.status,
-        ),
+        // "Vencido" tratado à parte (pedido explícito da Iasmin, 2026-09-28
+        // e ajustado no mesmo dia): o selo genérico de status generalizava a
+        // Base inteira como "Vencido" só por ter UM documento vencido entre
+        // vários — lido como se a Base toda estivesse irregular. A primeira
+        // correção pôs um botão "Confira as documentações vencidas" bem
+        // aqui no topo do card no lugar do selo — mas a Iasmin pediu pra
+        // tirar também esse botão daqui (ainda chamava atenção demais nesse
+        // lugar de destaque) e mover o atalho pra dentro da própria Base, em
+        // algo mais discreto — ver o KpiCard "Vencidos" clicável logo abaixo,
+        // em "Resumo documental". Aqui no topo, quando o status é "Vencido",
+        // não sobra nenhum selo/botão — só a tag da Base à esquerda. Os
+        // demais status (Próximo do vencimento, Necessita conferência,
+        // Atualizado) continuam mostrando o selo normalmente.
+        company.status !== "Vencido" &&
+          /*#__PURE__*/ React.createElement(
+            "span",
+            {
+              className:
+                "status-badge " + companyStatusMeta(company.status).className,
+            },
+            company.status,
+          ),
       ),
       /*#__PURE__*/ React.createElement(
         "h1",
@@ -9377,6 +9438,15 @@ function CompanyDetailView({
           value: baseOnlyDocs.filter((d) => d.status === "sem_vencimento")
             .length,
         }),
+        // "Confira as documentações vencidas" (pedido explícito da Iasmin,
+        // 2026-09-28): já tinha ficado como um botão de destaque no topo do
+        // card da Base, mas ela pediu algo mais discreto — este KpiCard já
+        // existia mostrando a contagem de vencidos; agora, quando há pelo
+        // menos 1, ele também vira clicável (mesmo mecanismo `onClick` que
+        // KpiCard já suporta, usado em CentralOperacoes) e ganha esse texto
+        // como `sub`, abrindo o assistente já filtrado nos vencidos desta
+        // Base — sem nenhum selo/alerta solto no topo do card, só mais um
+        // KpiCard dentro do "Resumo documental" de sempre.
         /*#__PURE__*/ React.createElement(KpiCard, {
           icon: Clock,
           label: "Vencidos",
@@ -9384,6 +9454,17 @@ function CompanyDetailView({
           tone: baseOnlyDocs.some((d) => d.status === "vencido")
             ? "danger"
             : "default",
+          sub:
+            onOpenChat && baseOnlyDocs.some((d) => d.status === "vencido")
+              ? "Confira as documentações vencidas"
+              : undefined,
+          onClick:
+            onOpenChat && baseOnlyDocs.some((d) => d.status === "vencido")
+              ? () =>
+                  onOpenChat(
+                    `Quais documentos da ${company.tipo === "Matriz" ? "Matriz" : `Filial ${company.id}`} estão vencidos?`,
+                  )
+              : undefined,
         }),
         /*#__PURE__*/ React.createElement(KpiCard, {
           icon: AlertTriangle,
@@ -19824,11 +19905,13 @@ function LoteAnexoInlinePicker({ onFile, disabled, label }) {
 /** EnvioLoteFormModal: "+ Nova solicitação" — mesmo molde de campos do
  *  antigo EnvioDocumentacaoLoteModal (cliente, bases, checklist por texto
  *  colado/arquivo, reaproveitando gerarChecklistViaRegras/
- *  extractTextForResumoSolicitacao sem alteração), com um adicional:
- *  permite também incluir itens manualmente (nome livre) antes mesmo de
- *  criar a solicitação. Ao salvar, cria o registro já e abre o detalhe —
- *  nenhuma prévia de ZIP aqui dentro (isso agora é o "Processar
- *  documentação" na tela de detalhe). */
+ *  extractTextForResumoSolicitacao sem alteração). Ao salvar, cria o
+ *  registro já e abre o detalhe — nenhuma prévia de ZIP aqui dentro (isso
+ *  agora é o "Processar documentação" na tela de detalhe). A entrada manual
+ *  de item avulso (sem checklist) foi removida daqui a pedido da Iasmin em
+ *  2026-09-28 ("não tem muito uso pra ele") — continua disponível dentro da
+ *  solicitação já criada, em EnvioLoteDetailView ("+ Adicionar
+ *  documentação a esta solicitação"). */
 function EnvioLoteFormModal({ companies, onClose, onCreate }) {
   const [clienteNome, setClienteNome] = useState("");
   const [baseIds, setBaseIds] = useState([]);
@@ -19839,8 +19922,6 @@ function EnvioLoteFormModal({ companies, onClose, onCreate }) {
   const fileInputRef = useRef(null);
   const [processando, setProcessando] = useState(false);
   const [erro, setErro] = useState(null);
-  const [itensManuais, setItensManuais] = useState([]);
-  const [novoItemNome, setNovoItemNome] = useState("");
 
   function baseLabel(c) {
     return c.tipo === "Matriz" ? "Matriz" : `Filial ${c.id} — ${c.municipio}/${c.uf}`;
@@ -19854,25 +19935,6 @@ function EnvioLoteFormModal({ companies, onClose, onCreate }) {
     arquivoRef.current = { bytes, mimeType: file.type, filename: file.name };
     setArquivoInfo({ nome: file.name, tamanho: file.size });
     setErro(null);
-  }
-  function handleAdicionarItemManual() {
-    if (!novoItemNome.trim()) return;
-    const tipos = tiposDistintosParaChecklist(novoItemNome.trim());
-    setItensManuais((prev) => [
-      ...prev,
-      {
-        id: `chk-manual-${Date.now().toString(36)}-${prev.length}`,
-        descricaoOriginal: novoItemNome.trim(),
-        tipoSugerido: tipos[0]?.label || null,
-        categoriaSugerida: null,
-        origem: "manual",
-        valePorTodasAsBases: textoPedeTodasAsBases(novoItemNome.trim()),
-      },
-    ]);
-    setNovoItemNome("");
-  }
-  function handleRemoverItemManual(id) {
-    setItensManuais((prev) => prev.filter((it) => it.id !== id));
   }
   async function handleSubmit(e) {
     e.preventDefault();
@@ -19904,19 +19966,16 @@ function EnvioLoteFormModal({ companies, onClose, onCreate }) {
       const gerado = gerarChecklistViaRegras(texto);
       if (gerado.ok) {
         itensDoChecklist = gerado.itens.map((it) => ({ ...it, origem: "checklist" }));
-      } else if (itensManuais.length === 0) {
+      } else {
         setErro(motivoParaTexto(gerado.motivo));
         return;
       }
     }
-    const todosItens = [...itensDoChecklist, ...itensManuais];
-    if (todosItens.length === 0) {
-      setErro(
-        "Cole/digite a lista de documentações, envie um arquivo, ou adicione ao menos um item manualmente.",
-      );
+    if (itensDoChecklist.length === 0) {
+      setErro("Cole/digite a lista de documentações ou envie um arquivo com o pedido do cliente.");
       return;
     }
-    onCreate({ cliente: clienteNome.trim(), baseIds, itens: todosItens });
+    onCreate({ cliente: clienteNome.trim(), baseIds, itens: itensDoChecklist });
   }
   return React.createElement(
     "div",
@@ -20079,55 +20138,6 @@ function EnvioLoteFormModal({ companies, onClose, onCreate }) {
                     React.createElement("span", { className: "homolog-anexo-tamanho" }, formatBytes(arquivoInfo.tamanho)),
                   ),
               ),
-        ),
-        React.createElement(
-          "div",
-          { className: "homolog-field" },
-          React.createElement("label", null, "Adicionar documentação manualmente (opcional)"),
-          React.createElement(
-            "div",
-            { style: { display: "flex", gap: 8 } },
-            React.createElement("input", {
-              type: "text",
-              value: novoItemNome,
-              onChange: (e) => setNovoItemNome(e.target.value),
-              placeholder: 'Ex.: "Ficha técnica do produto X"',
-              onKeyDown: (e) => {
-                if (e.key === "Enter") {
-                  e.preventDefault();
-                  handleAdicionarItemManual();
-                }
-              },
-            }),
-            React.createElement(
-              "button",
-              { type: "button", className: "filters-clear-btn", style: { flex: "none" }, onClick: handleAdicionarItemManual },
-              React.createElement(Plus, { size: 14 }),
-              " Adicionar",
-            ),
-          ),
-          itensManuais.length > 0 &&
-            React.createElement(
-              "ul",
-              { className: "homolog-anexos-list" },
-              itensManuais.map((it) =>
-                React.createElement(
-                  "li",
-                  { key: it.id, className: "homolog-anexo-item" },
-                  React.createElement("span", { className: "homolog-anexo-nome" }, it.descricaoOriginal),
-                  React.createElement(
-                    "button",
-                    {
-                      type: "button",
-                      className: "icon-btn-dark",
-                      onClick: () => handleRemoverItemManual(it.id),
-                      "aria-label": `Remover ${it.descricaoOriginal}`,
-                    },
-                    React.createElement(X, { size: 14 }),
-                  ),
-                ),
-              ),
-            ),
         ),
         React.createElement(
           "div",
