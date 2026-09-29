@@ -1410,7 +1410,7 @@ function isCnpjQuery(text) {
    que NÃO puderam ser vinculados com segurança a nenhuma empresa
    cadastrada acima. Nunca são atribuídos "no chute" a uma filial: ficam
    aqui até um administrador confirmar o vínculo (ou descartar), na tela
-   "🟠 Necessita de conferência". A sincronização (`syncWithDrive`, mais
+   "Necessita de conferência". A sincronização (`syncWithDrive`, mais
    abaixo) acrescenta a este mesmo formato qualquer arquivo novo que ela
    não conseguir classificar com confiança.
    ========================================================================= */ const CONFERENCE_QUEUE_SEED =
@@ -2002,7 +2002,16 @@ const DRIVE_PROXY_KEY = "Z8ib8D02tbTvCsc4O54KjMbdTU1WGSBsx14m9Ng8";
   }
   return out;
 }
-/** Documentos com `validade` preenchida e vencimento dentro de N dias — ordenados por quem vence primeiro. */ function computeExpiringDocs(
+/** Documentos com `validade` preenchida e vencimento dentro de N dias —
+ *  ordenados por quem vence primeiro. Só documentos AINDA NÃO vencidos
+ *  (days >= 0) — um documento já vencido (days < 0) é "vencido", nunca
+ *  "próximo do vencimento"; mesmo corte que computeDocStatus já usa em
+ *  todo o resto do portal (days < 0 -> "vencido"; 0 a 30 -> "proximo").
+ *  Corrigido em 2026-09-28 (relato da Iasmin, com print mostrando
+ *  "Vence em -93 dia(s)" etc. dentro da resposta de "quais documentos
+ *  estão próximos do vencimento?" — a função incluía qualquer days <=
+ *  maxDays, sem piso, então documentos vencidos há meses apareciam
+ *  misturados com os realmente próximos de vencer). */ function computeExpiringDocs(
   companies,
   maxDays = 30,
 ) {
@@ -2011,7 +2020,7 @@ const DRIVE_PROXY_KEY = "Z8ib8D02tbTvCsc4O54KjMbdTU1WGSBsx14m9Ng8";
     c.documentos.forEach((d) => {
       if (!d.validade) return;
       const days = daysUntil(d.validade);
-      if (days !== null && days <= maxDays)
+      if (days !== null && days >= 0 && days <= maxDays)
         rows.push({ company: c, doc: d, days });
     }),
   );
@@ -5666,7 +5675,7 @@ function matchChecklistItemToCompany(item, company) {
       match:
         /status\b.*document|o que significa (atualizado|vencido|arquivad|necessita)/,
       answer:
-        'Os status são objetivos e não presumem irregularidade: 🟢 Atualizado (documento vigente), 🟡 Próximo do vencimento, 🔴 Vencido, 🟠 Necessita de conferência (alguma divergência a validar), ⚫ Arquivado (versão antiga) e ⚪ Não identificado (data não pôde ser lida). A ausência de uma categoria não é tratada como falta — apenas como "não localizado na base".',
+        'Os status são objetivos e não presumem irregularidade: Atualizado (documento vigente), Próximo do vencimento, Vencido, Necessita de conferência (alguma divergência a validar), Arquivado (versão antiga) e Não identificado (data não pôde ser lida). A ausência de uma categoria não é tratada como falta — apenas como "não localizado na base".',
     },
     {
       match: /voltar? (para|pro|ao) dashboard|ir para o dashboard/,
@@ -10643,7 +10652,7 @@ function ChatDrawer({
     let resultText = `Pronto — ${pkg.files.length} de ${docsCount} documento(s) reunidos em "${pkg.zipName}"${msg.type === "doc-multi-empresas" ? "" : ", organizados por categoria"}. O download deve iniciar automaticamente.`;
     if (pkg.failed.length > 0) {
       resultText +=
-        `\n\n⚠️ ${pkg.failed.length} documento(s) não puderam ser incluídos:\n` +
+        `\n\n${pkg.failed.length} documento(s) não puderam ser incluídos:\n` +
         pkg.failed.map((f) => `• ${f.doc.tipo} — ${f.message}`).join("\n");
     }
     pushMessage({ role: "assistant", type: "text", text: resultText });
@@ -10897,7 +10906,7 @@ function ChatDrawer({
     });
     const lines = CATEGORIES.map(
       (c) =>
-        `${groupsMap[c.key] ? "📁" : "⚪"} ${c.label}: ${groupsMap[c.key] || 0} documento(s)`,
+        `${c.label}: ${groupsMap[c.key] || 0} documento(s)`,
     );
     pushMessage({
       role: "assistant",
@@ -11095,11 +11104,11 @@ function ChatDrawer({
       const p = computeCompanyPendencies(company);
       const lines = [
         `Situação documental de ${companyLabel(company)}:`,
-        `✅ Categorias com documentos: ${p.existentes.map((c) => c.label).join(", ") || "nenhuma"}`,
-        `⚪ Categorias sem documentos na base: ${p.ausentes.map((c) => c.label).join(", ") || "nenhuma"}`,
-        `🔴 Vencidos: ${p.vencidos.length}`,
-        `🟡 Próximos do vencimento: ${p.proximos.length}`,
-        `⚠️ Necessitam conferência: ${p.conferencia.length}`,
+        `Categorias com documentos: ${p.existentes.map((c) => c.label).join(", ") || "nenhuma"}`,
+        `Categorias sem documentos na base: ${p.ausentes.map((c) => c.label).join(", ") || "nenhuma"}`,
+        `Vencidos: ${p.vencidos.length}`,
+        `Próximos do vencimento: ${p.proximos.length}`,
+        `Necessitam conferência: ${p.conferencia.length}`,
       ];
       pushMessage({ role: "assistant", type: "text", text: lines.join("\n") });
       if (p.conferencia.length > 0) {
@@ -25243,30 +25252,15 @@ function GrupoprimaPortal() {
         " ",
         /*#__PURE__*/ React.createElement("span", null, "Análise Documental de Clientes"),
       ),
-      /*#__PURE__*/ React.createElement(
-        "button",
-        {
-          className: "nav-item",
-          onClick: () => {
-            setChatOpen(true);
-            setMobileNavOpen(false);
-          },
-        },
-        /*#__PURE__*/ React.createElement(MessageSquare, { size: 16 }),
-        " ",
-        /*#__PURE__*/ React.createElement("span", null, "Assistente"),
-      ),
-      can(currentUser, "auditoria") &&
-        /*#__PURE__*/ React.createElement(
-          "button",
-          {
-            className: "nav-item" + (view === "auditoria" ? " active" : ""),
-            onClick: () => goTo("auditoria"),
-          },
-          /*#__PURE__*/ React.createElement(ShieldCheck, { size: 16 }),
-          " ",
-          /*#__PURE__*/ React.createElement("span", null, "Auditoria"),
-        ),
+      // "Assistente" saiu do painel lateral (pedido explícito da Iasmin,
+      // 2026-09-28) — continua acessível pelo botão "Perguntar ao
+      // assistente" na barra de topo (ver .chat-toggle). Sincronização com
+      // o Google Drive e Auditoria continuam na nova ordem pedida (a
+      // primeira antes da segunda), mas SEM nenhum agrupamento visual —
+      // Iasmin pediu o retângulo verde ao redor dos dois, testou e voltou
+      // atrás porque dava destaque demais a essas duas opções (2026-09-28,
+      // mesma conversa); voltaram a ser nav-item comuns, iguais a todos os
+      // outros itens deste menu.
       can(currentUser, "sincronizarDrive") &&
         /*#__PURE__*/ React.createElement(
           "button",
@@ -25281,6 +25275,17 @@ function GrupoprimaPortal() {
             null,
             "Sincronização com o Google Drive",
           ),
+        ),
+      can(currentUser, "auditoria") &&
+        /*#__PURE__*/ React.createElement(
+          "button",
+          {
+            className: "nav-item" + (view === "auditoria" ? " active" : ""),
+            onClick: () => goTo("auditoria"),
+          },
+          /*#__PURE__*/ React.createElement(ShieldCheck, { size: 16 }),
+          " ",
+          /*#__PURE__*/ React.createElement("span", null, "Auditoria"),
         ),
       /*#__PURE__*/ React.createElement(
         "div",
