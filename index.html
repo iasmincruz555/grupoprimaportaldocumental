@@ -19309,6 +19309,13 @@ function NovaAnaliseClausulasModal({ onClose, onCreate, currentUser }) {
   const [cliente, setCliente] = useState("");
   const [anexos, setAnexos] = useState([]);
   const [modo, setModo] = useState("padrao");
+  // compilarAnexos: só tem efeito com mais de 1 anexo (pedido da Iasmin,
+  // 2026-09-29) — por padrão (false) cada documento anexado vira sua
+  // PRÓPRIA análise/PDF individual; só quando marcado é que todos os
+  // anexos são enviados juntos e compilados num resumo único (o
+  // comportamento único que existia até aqui). Com 1 anexo só, esse campo
+  // não faz diferença nenhuma — a opção nem aparece no formulário.
+  const [compilarAnexos, setCompilarAnexos] = useState(false);
   const [erro, setErro] = useState(null);
   function handleSubmit(e) {
     e.preventDefault();
@@ -19327,7 +19334,7 @@ function NovaAnaliseClausulasModal({ onClose, onCreate, currentUser }) {
       return;
     }
     setErro(null);
-    onCreate({ cliente: cliente.trim(), anexos, modo });
+    onCreate({ cliente: cliente.trim(), anexos, modo, compilarAnexos });
   }
   return /*#__PURE__*/ React.createElement(
     "div",
@@ -19428,6 +19435,64 @@ function NovaAnaliseClausulasModal({ onClose, onCreate, currentUser }) {
           setAnexos: setAnexos,
           onNotify: (msg) => setErro(msg),
         }),
+        anexos.length > 1 &&
+          /*#__PURE__*/ React.createElement(
+            "div",
+            { className: "homolog-field" },
+            /*#__PURE__*/ React.createElement("label", null, "Vários documentos anexados"),
+            /*#__PURE__*/ React.createElement(
+              "div",
+              { className: "homolog-radio-group client-analysis-mode-group" },
+              /*#__PURE__*/ React.createElement(
+                "label",
+                { className: "homolog-radio client-analysis-mode-radio" + (!compilarAnexos ? " active" : "") },
+                /*#__PURE__*/ React.createElement("input", {
+                  type: "radio",
+                  name: "compilarAnexosAnaliseClausulas",
+                  checked: !compilarAnexos,
+                  onChange: () => setCompilarAnexos(false),
+                }),
+                /*#__PURE__*/ React.createElement(
+                  "div",
+                  null,
+                  /*#__PURE__*/ React.createElement(
+                    "div",
+                    { className: "client-analysis-mode-radio-label" },
+                    "Analisar cada documento separadamente",
+                  ),
+                  /*#__PURE__*/ React.createElement(
+                    "div",
+                    { className: "client-analysis-mode-radio-desc" },
+                    `Cada um dos ${anexos.length} documentos vira sua própria análise, com resultado e PDF individuais.`,
+                  ),
+                ),
+              ),
+              /*#__PURE__*/ React.createElement(
+                "label",
+                { className: "homolog-radio client-analysis-mode-radio" + (compilarAnexos ? " active" : "") },
+                /*#__PURE__*/ React.createElement("input", {
+                  type: "radio",
+                  name: "compilarAnexosAnaliseClausulas",
+                  checked: compilarAnexos,
+                  onChange: () => setCompilarAnexos(true),
+                }),
+                /*#__PURE__*/ React.createElement(
+                  "div",
+                  null,
+                  /*#__PURE__*/ React.createElement(
+                    "div",
+                    { className: "client-analysis-mode-radio-label" },
+                    "Compilar tudo em um resumo único",
+                  ),
+                  /*#__PURE__*/ React.createElement(
+                    "div",
+                    { className: "client-analysis-mode-radio-desc" },
+                    `Os ${anexos.length} documentos são analisados juntos, gerando um único resultado e um único PDF de resumo.`,
+                  ),
+                ),
+              ),
+            ),
+          ),
         /*#__PURE__*/ React.createElement(
           "div",
           { className: "homolog-form-actions" },
@@ -20005,17 +20070,26 @@ function ClientAnalysisView({ currentUser, onNotify, onView, companies }) {
       "info",
     );
   }
-  function handleCreate({ cliente, anexos, modo }) {
+  /** handleCreate: até 2026-09-29, sempre criava 1 único item por
+   *  solicitação, não importa quantos anexos — todos os documentos eram
+   *  mandados juntos pra IA num resultado/PDF só. Pedido da Iasmin
+   *  (2026-09-29): isso agora é opcional. Com 1 anexo só, ou com
+   *  `compilarAnexos: true`, continua exatamente como sempre (1 item, todos
+   *  os documentos compilados num resultado/PDF único). Com mais de 1
+   *  anexo e `compilarAnexos: false` (o novo padrão do modal), cada
+   *  documento vira sua PRÓPRIA análise — item, resultado e PDF
+   *  independentes — processadas em paralelo, cada uma aparecendo como sua
+   *  própria linha no histórico. */
+  function criarESolicitarAnaliseClausulas({ cliente, modo, documentosDoItem }) {
     const id = generateClientAnalysisId();
     const agora = new Date().toISOString();
-    const modoFinal = modo === "checklist" ? "checklist" : "padrao";
     const item = {
       id,
       cliente,
-      modo: modoFinal,
+      modo,
       usuario: { nome: currentUser?.nome || "Usuário do portal", email: currentUser?.email || "" },
       dataSolicitacao: agora,
-      documentos: anexos.map((a) => ({ ...a })),
+      documentos: documentosDoItem.map((a) => ({ ...a })),
       status: "processando",
       dataConclusao: null,
       resultado: null,
@@ -20023,11 +20097,28 @@ function ClientAnalysisView({ currentUser, onNotify, onView, companies }) {
       pdfGerado: null,
     };
     persist(item);
-    setModalOpen(false);
-    setSelectedId(id);
-    logDocumentAction("solicitou_analise_clausulas", { cliente, documentos: item.documentos.length, modo: modoFinal });
-    onNotify?.(`Análise de "${cliente}" enviada — processando ${item.documentos.length} documento(s).`, "info");
+    logDocumentAction("solicitou_analise_clausulas", { cliente, documentos: item.documentos.length, modo });
     processarAnaliseClausulas(item, { onDone: (atualizado) => persist(atualizado) });
+    return item;
+  }
+  function handleCreate({ cliente, anexos, modo, compilarAnexos }) {
+    const modoFinal = modo === "checklist" ? "checklist" : "padrao";
+    const deveCompilar = anexos.length <= 1 || compilarAnexos === true;
+    setModalOpen(false);
+    if (deveCompilar) {
+      const item = criarESolicitarAnaliseClausulas({ cliente, modo: modoFinal, documentosDoItem: anexos });
+      setSelectedId(item.id);
+      onNotify?.(`Análise de "${cliente}" enviada — processando ${item.documentos.length} documento(s).`, "info");
+    } else {
+      anexos.forEach((anexo) =>
+        criarESolicitarAnaliseClausulas({ cliente, modo: modoFinal, documentosDoItem: [anexo] }),
+      );
+      setSelectedId(null);
+      onNotify?.(
+        `${anexos.length} documentos de "${cliente}" enviados — cada um sendo analisado separadamente.`,
+        "info",
+      );
+    }
   }
   const usuarios = useMemo(
     () => [...new Set(items.map((it) => it.usuario?.nome).filter(Boolean))].sort(),
