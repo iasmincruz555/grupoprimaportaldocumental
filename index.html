@@ -26,6 +26,12 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.12.2/mammoth.browser.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.2/jszip.min.js"></script>
+<!-- Login com Google (2026-09-29) — Google Identity Services, usado só pelo
+     botão "Entrar com Google" em LoginScreen. Se este script não carregar
+     (rede bloqueada) ou GOOGLE_OAUTH_CLIENT_ID ainda não estiver
+     configurado, o botão simplesmente não aparece — o login por e-mail/
+     senha continua funcionando normalmente, nunca trava a tela. -->
+<script src="https://accounts.google.com/gsi/client" async defer></script>
 <div id="root"></div>
 <script>const { useState, useMemo, useRef, useEffect } = React;
 /* =========================================================================
@@ -1798,6 +1804,15 @@ const DRIVE_KNOWN_SUBFOLDERS = [
  *  alternativa (ex.: se o backend estiver fora do ar). */ const DRIVE_PROXY_URL =
   "https://grupoprima-drive-proxy-350155686890.southamerica-east1.run.app";
 const DRIVE_PROXY_KEY = "Z8ib8D02tbTvCsc4O54KjMbdTU1WGSBsx14m9Ng8";
+/** Login com Google (2026-09-29, pedido da Iasmin) — ADICIONAL ao login por
+ *  e-mail/senha, nunca substitui. Client ID OAuth tipo "Web application",
+ *  criado no Console do Google Cloud (ver NOTAS DE DEPLOY em index.js,
+ *  passo 5). Enquanto for o placeholder abaixo, o botão "Entrar com
+ *  Google" fica oculto — nunca quebra a tela de quem ainda não configurou. */
+const GOOGLE_OAUTH_CLIENT_ID =
+  "COLE_AQUI_O_CLIENT_ID_DO_GOOGLE.apps.googleusercontent.com";
+const GOOGLE_OAUTH_CONFIGURADO =
+  !!GOOGLE_OAUTH_CLIENT_ID && !GOOGLE_OAUTH_CLIENT_ID.startsWith("COLE_AQUI");
 /** parseDateBR: converte "DD/MM/AAAA" em timestamp; retorna 0 se não reconhecer. */ function parseDateBR(
   s,
 ) {
@@ -2725,6 +2740,28 @@ async function findPortalUserAsync(email) {
     },
   };
 }
+/** authenticateWithGoogle: envia a credencial (ID token) do Google
+ *  Identity Services pro backend verificar de verdade (assinatura,
+ *  emissor, audiência) e casar o e-mail com um usuário já cadastrado em
+ *  "users" — ver POST /api/auth/google em index.js. Devolve exatamente o
+ *  mesmo formato de authenticate() ({ok:true,user} ou {ok:false,message}),
+ *  de propósito, pra reaproveitar entrarComoLogado() sem nenhuma mudança
+ *  em LoginScreen além de chamar esta função em vez daquela. */
+async function authenticateWithGoogle(credential) {
+  try {
+    const resposta = await fetch(`${DRIVE_PROXY_URL}/api/auth/google`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Portal-Key": DRIVE_PROXY_KEY },
+      body: JSON.stringify({ credential }),
+    });
+    return await resposta.json();
+  } catch (err) {
+    return {
+      ok: false,
+      message: "Não foi possível verificar seu acesso com o Google agora.",
+    };
+  }
+}
 /** registrarNovoUsuario: autocadastro a partir da tela de login ("Primeiro
  *  acesso? Cadastre-se", pedido da Iasmin, 2026-09-25). Só e-mails
  *  @PORTAL_EMAIL_DOMAIN passam; a pessoa escolhe a própria senha na hora
@@ -2860,6 +2897,30 @@ async function excluirUsuarioDb(userId) {
   userId,
 ) {
   await updateUserDoc(userId, { ultimoAcesso: new Date().toISOString() });
+}
+/** notificarHomologacao: dispara o e-mail de notificação de Homologação
+ *  (POST /api/homologacao/notify, ver index.js) em "fire-and-forget" — o
+ *  mesmo estilo de registrarAcessoUsuario acima: nunca aguardado de um jeito
+ *  que trave a tela, e uma falha (rede, e-mail não configurado no servidor
+ *  etc.) nunca impede salvar/atualizar a homologação de verdade.
+ *  `tipo`: "nova_solicitacao" (avisa os admins ativos) | "em_andamento" |
+ *  "concluida" (avisam consultor.email da própria homologação). NUNCA
+ *  chamada para "cancelada" — não foi pedido. */
+function notificarHomologacao(tipo, item) {
+  fetch(`${DRIVE_PROXY_URL}/api/homologacao/notify`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Portal-Key": DRIVE_PROXY_KEY },
+    body: JSON.stringify({
+      tipo,
+      homologacaoId: item?.id,
+      cliente: item?.cliente,
+      consultor: item?.consultor,
+      status: item?.status,
+      dataSolicitacao: item?.dataSolicitacao,
+      dataConclusao: item?.dataConclusao,
+      bases: item?.bases,
+    }),
+  }).catch(() => {});
 }
 /* Requisito mínimo de segurança da nova senha (item 9 do pedido: "atender
    ao requisito mínimo de segurança definido pelo sistema") — definido aqui
@@ -12963,6 +13024,14 @@ function avisoFonteExterna(descricao) {
       de: h.status,
       para: novoStatus,
     });
+    // Notifica o consultor (pedido da Iasmin, 2026-09-29) só nas transições
+    // "em andamento" e "concluída" — de propósito NÃO em "cancelada".
+    if (novoStatus === "andamento" || novoStatus === "concluida") {
+      notificarHomologacao(novoStatus === "andamento" ? "em_andamento" : "concluida", {
+        ...h,
+        ...patch,
+      });
+    }
     onNotify?.(
       `Status de "${h.cliente}" alterado para "${HOMOLOGACAO_STATUS_META[novoStatus]?.label}".`,
       "info",
@@ -13528,6 +13597,9 @@ function avisoFonteExterna(descricao) {
       homologacao: item.cliente,
       consultor: item.consultor?.nome,
     });
+    // Avisa os admins ativos por e-mail (pedido da Iasmin, 2026-09-29) —
+    // fire-and-forget, nunca bloqueia a criação em si.
+    notificarHomologacao("nova_solicitacao", item);
     onNotify?.(`Homologação de "${item.cliente}" registrada.`, "info");
   }
   function handleUpdate(id, patch) {
@@ -22728,6 +22800,11 @@ function AuditLogView({ companies }) {
         .login-alt-link:hover { color: var(--azul); text-decoration: underline; }
         .login-domain-hint { font-size: 10.5px; font-weight: 500; color: var(--carvao); margin-top: 4px; }
         .login-footer { margin-top: 24px; padding-top: 18px; border-top: 1px solid var(--cinza-frio); font-size: 10.5px; color: var(--carvao); text-align: center; letter-spacing: 0.02em; }
+        /* "Entrar com Google" (2026-09-29) — divisor "ou" + botão do Google
+           Identity Services, abaixo do login por senha. */
+        .login-google-block { margin-top: 18px; display: flex; flex-direction: column; align-items: center; gap: 14px; }
+        .login-google-divider { width: 100%; display: flex; align-items: center; gap: 10px; color: var(--carvao); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; }
+        .login-google-divider::before, .login-google-divider::after { content: ""; flex: 1; height: 1px; background: var(--cinza-frio); }
       `;
 function LoginScreen({
   onLogin,
@@ -22741,6 +22818,7 @@ function LoginScreen({
   const [showConfirmarSenha, setShowConfirmarSenha] = useState(false);
   const [error, setError] = useState("");
   const [status, setStatus] = useState("idle"); // idle | loading | success
+  const googleBtnRef = useRef(null); // "Entrar com Google" (2026-09-29) — ver useEffect abaixo
   function entrarComoLogado(result) {
     setStatus("success");
     setAuditSessionUser(result.user?.nome || result.user?.email || null);
@@ -22787,6 +22865,50 @@ function LoginScreen({
     logDocumentAction("cadastrou_propria_conta", { email: email.trim() });
     entrarComoLogado(result);
   }
+  // "Entrar com Google" (2026-09-29, pedido da Iasmin) — ADICIONAL ao login
+  // por senha, nunca substitui. Só funciona pra um e-mail que já é usuário
+  // cadastrado no portal (o backend confere isso em /api/auth/google);
+  // nunca cria conta nova sozinho.
+  async function handleGoogleCredential({ credential }) {
+    if (status === "loading" || status === "success") return;
+    setError("");
+    setStatus("loading");
+    const result = await authenticateWithGoogle(credential).catch(() => ({
+      ok: false,
+      message: "Não foi possível verificar seu acesso com o Google agora.",
+    }));
+    if (!result.ok) {
+      setStatus("idle");
+      setError(result.message);
+      return;
+    }
+    logDocumentAction("login_google", { email: result.user?.email });
+    entrarComoLogado(result);
+  }
+  // Inicializa e desenha o botão do Google Identity Services só quando o
+  // script carregou, o Client ID já foi configurado (GOOGLE_OAUTH_CONFIGURADO)
+  // e estamos no modo "login" (o botão só existe nesse modo — ver render
+  // abaixo). Se qualquer uma dessas condições faltar, não faz nada — a tela
+  // de login continua funcionando normalmente só com e-mail/senha.
+  useEffect(() => {
+    if (mode !== "login" || !GOOGLE_OAUTH_CONFIGURADO) return;
+    if (!window.google?.accounts?.id || !googleBtnRef.current) return;
+    try {
+      window.google.accounts.id.initialize({
+        client_id: GOOGLE_OAUTH_CLIENT_ID,
+        callback: handleGoogleCredential,
+      });
+      window.google.accounts.id.renderButton(googleBtnRef.current, {
+        theme: "outline",
+        size: "large",
+        text: "continue_with",
+        locale: "pt-BR",
+        width: 320,
+      });
+    } catch (e) {
+      /* Google Identity Services indisponível — botão simplesmente não aparece. */
+    }
+  }, [mode]);
   function handleFieldKeyDown(e) {
     if (e.key === "Enter") {
       e.preventDefault();
@@ -23055,6 +23177,18 @@ function LoginScreen({
               "Primeiro acesso? Cadastre-se",
             ),
           ),
+      mode === "login" &&
+        GOOGLE_OAUTH_CONFIGURADO &&
+        /*#__PURE__*/ React.createElement(
+          "div",
+          { className: "login-google-block" },
+          /*#__PURE__*/ React.createElement(
+            "div",
+            { className: "login-google-divider" },
+            /*#__PURE__*/ React.createElement("span", null, "ou"),
+          ),
+          /*#__PURE__*/ React.createElement("div", { ref: googleBtnRef }),
+        ),
       /*#__PURE__*/ React.createElement(
         "div",
         { className: "login-footer" },
