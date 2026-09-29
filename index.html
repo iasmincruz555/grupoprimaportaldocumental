@@ -2991,6 +2991,7 @@ const AUDIT_ACTION_LABELS = {
   excluiu_homologacao: "Excluiu homologação",
   solicitou_analise_clausulas: "Solicitou análise documental de cliente",
   gerou_pdf_analise_clausulas: "Gerou PDF da análise documental",
+  excluiu_analise_clausulas: "Excluiu análise documental de cliente",
   criou_solicitacao_lote: "Criou solicitação de envio de documentações em lote",
   adicionou_documentacao_lote: "Adicionou documentação à solicitação em lote",
   upload_arquivo_lote: "Enviou arquivo recebido (envio em lote)",
@@ -18342,9 +18343,10 @@ function AddDocumentView({ companies, onNotify }) {
   );
 }
 /* =========================================================================
-   ANÁLISE DOCUMENTAL DE CLIENTES (nome exibido na tela; renomeada de
-   "Análise de Cláusulas" em 2026-09-22, pedido explícito da Iasmin — só o
-   nome mudou, nenhum comportamento) — nova aba (pedido da Iasmin,
+   ANÁLISE DOCUMENTAL (nome exibido na tela; renomeada de "Análise de
+   Cláusulas" em 2026-09-22 e depois de "Análise Documental de Clientes"
+   para "Análise Documental" em 2026-09-29, ambas pedido explícito da
+   Iasmin — só o nome mudou, nenhum comportamento) — nova aba (pedido da Iasmin,
    2026-09-22): recebe documentos de clientes (contratos, anexos comerciais,
    manuais de fornecedor, planilhas de tarifa) e devolve um resumo
    estruturado dos pontos que a Grupoprima precisa conferir antes de
@@ -18387,6 +18389,29 @@ const CLIENT_ANALYSIS_STATUS_META = {
     className: "status-conferencia",
   },
   erro: { label: "Erro no processamento", className: "status-vencido" },
+};
+/** MODO_ANALISE_CLAUSULAS_META: os dois modos de análise disponíveis na
+ *  criação (NovaAnaliseClausulasModal) — "padrao" (resumo executivo, o
+ *  comportamento de sempre) e "checklist" (exaustivo, só recomendado para
+ *  documentos de compliance/requisitos — classifica cada exigência
+ *  encontrada como Obrigatório/Condicional/Recomendado em vez de resumir).
+ *  Adicionado como uma OPÇÃO dentro do mesmo modal já existente — a Iasmin
+ *  pediu explicitamente para não criar outra aba (2026-09-29). */
+const MODO_ANALISE_CLAUSULAS_META = {
+  padrao: {
+    label: "Resumo executivo",
+    descricao: "Resumo curto e direto — ideal para contratos, anexos comerciais e manuais em geral.",
+  },
+  checklist: {
+    label: "Checklist de compliance",
+    descricao:
+      "Lista completa de exigências, organizada pelos tópicos do próprio documento e classificada como Obrigatório/Condicional/Recomendado — use para documentos de compliance/requisitos (ex.: requisitos de segurança de um cliente).",
+  },
+};
+const MODO_ANALISE_CLAUSULAS_CLASSIFICACAO_TAG_CLASS = {
+  Obrigatório: "client-analysis-point-tag-critico",
+  Condicional: "client-analysis-point-tag-atencao",
+  Recomendado: "client-analysis-point-tag-recomendado",
 };
 const CLIENT_ANALYSIS_MAX_ANEXOS = 10;
 const CLIENT_ANALYSIS_MAX_ANEXOS_BYTES = 200 * 1024 * 1024; // 200 MB no total — contratos/anexos comerciais, não precisa do teto de 10GB da Homologação
@@ -18445,7 +18470,7 @@ function mockClientAnalysis({ cliente, documentos }) {
  *  arquivo original. Nunca inventa um resultado: se o backend responder
  *  com falha, ou devolver algo sem `resultado`, lança erro — quem chama
  *  decide o status "erro" a partir disso, nunca finge sucesso. */
-async function callClientAnalysisBackend({ id, cliente, documentos }) {
+async function callClientAnalysisBackend({ id, cliente, documentos, modo }) {
   const resp = await fetch(`${DRIVE_PROXY_URL}/api/client-analysis`, {
     method: "POST",
     headers: {
@@ -18456,6 +18481,7 @@ async function callClientAnalysisBackend({ id, cliente, documentos }) {
       id,
       clienteNome: cliente,
       documentos: documentos.map((d) => ({ nome: d.nome, textoExtraido: d.textoExtraido })),
+      modo: modo === "checklist" ? "checklist" : "padrao",
     }),
   });
   if (!resp.ok) {
@@ -18549,6 +18575,7 @@ async function processarAnaliseClausulas(item, { onDone }) {
       id: item.id,
       cliente: item.cliente,
       documentos: documentosParaAnalise,
+      modo: item.modo,
     });
   } catch (e) {
     onDone({
@@ -18592,6 +18619,55 @@ async function gerarPdfAnaliseClausulas(analise) {
   const doc = await PDFDocument.create();
   const fontRegular = await doc.embedFont(StandardFonts.Helvetica);
   const fontBold = await doc.embedFont(StandardFonts.HelveticaBold);
+  // sanitizeForPdf: as fontes padrão do PDF (Helvetica/WinAnsi) só conseguem
+  // codificar um subconjunto de caracteres (basicamente Latin-1) — qualquer
+  // coisa fora disso (ex.: "≥", "≤", emojis, símbolos matemáticos raros)
+  // faz `drawText`/`widthOfTextAtSize` LANÇAR UMA EXCEÇÃO e travar a
+  // geração do PDF inteiro, não só aquela linha. Como o conteúdo de
+  // resumoExecutivo/pontosDeAtencao/etc. vem da IA (texto livre, nunca sob
+  // nosso controle total), não dá pra confiar numa lista fixa de caracteres
+  // "seguros" — por isso cada caractere é testado de verdade contra a
+  // própria fonte (a prova definitiva de que ele é codificável) e só o que
+  // realmente falha vira "?", nunca trava nada. Alguns símbolos comuns
+  // ganham uma troca melhor que "?" antes desse teste.
+  //
+  // IMPORTANTE: nem todo caractere problemático LANÇA exceção — alguns
+  // (confirmado por teste real de renderização: "²"/"³"/"¹", os dígitos
+  // sobrescritos de "m²", "km³" etc.) passam pelo teste de largura sem
+  // erro, mas saem em BRANCO na página (nenhuma exceção, nenhum aviso, só
+  // o texto sumindo silenciosamente — pior que travar, porque ninguém
+  // percebe). Por isso eles entram aqui expandidos pro dígito normal
+  // ("m²" -> "m2"), nunca dependendo só do teste automático.
+  const SANITIZE_MAP = {
+    "≥": ">=",
+    "≤": "<=",
+    "≠": "!=",
+    "→": "->",
+    "←": "<-",
+    "²": "2",
+    "³": "3",
+    "¹": "1",
+  };
+  const sanitizeCharCache = new Map();
+  function sanitizeForPdf(text) {
+    const s = text == null ? "" : String(text);
+    let out = "";
+    for (const ch of s) {
+      const candidate = SANITIZE_MAP[ch] !== undefined ? SANITIZE_MAP[ch] : ch;
+      let safe = sanitizeCharCache.get(candidate);
+      if (safe === undefined) {
+        try {
+          fontRegular.widthOfTextAtSize(candidate, 10);
+          safe = candidate;
+        } catch (e) {
+          safe = "?";
+        }
+        sanitizeCharCache.set(candidate, safe);
+      }
+      out += safe;
+    }
+    return out;
+  }
   let papelTimbradoImg = null;
   try {
     papelTimbradoImg = await doc.embedPng(base64ToBytes(GRUPOPRIMA_PAPEL_TIMBRADO.split(",")[1]));
@@ -18613,6 +18689,56 @@ async function gerarPdfAnaliseClausulas(analise) {
   const FOOTER_H = 100;
   const FOOTER_SAFE_TOP_Y = 92; // topo da zona clara acima da faixa escura do rodapé
   const AZUL_MARCA = rgb(0.129, 0.322, 0.451); // #21 52 73, extraído do próprio papel timbrado
+  // MAX_USABLE_H: altura máxima de conteúdo que CABE numa página totalmente
+  // em branco (do topo útil, logo abaixo do cabeçalho, até o começo do
+  // rodapé) — é o mesmo cálculo que `ensureSpace` já usa implicitamente
+  // (newPage() começa em y = PAGE_H - HEADER_H; ensureSpace quebra página
+  // quando y - h < MARGIN + FOOTER_H). Serve só como limite de segurança
+  // pras caixas de destaque abaixo: se um bloco de conteúdo for tão grande
+  // que nem numa página vazia ele caberia inteiro, a caixa é abandonada e o
+  // conteúdo cai pro desenho simples (parágrafo/lista linha a linha), que
+  // já pagina sozinho e por isso NUNCA sobrepõe nada — pedido explícito da
+  // Iasmin (2026-09-29): "não fiquem com nada sobrepondo os textos e
+  // impedindo a leitura em qualquer instância".
+  const MAX_USABLE_H = PAGE_H - HEADER_H - FOOTER_H - MARGIN;
+  // Tons de destaque — reaproveitam EXATAMENTE as cores já usadas na tela
+  // (.client-analysis-point-tag-informativo/-atencao/-critico, linha
+  // ~18792) pra "Pontos de atenção", e criam só 2 tons novos: `destaque`
+  // (azul da própria marca, pra "Principais pontos") e `obrigatorio` (um
+  // dourado/bronze deliberadamente diferente do amarelo de "Atenção", pra
+  // nunca confundir "isto é uma obrigatoriedade do documento" com "isto é
+  // um risco/atenção") — usado em "Obrigações da Grupoprima" e
+  // "Documentações exigidas", que são as obrigatoriedades apontadas no
+  // documento que a Iasmin pediu pra sempre vir destacadas.
+  const TONES = {
+    destaque: { bg: rgb(0.925, 0.941, 0.953), bar: AZUL_MARCA, text: AZUL_MARCA },
+    obrigatorio: { bg: rgb(0.976, 0.945, 0.898), bar: rgb(0.6, 0.42, 0.05), text: rgb(0.5, 0.35, 0.02) },
+    critico: { bg: rgb(0.976, 0.925, 0.925), bar: rgb(0.631, 0.2, 0.2), text: rgb(0.631, 0.2, 0.2) },
+    atencao: { bg: rgb(1, 0.976, 0.878), bar: rgb(0.478, 0.329, 0), text: rgb(0.478, 0.329, 0) },
+    informativo: { bg: rgb(0.929, 0.961, 0.976), bar: rgb(0.114, 0.353, 0.478), text: rgb(0.114, 0.353, 0.478) },
+    // "recomendado" — só usado no modo checklist (ver abaixo), reaproveita
+    // exatamente o mesmo tom verde já usado na tela
+    // (.client-analysis-point-tag-recomendado) pro item "Recomendado".
+    recomendado: { bg: rgb(0.929, 0.965, 0.945), bar: rgb(0.122, 0.478, 0.267), text: rgb(0.122, 0.478, 0.267) },
+    neutro: { bg: rgb(0.94, 0.94, 0.94), bar: rgb(0.4, 0.4, 0.4), text: rgb(0.3, 0.3, 0.3) },
+  };
+  function toneForClassificacao(classificacao) {
+    const n = String(classificacao || "").toLowerCase();
+    if (n.includes("crít") || n.includes("crit")) return TONES.critico;
+    if (n.includes("atenç") || n.includes("atenc")) return TONES.atencao;
+    if (n.includes("informativ")) return TONES.informativo;
+    return TONES.neutro;
+  }
+  // Modo "checklist" (compliance/requisitos) — Obrigatório vira vermelho
+  // (mesmo tom de "Crítico"), Condicional vira laranja (mesmo tom de
+  // "Atenção") e Recomendado vira verde — a mesma tríade de cores já usada
+  // na tela (clientAnalysisPointTagClass/MODO_ANALISE_CLAUSULAS_CLASSIFICACAO_TAG_CLASS).
+  function toneForChecklistClassificacao(classificacao) {
+    const n = String(classificacao || "").toLowerCase();
+    if (n.includes("obrigat")) return TONES.critico;
+    if (n.includes("recomend")) return TONES.recomendado;
+    return TONES.atencao; // "Condicional" e qualquer valor inesperado — nunca aparenta ser obrigatório sem certeza
+  }
   const pages = [];
   let pg = null;
   let y = 0;
@@ -18622,14 +18748,16 @@ async function gerarPdfAnaliseClausulas(analise) {
     }
   }
   function drawHeaderText(p) {
-    p.drawText("Análise Documental de Cliente", {
+    const tituloHeader =
+      analise.resultado?.modo === "checklist" ? "Checklist de Compliance — Análise de Cliente" : "Análise Documental de Cliente";
+    p.drawText(tituloHeader, {
       x: HEADER_TEXT_X,
       y: PAGE_H - 72,
       size: 14,
       font: fontBold,
       color: AZUL_MARCA,
     });
-    p.drawText(`Cliente: ${analise.cliente || "—"}`, {
+    p.drawText(sanitizeForPdf(`Cliente: ${analise.cliente || "—"}`), {
       x: HEADER_TEXT_X,
       y: PAGE_H - 87,
       size: 10,
@@ -18637,7 +18765,7 @@ async function gerarPdfAnaliseClausulas(analise) {
       color: rgb(0.22, 0.22, 0.22),
     });
     p.drawText(
-      `Gerado em ${new Date().toLocaleString("pt-BR")} · solicitado por ${analise.usuario?.nome || "—"}`,
+      sanitizeForPdf(`Gerado em ${new Date().toLocaleString("pt-BR")} · solicitado por ${analise.usuario?.nome || "—"}`),
       { x: HEADER_TEXT_X, y: PAGE_H - 100, size: 9, font: fontRegular, color: rgb(0.35, 0.35, 0.35) },
     );
   }
@@ -18649,7 +18777,7 @@ async function gerarPdfAnaliseClausulas(analise) {
     drawHeaderText(pg); // repetido em toda página — cada folha já é o papel timbrado oficial completo
   }
   function wrapText(text, font, size, maxWidth) {
-    const words = String(text || "").split(/\s+/).filter(Boolean);
+    const words = sanitizeForPdf(text || "").split(/\s+/).filter(Boolean);
     const lines = [];
     let cur = "";
     for (const w of words) {
@@ -18670,10 +18798,10 @@ async function gerarPdfAnaliseClausulas(analise) {
   function drawSectionTitle(title) {
     ensureSpace(26);
     y -= 4;
-    pg.drawText(title, { x: MARGIN, y, size: 12, font: fontBold, color: rgb(0, 0.216, 0.325) });
+    pg.drawText(sanitizeForPdf(title), { x: MARGIN, y, size: 12, font: fontBold, color: rgb(0, 0.216, 0.325) });
     y -= 16;
   }
-  function drawParagraph(text, { bold = false, size = 10 } = {}) {
+  function drawParagraph(text, { bold = false, size = 10, color = null } = {}) {
     const lines = wrapText(text, bold ? fontBold : fontRegular, size, CONTENT_W);
     for (const line of lines) {
       ensureSpace(size + 4);
@@ -18682,14 +18810,15 @@ async function gerarPdfAnaliseClausulas(analise) {
         y,
         size,
         font: bold ? fontBold : fontRegular,
-        color: rgb(0.15, 0.15, 0.15),
+        color: color || rgb(0.15, 0.15, 0.15),
       });
       y -= size + 4;
     }
     y -= 4;
   }
-  function drawBulletList(items) {
-    (items || []).forEach((it) => {
+  function drawBulletList(items, emptyText) {
+    const list = items && items.length ? items : [emptyText || "Nenhum item identificado."];
+    list.forEach((it) => {
       const lines = wrapText(`•  ${it}`, fontRegular, 10, CONTENT_W - 10);
       lines.forEach((line, i) => {
         ensureSpace(14);
@@ -18705,36 +18834,206 @@ async function gerarPdfAnaliseClausulas(analise) {
     });
     y -= 6;
   }
+  // ---- Caixas de destaque (highlight boxes) --------------------------------
+  // Pedido explícito da Iasmin (2026-09-29): pontos mais importantes e
+  // obrigatoriedades apontadas no documento devem SEMPRE ser destacados no
+  // PDF, com otimização de leitura e SEM QUALQUER sobreposição de texto, em
+  // qualquer instância/tamanho de conteúdo.
+  //
+  // Estratégia de 2 passadas ("medir, depois desenhar"): `flattenBoxContent`
+  // primeiro transforma os blocos de conteúdo (parágrafo ou lista com
+  // marcadores) numa lista plana de linhas já quebradas, cada uma já com o
+  // avanço vertical (`advance`) que ela vai consumir — a MESMA lógica de
+  // quebra usada em `wrapText`, então a altura medida bate exatamente com o
+  // que será desenhado (nunca uma estimativa aproximada que poderia ficar
+  // curta e cortar texto). `drawHighlightBox` soma essa altura, chama
+  // `ensureSpace` ANTES de desenhar qualquer coisa (garantindo que a caixa
+  // inteira sempre cai numa única página, nunca é cortada no meio por uma
+  // quebra de página) e só então desenha o retângulo de fundo, a barra
+  // colorida à esquerda e o texto por cima. Se o conteúdo for grande demais
+  // pra caber mesmo numa página em branco (MAX_USABLE_H), a caixa é
+  // abandonada e cai pro desenho simples já existente — que pagina linha a
+  // linha e por isso nunca sobrepõe nada.
+  function flattenBoxContent(blocks, innerWidth) {
+    const lines = [];
+    (blocks || []).forEach((b) => {
+      if (b.kind === "paragraph") {
+        const size = b.size || 10;
+        const font = b.bold ? fontBold : fontRegular;
+        const wrapped = wrapText(b.text, font, size, innerWidth);
+        wrapped.forEach((line, i) => {
+          lines.push({ text: line, indent: 0, size, font, color: b.color || rgb(0.15, 0.15, 0.15), advance: size + 4 });
+        });
+        if (wrapped.length) lines[lines.length - 1].advance += 4;
+      } else if (b.kind === "bullets") {
+        const items = b.items && b.items.length ? b.items : [b.emptyText || "Nenhum item identificado."];
+        items.forEach((it) => {
+          const wrapped = wrapText(`•  ${it}`, fontRegular, 10, innerWidth - 10);
+          wrapped.forEach((line, i) => {
+            lines.push({ text: line, indent: i === 0 ? 0 : 12, size: 10, font: fontRegular, color: b.color || rgb(0.15, 0.15, 0.15), advance: 14 });
+          });
+        });
+        if (lines.length) lines[lines.length - 1].advance += 6;
+      }
+    });
+    const height = lines.reduce((s, l) => s + l.advance, 0);
+    return { lines, height };
+  }
+  function drawHighlightBox(title, blocks, tone) {
+    const PAD_X = 12,
+      PAD_Y = 10,
+      BAR_W = 4,
+      TITLE_H = title ? 16 : 0,
+      GAP_AFTER = 14;
+    const textX = MARGIN + BAR_W + PAD_X;
+    const innerWidth = CONTENT_W - BAR_W - PAD_X * 2;
+    const { lines, height: bodyHeight } = flattenBoxContent(blocks, innerWidth);
+    const boxHeight = PAD_Y * 2 + TITLE_H + bodyHeight;
+    if (boxHeight > MAX_USABLE_H) {
+      // Rede de segurança: conteúdo grande demais até pra uma página em
+      // branco — nunca força a caixa (poderia obrigar um corte no meio e
+      // sobrepor cabeçalho/rodapé). Cai pro desenho linha a linha, que já
+      // pagina sozinho.
+      if (title) drawSectionTitle(title);
+      (blocks || []).forEach((b) => {
+        if (b.kind === "paragraph") drawParagraph(b.text, { bold: b.bold, size: b.size });
+        else drawBulletList(b.items, b.emptyText);
+      });
+      return;
+    }
+    ensureSpace(boxHeight + GAP_AFTER);
+    const boxTop = y;
+    const boxBottom = y - boxHeight;
+    pg.drawRectangle({ x: MARGIN, y: boxBottom, width: CONTENT_W, height: boxHeight, color: tone.bg });
+    pg.drawRectangle({ x: MARGIN, y: boxBottom, width: BAR_W, height: boxHeight, color: tone.bar });
+    let ly = boxTop - PAD_Y - 2;
+    if (title) {
+      pg.drawText(sanitizeForPdf(title), { x: textX, y: ly, size: 11, font: fontBold, color: tone.text });
+      ly -= TITLE_H;
+    }
+    lines.forEach((ln) => {
+      pg.drawText(sanitizeForPdf(ln.text), { x: textX + ln.indent, y: ly, size: ln.size, font: ln.font, color: ln.color });
+      ly -= ln.advance;
+    });
+    y = boxBottom - GAP_AFTER;
+  }
   newPage();
   const r = analise.resultado || {};
-  drawSectionTitle("Resumo executivo");
-  drawParagraph(r.resumoExecutivo || "—");
-  drawSectionTitle("Principais pontos");
-  drawBulletList(r.principaisPontos);
-  drawSectionTitle("Pontos de atenção");
-  (r.pontosDeAtencao || []).forEach((pt) => {
-    drawParagraph(
-      `[${pt.classificacao || "—"}] ${pt.titulo || ""} (confiança: ${
-        typeof pt.confianca === "number" ? Math.round(pt.confianca * 100) + "%" : "—"
-      }${pt.referencia ? " · ref.: " + pt.referencia : ""})`,
-      { bold: true },
+  if (r.modo === "checklist") {
+    // ---- Modo checklist (compliance/requisitos) ----------------------------
+    // Pedido da Iasmin (2026-09-29): reorganizar pelos próprios tópicos do
+    // documento e destacar cada exigência — mas, ao contrário do modo padrão
+    // (poucas caixas grandes, conteúdo já resumido), aqui o conteúdo é
+    // EXAUSTIVO por natureza (uma seção pode ter dezenas de itens), então
+    // cada item usa um tratamento mais leve — uma tag colorida (sem caixa de
+    // fundo, sem medição de bloco inteiro) seguida do texto — pra nunca
+    // pesar demais a página nem gerar um número exagerado de páginas.
+    function drawChecklistItem(item) {
+      const tone = toneForChecklistClassificacao(item.classificacao);
+      const tagLinha = `${String(item.classificacao || "—").toUpperCase()}${
+        item.referencia ? "  ·  ref.: " + item.referencia : ""
+      }`;
+      ensureSpace(28);
+      pg.drawRectangle({ x: MARGIN, y: y - 8, width: 8, height: 8, color: tone.bar });
+      pg.drawText(sanitizeForPdf(tagLinha), {
+        x: MARGIN + 14,
+        y: y - 7.5,
+        size: 8.5,
+        font: fontBold,
+        color: tone.text,
+      });
+      y -= 16;
+      drawParagraph(item.descricao || "—", { size: 10 });
+    }
+    drawSectionTitle("Objetivo do documento");
+    drawParagraph(r.objetivoResumo || "—");
+    if (r.identificacaoDocumento && String(r.identificacaoDocumento).trim()) {
+      drawSectionTitle("Identificação do documento");
+      drawParagraph(r.identificacaoDocumento);
+    }
+    if (!(r.secoes && r.secoes.length)) {
+      drawSectionTitle("Exigências identificadas");
+      drawParagraph("Nenhuma seção de exigências identificada.");
+    } else {
+      r.secoes.forEach((secao) => {
+        drawSectionTitle(secao.titulo || "Seção sem título");
+        if (secao.contexto && String(secao.contexto).trim()) {
+          drawParagraph(secao.contexto, { size: 9.5, color: rgb(0.4, 0.4, 0.4) });
+        }
+        if (!(secao.itens && secao.itens.length)) {
+          drawParagraph("Nenhum item identificado nesta seção.");
+        } else {
+          secao.itens.forEach((item) => drawChecklistItem(item));
+        }
+      });
+    }
+  } else {
+    // ---- Modo padrão (resumo executivo) -------------------------------------
+    drawSectionTitle("Resumo executivo");
+    drawParagraph(r.resumoExecutivo || "—");
+
+    // "Principais pontos" — sempre destacado (pedido explícito da Iasmin).
+    drawSectionTitle("Principais pontos");
+    drawHighlightBox(
+      null,
+      [{ kind: "bullets", items: r.principaisPontos, emptyText: "Nenhum ponto principal identificado." }],
+      TONES.destaque,
     );
-    drawParagraph(pt.descricao || "");
-  });
-  drawSectionTitle("Obrigações da Grupoprima");
-  drawBulletList(r.obrigacoesGrupoprima);
-  drawSectionTitle("Obrigações do cliente");
-  drawBulletList(r.obrigacoesCliente);
-  drawSectionTitle("Condições comerciais");
-  drawBulletList(r.condicoesComerciais);
-  drawSectionTitle("Prazos e vigências");
-  drawBulletList(r.prazosEVigencias);
-  drawSectionTitle("Seguros e gerenciamento de risco");
-  drawBulletList(r.segurosEGerenciamentoRisco);
-  drawSectionTitle("Documentações exigidas");
-  drawBulletList(r.documentacoesExigidas);
-  drawSectionTitle("Recomendações de conferência");
-  drawBulletList(r.recomendacoesDeConferencia);
+
+    // "Pontos de atenção" — cada item numa caixa colorida conforme a própria
+    // classificação (Crítico/Atenção/Informativo), reaproveitando os mesmos
+    // tons já usados na tela — assim o mais grave já salta aos olhos na
+    // página impressa, não só no portal.
+    drawSectionTitle("Pontos de atenção");
+    if (!(r.pontosDeAtencao && r.pontosDeAtencao.length)) {
+      drawParagraph("Nenhum ponto de atenção identificado.");
+    } else {
+      r.pontosDeAtencao.forEach((pt) => {
+        const tone = toneForClassificacao(pt.classificacao);
+        const titulo = `[${pt.classificacao || "—"}] ${pt.titulo || ""} (confiança: ${
+          typeof pt.confianca === "number" ? Math.round(pt.confianca * 100) + "%" : "—"
+        }${pt.referencia ? " · ref.: " + pt.referencia : ""})`;
+        drawHighlightBox(
+          null,
+          [
+            { kind: "paragraph", text: titulo, bold: true, color: tone.text },
+            { kind: "paragraph", text: pt.descricao || "—" },
+          ],
+          tone,
+        );
+      });
+    }
+
+    // "Obrigações da Grupoprima" e "Documentações exigidas" são as
+    // obrigatoriedades apontadas no documento — sempre destacadas, num tom
+    // dourado/bronze deliberadamente diferente do amarelo de "Atenção" (pra
+    // nunca confundir "obrigatoriedade" com "risco").
+    drawSectionTitle("Obrigações da Grupoprima");
+    drawHighlightBox(
+      "OBRIGATORIEDADE — conforme apontado no documento",
+      [{ kind: "bullets", items: r.obrigacoesGrupoprima, emptyText: "Nenhuma obrigação da Grupoprima identificada." }],
+      TONES.obrigatorio,
+    );
+
+    drawSectionTitle("Obrigações do cliente");
+    drawBulletList(r.obrigacoesCliente, "Nenhuma obrigação do cliente identificada.");
+    drawSectionTitle("Condições comerciais");
+    drawBulletList(r.condicoesComerciais, "Nenhuma condição comercial identificada.");
+    drawSectionTitle("Prazos e vigências");
+    drawBulletList(r.prazosEVigencias, "Nenhum prazo/vigência identificado.");
+    drawSectionTitle("Seguros e gerenciamento de risco");
+    drawBulletList(r.segurosEGerenciamentoRisco, "Nenhum item de seguro/gerenciamento de risco identificado.");
+
+    drawSectionTitle("Documentações exigidas");
+    drawHighlightBox(
+      "OBRIGATORIEDADE — conforme apontado no documento",
+      [{ kind: "bullets", items: r.documentacoesExigidas, emptyText: "Nenhuma documentação exigida identificada." }],
+      TONES.obrigatorio,
+    );
+
+    drawSectionTitle("Recomendações de conferência");
+    drawBulletList(r.recomendacoesDeConferencia, "Nenhuma recomendação de conferência identificada.");
+  }
   const avisoObrigatorio =
     "Este documento é gerado a partir de uma análise automatizada e não substitui a revisão jurídica/comercial humana antes de qualquer aceite, assinatura ou início de operação.";
   // Rodapé desenhado na zona CLARA acima da faixa escura do papel timbrado
@@ -18792,9 +19091,28 @@ function ClientAnalysisStyles() {
       .client-analysis-point-tag-informativo { background: rgba(46,125,166,0.14); color: #1d5a7a; }
       .client-analysis-point-tag-atencao { background: rgba(255,214,10,0.20); color: #7a5400; }
       .client-analysis-point-tag-critico { background: rgba(214,69,69,0.14); color: #a13333; }
+      .client-analysis-point-tag-recomendado { background: rgba(46,163,99,0.14); color: #1f7a44; }
       .client-analysis-point-conf { font-size: 10.5px; color: var(--carvao); }
       .client-analysis-docs-list { list-style:none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
       .client-analysis-empty-status { display:flex; align-items:center; gap:10px; padding: 30px 10px; color: var(--carvao); font-size: 13px; }
+      /* Ação de exclusão da análise (pedido explícito da Iasmin,
+         2026-09-29) — mesmo padrão visual já usado no botão de Homologação
+         e no de Envio em Lote (.homolog-delete-btn/.lote-delete-btn),
+         reaproveitando .doc-row-delete-confirm* (já globais) pra caixa de
+         confirmação em si. */
+      .client-analysis-status-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
+      .client-analysis-delete-btn { color: var(--vermelho, #b3261e); border-color: rgba(179,38,30,0.35); }
+      .client-analysis-delete-btn:hover { border-color: var(--vermelho, #b3261e); }
+      .client-analysis-delete-confirm { max-width: 420px; text-align: left; margin-top: 10px; }
+      /* Seletor de "Tipo de análise" (padrão/checklist) no modal de nova
+         análise — pedido de 2026-09-29: uma opção dentro do mesmo modal já
+         existente, nunca uma aba nova. Reaproveita .homolog-radio-group/
+         .homolog-radio (mesmo padrão já usado em "Formato de envio" de
+         Homologação), só com layout empilhado pra caber a descrição. */
+      .client-analysis-mode-group { flex-direction: column; }
+      .client-analysis-mode-radio { align-items: flex-start; }
+      .client-analysis-mode-radio-label { font-weight: 800; }
+      .client-analysis-mode-radio-desc { font-size: 12px; font-weight: 500; color: var(--carvao); line-height: 1.5; margin-top: 2px; }
     `,
   );
 }
@@ -18990,6 +19308,7 @@ function ClientAnalysisFilePicker({ anexos, setAnexos, onNotify }) {
 function NovaAnaliseClausulasModal({ onClose, onCreate, currentUser }) {
   const [cliente, setCliente] = useState("");
   const [anexos, setAnexos] = useState([]);
+  const [modo, setModo] = useState("padrao");
   const [erro, setErro] = useState(null);
   function handleSubmit(e) {
     e.preventDefault();
@@ -19008,7 +19327,7 @@ function NovaAnaliseClausulasModal({ onClose, onCreate, currentUser }) {
       return;
     }
     setErro(null);
-    onCreate({ cliente: cliente.trim(), anexos });
+    onCreate({ cliente: cliente.trim(), anexos, modo });
   }
   return /*#__PURE__*/ React.createElement(
     "div",
@@ -19065,6 +19384,44 @@ function NovaAnaliseClausulasModal({ onClose, onCreate, currentUser }) {
             placeholder: "Razão social ou nome fantasia do cliente",
             autoFocus: true,
           }),
+        ),
+        /*#__PURE__*/ React.createElement(
+          "div",
+          { className: "homolog-field" },
+          /*#__PURE__*/ React.createElement("label", null, "Tipo de análise"),
+          /*#__PURE__*/ React.createElement(
+            "div",
+            { className: "homolog-radio-group client-analysis-mode-group" },
+            Object.keys(MODO_ANALISE_CLAUSULAS_META).map((m) =>
+              /*#__PURE__*/ React.createElement(
+                "label",
+                {
+                  key: m,
+                  className: "homolog-radio client-analysis-mode-radio" + (modo === m ? " active" : ""),
+                },
+                /*#__PURE__*/ React.createElement("input", {
+                  type: "radio",
+                  name: "modoAnaliseClausulas",
+                  checked: modo === m,
+                  onChange: () => setModo(m),
+                }),
+                /*#__PURE__*/ React.createElement(
+                  "div",
+                  null,
+                  /*#__PURE__*/ React.createElement(
+                    "div",
+                    { className: "client-analysis-mode-radio-label" },
+                    MODO_ANALISE_CLAUSULAS_META[m].label,
+                  ),
+                  /*#__PURE__*/ React.createElement(
+                    "div",
+                    { className: "client-analysis-mode-radio-desc" },
+                    MODO_ANALISE_CLAUSULAS_META[m].descricao,
+                  ),
+                ),
+              ),
+            ),
+          ),
         ),
         /*#__PURE__*/ React.createElement(ClientAnalysisFilePicker, {
           anexos: anexos,
@@ -19163,6 +19520,59 @@ function ClientAnalysisPointsSection({ pontos }) {
     ),
   );
 }
+/** ClientAnalysisChecklistSecoesSection: renderização em tela do modo
+ *  "checklist" (compliance/requisitos) — cada seção vem dos próprios
+ *  tópicos do documento (nunca os nomes fixos do modo padrão), cada item
+ *  mostra uma tag colorida (Obrigatório=vermelho/Condicional=laranja/
+ *  Recomendado=verde, mesma tríade usada no PDF via
+ *  MODO_ANALISE_CLAUSULAS_CLASSIFICACAO_TAG_CLASS) seguida da descrição e,
+ *  quando existir, da referência no próprio documento. */
+function ClientAnalysisChecklistSecoesSection({ secoes }) {
+  if (!secoes || secoes.length === 0) return null;
+  return /*#__PURE__*/ React.createElement(
+    React.Fragment,
+    null,
+    secoes.map((secao, si) =>
+      /*#__PURE__*/ React.createElement(
+        "div",
+        { key: si, className: "client-analysis-section" },
+        /*#__PURE__*/ React.createElement("h3", null, secao.titulo || "Seção sem título"),
+        secao.contexto &&
+          /*#__PURE__*/ React.createElement("p", { style: { margin: "0 0 8px", color: "var(--carvao)", fontSize: 12.5 } }, secao.contexto),
+        (!secao.itens || secao.itens.length === 0)
+          ? /*#__PURE__*/ React.createElement("p", null, "Nenhum item identificado nesta seção.")
+          : secao.itens.map((it, ii) =>
+              /*#__PURE__*/ React.createElement(
+                "div",
+                { key: ii, className: "client-analysis-point" },
+                /*#__PURE__*/ React.createElement(
+                  "div",
+                  { className: "client-analysis-point-head" },
+                  /*#__PURE__*/ React.createElement(
+                    "span",
+                    {
+                      className:
+                        "client-analysis-point-tag " +
+                        (MODO_ANALISE_CLAUSULAS_CLASSIFICACAO_TAG_CLASS[it.classificacao] ||
+                          "client-analysis-point-tag-atencao"),
+                    },
+                    it.classificacao || "—",
+                  ),
+                  it.referencia &&
+                    /*#__PURE__*/ React.createElement(
+                      "span",
+                      { className: "client-analysis-point-conf" },
+                      "· ref.: ",
+                      it.referencia,
+                    ),
+                ),
+                /*#__PURE__*/ React.createElement("p", { style: { margin: 0, fontSize: 12.5 } }, it.descricao || ""),
+              ),
+            ),
+      ),
+    ),
+  );
+}
 /** ClientAnalysisDocumentosSection: lista dos documentos ORIGINAIS enviados
  *  pelo cliente — "Ver"/"Baixar" reaproveitam viewHomologAnexo/
  *  downloadHomologAnexo sem nenhuma alteração (mesmo formato de anexo:
@@ -19218,8 +19628,20 @@ function ClientAnalysisDocumentosSection({ documentos, onView, onNotify }) {
 /** ClientAnalysisDetailView: tela de resultado de UMA análise — banner de
  *  mock sempre visível enquanto `resultado.mock` for true, todas as seções
  *  pedidas, documentos originais e geração/download de PDF. */
-function ClientAnalysisDetailView({ item, onBack, onNotify, onView, onUpdate, onNovaAnalise }) {
+function ClientAnalysisDetailView({ item, onBack, onNotify, onView, onUpdate, onDelete, currentUser, onNovaAnalise }) {
   const [gerandoPdf, setGerandoPdf] = useState(false);
+  // Excluir: pedido explícito da Iasmin (2026-09-29: "permita que seja
+  // possível também deletar solicitações de análise"), mesmo padrão visual
+  // e mesmo gate de Administrador já usados em "Excluir homologação" e
+  // "Excluir solicitação" (Envio em Lote) — nunca um clique único, sempre
+  // com confirmação explícita antes.
+  const [confirmandoExclusao, setConfirmandoExclusao] = useState(false);
+  const [excluindo, setExcluindo] = useState(false);
+  const isAdmin = can(currentUser, "excluirDocumentos");
+  async function handleExcluir() {
+    setExcluindo(true);
+    await onDelete?.(item.id);
+  }
   async function handleGerarPdf() {
     if (!item.resultado) return;
     setGerandoPdf(true);
@@ -19273,7 +19695,11 @@ function ClientAnalysisDetailView({ item, onBack, onNotify, onView, onUpdate, on
       /*#__PURE__*/ React.createElement(
         "div",
         { className: "company-header-top" },
-        /*#__PURE__*/ React.createElement("span", { className: "company-header-tag" }, "ANÁLISE DOCUMENTAL DE CLIENTE"),
+        /*#__PURE__*/ React.createElement(
+          "span",
+          { className: "company-header-tag" },
+          r?.modo === "checklist" ? "CHECKLIST DE COMPLIANCE" : "ANÁLISE DOCUMENTAL DE CLIENTE",
+        ),
         /*#__PURE__*/ React.createElement(ClientAnalysisStatusBadge, { status: item.status }),
       ),
       /*#__PURE__*/ React.createElement("h1", null, item.cliente),
@@ -19286,6 +19712,58 @@ function ClientAnalysisDetailView({ item, onBack, onNotify, onView, onUpdate, on
         formatAuditWhen(new Date(item.dataSolicitacao)),
         item.dataConclusao ? ` · concluído em ${formatAuditWhen(new Date(item.dataConclusao))}` : "",
       ),
+      isAdmin &&
+        !confirmandoExclusao &&
+        /*#__PURE__*/ React.createElement(
+          "div",
+          { className: "client-analysis-status-actions" },
+          /*#__PURE__*/ React.createElement(
+            "button",
+            {
+              className: "doc-view-btn client-analysis-delete-btn",
+              onClick: () => setConfirmandoExclusao(true),
+              title: "Excluir esta análise documental de cliente (Administrador)",
+            },
+            /*#__PURE__*/ React.createElement(XCircle, { size: 14 }),
+            " Excluir análise",
+          ),
+        ),
+      isAdmin &&
+        confirmandoExclusao &&
+        /*#__PURE__*/ React.createElement(
+          "div",
+          { className: "doc-row-delete-confirm client-analysis-delete-confirm" },
+          /*#__PURE__*/ React.createElement(
+            "span",
+            null,
+            `Excluir a análise de "${item.cliente}"? Isso remove o registro definitivamente (resultado, histórico e referência ao PDF gerado) e não pode ser desfeito. Os arquivos já enviados ao Drive (documentos originais e o PDF) não são apagados.`,
+          ),
+          /*#__PURE__*/ React.createElement(
+            "div",
+            { className: "doc-row-delete-confirm-actions" },
+            /*#__PURE__*/ React.createElement(
+              "button",
+              {
+                className: "doc-row-delete-confirm-btn",
+                disabled: excluindo,
+                onClick: handleExcluir,
+              },
+              excluindo
+                ? /*#__PURE__*/ React.createElement(Loader2, { size: 12, className: "spin" })
+                : null,
+              "Confirmar exclusão",
+            ),
+            /*#__PURE__*/ React.createElement(
+              "button",
+              {
+                className: "filters-clear-btn filters-clear-inline",
+                disabled: excluindo,
+                onClick: () => setConfirmandoExclusao(false),
+              },
+              "Cancelar",
+            ),
+          ),
+        ),
     ),
     item.status === "processando" &&
       /*#__PURE__*/ React.createElement(
@@ -19329,43 +19807,61 @@ function ClientAnalysisDetailView({ item, onBack, onNotify, onView, onUpdate, on
               "Um ou mais documentos enviados não puderam ter o conteúdo lido — revise manualmente os itens marcados abaixo antes de usar esta análise.",
             ),
           ),
-        /*#__PURE__*/ React.createElement(ClientAnalysisTextSection, {
-          titulo: "Resumo executivo",
-          texto: r.resumoExecutivo,
-        }),
-        /*#__PURE__*/ React.createElement(ClientAnalysisListSection, {
-          titulo: "Principais pontos",
-          itens: r.principaisPontos,
-        }),
-        /*#__PURE__*/ React.createElement(ClientAnalysisPointsSection, { pontos: r.pontosDeAtencao }),
-        /*#__PURE__*/ React.createElement(ClientAnalysisListSection, {
-          titulo: "Obrigações da Grupoprima",
-          itens: r.obrigacoesGrupoprima,
-        }),
-        /*#__PURE__*/ React.createElement(ClientAnalysisListSection, {
-          titulo: "Obrigações do cliente",
-          itens: r.obrigacoesCliente,
-        }),
-        /*#__PURE__*/ React.createElement(ClientAnalysisListSection, {
-          titulo: "Condições comerciais",
-          itens: r.condicoesComerciais,
-        }),
-        /*#__PURE__*/ React.createElement(ClientAnalysisListSection, {
-          titulo: "Prazos e vigências",
-          itens: r.prazosEVigencias,
-        }),
-        /*#__PURE__*/ React.createElement(ClientAnalysisListSection, {
-          titulo: "Seguros e gerenciamento de risco",
-          itens: r.segurosEGerenciamentoRisco,
-        }),
-        /*#__PURE__*/ React.createElement(ClientAnalysisListSection, {
-          titulo: "Documentações exigidas",
-          itens: r.documentacoesExigidas,
-        }),
-        /*#__PURE__*/ React.createElement(ClientAnalysisListSection, {
-          titulo: "Recomendações de conferência",
-          itens: r.recomendacoesDeConferencia,
-        }),
+        r.modo === "checklist"
+          ? /*#__PURE__*/ React.createElement(
+              React.Fragment,
+              null,
+              /*#__PURE__*/ React.createElement(ClientAnalysisTextSection, {
+                titulo: "Objetivo do documento",
+                texto: r.objetivoResumo,
+              }),
+              /*#__PURE__*/ React.createElement(ClientAnalysisTextSection, {
+                titulo: "Identificação do documento",
+                texto: r.identificacaoDocumento,
+              }),
+              /*#__PURE__*/ React.createElement(ClientAnalysisChecklistSecoesSection, { secoes: r.secoes }),
+            )
+          : /*#__PURE__*/ React.createElement(
+              React.Fragment,
+              null,
+              /*#__PURE__*/ React.createElement(ClientAnalysisTextSection, {
+                titulo: "Resumo executivo",
+                texto: r.resumoExecutivo,
+              }),
+              /*#__PURE__*/ React.createElement(ClientAnalysisListSection, {
+                titulo: "Principais pontos",
+                itens: r.principaisPontos,
+              }),
+              /*#__PURE__*/ React.createElement(ClientAnalysisPointsSection, { pontos: r.pontosDeAtencao }),
+              /*#__PURE__*/ React.createElement(ClientAnalysisListSection, {
+                titulo: "Obrigações da Grupoprima",
+                itens: r.obrigacoesGrupoprima,
+              }),
+              /*#__PURE__*/ React.createElement(ClientAnalysisListSection, {
+                titulo: "Obrigações do cliente",
+                itens: r.obrigacoesCliente,
+              }),
+              /*#__PURE__*/ React.createElement(ClientAnalysisListSection, {
+                titulo: "Condições comerciais",
+                itens: r.condicoesComerciais,
+              }),
+              /*#__PURE__*/ React.createElement(ClientAnalysisListSection, {
+                titulo: "Prazos e vigências",
+                itens: r.prazosEVigencias,
+              }),
+              /*#__PURE__*/ React.createElement(ClientAnalysisListSection, {
+                titulo: "Seguros e gerenciamento de risco",
+                itens: r.segurosEGerenciamentoRisco,
+              }),
+              /*#__PURE__*/ React.createElement(ClientAnalysisListSection, {
+                titulo: "Documentações exigidas",
+                itens: r.documentacoesExigidas,
+              }),
+              /*#__PURE__*/ React.createElement(ClientAnalysisListSection, {
+                titulo: "Recomendações de conferência",
+                itens: r.recomendacoesDeConferencia,
+              }),
+            ),
         /*#__PURE__*/ React.createElement(ClientAnalysisDocumentosSection, {
           documentos: item.documentos,
           onView: onView,
@@ -19480,12 +19976,43 @@ function ClientAnalysisView({ currentUser, onNotify, onView, companies }) {
     if (!atual) return;
     persist({ ...atual, ...patch });
   }
-  function handleCreate({ cliente, anexos }) {
+  /** handleDelete: exclusão manual real de uma análise documental de cliente
+   *  (pedido explícito da Iasmin, 2026-09-29: "permita que seja possível
+   *  também deletar solicitações de análise") — mesmo padrão exato já usado
+   *  em HomologacaoView/EnvioLoteView.handleDelete: a UI (`items` +
+   *  `itemsMemoriaRef`) é a única fonte de verdade, a escrita em "db" é só
+   *  um espelho best-effort (nunca bloqueia a exclusão), e a confirmação
+   *  explícita fica a cargo de ClientAnalysisDetailView (nunca um clique
+   *  único). Não apaga os arquivos já enviados ao Drive (documentos
+   *  originais nem o PDF gerado), só o registro da análise em si — mesma
+   *  ressalva já feita em "Excluir solicitação" de Envio em Lote. */
+  function handleDelete(id) {
+    const item = items.find((it) => it.id === id) || itemsMemoriaRef.current[id];
+    delete itemsMemoriaRef.current[id];
+    setItems((prev) => prev.filter((it) => it.id !== id));
+    setSelectedId(null);
+    getDb()
+      .then((db) => {
+        if (!db) return;
+        return db.collection("client_document_analysis").doc(id).delete().catch(() => {});
+      })
+      .catch(() => {});
+    logDocumentAction("excluiu_analise_clausulas", {
+      cliente: item?.cliente || "(sem cliente)",
+    });
+    onNotify?.(
+      `Análise de "${item?.cliente || "cliente"}" foi excluída.`,
+      "info",
+    );
+  }
+  function handleCreate({ cliente, anexos, modo }) {
     const id = generateClientAnalysisId();
     const agora = new Date().toISOString();
+    const modoFinal = modo === "checklist" ? "checklist" : "padrao";
     const item = {
       id,
       cliente,
+      modo: modoFinal,
       usuario: { nome: currentUser?.nome || "Usuário do portal", email: currentUser?.email || "" },
       dataSolicitacao: agora,
       documentos: anexos.map((a) => ({ ...a })),
@@ -19498,7 +20025,7 @@ function ClientAnalysisView({ currentUser, onNotify, onView, companies }) {
     persist(item);
     setModalOpen(false);
     setSelectedId(id);
-    logDocumentAction("solicitou_analise_clausulas", { cliente, documentos: item.documentos.length });
+    logDocumentAction("solicitou_analise_clausulas", { cliente, documentos: item.documentos.length, modo: modoFinal });
     onNotify?.(`Análise de "${cliente}" enviada — processando ${item.documentos.length} documento(s).`, "info");
     processarAnaliseClausulas(item, { onDone: (atualizado) => persist(atualizado) });
   }
@@ -19553,6 +20080,8 @@ function ClientAnalysisView({ currentUser, onNotify, onView, companies }) {
         onNotify: onNotify,
         onView: onView,
         onUpdate: (patch) => handleUpdate(selected.id, patch),
+        onDelete: handleDelete,
+        currentUser: currentUser,
         onNovaAnalise: () => {
           setSelectedId(null);
           setModalOpen(true);
@@ -19571,7 +20100,7 @@ function ClientAnalysisView({ currentUser, onNotify, onView, companies }) {
         "div",
         null,
         /*#__PURE__*/ React.createElement("p", { className: "eyebrow-pill" }, "Comercial"),
-        /*#__PURE__*/ React.createElement("h1", null, "Análise Documental de Clientes"),
+        /*#__PURE__*/ React.createElement("h1", null, "Análise Documental"),
         /*#__PURE__*/ React.createElement(
           "p",
           { className: "lede" },
@@ -24224,7 +24753,8 @@ function GrupoprimaPortal() {
         }
         .portal-root[data-theme="dark"] .doc-row-delete-btn,
         .portal-root[data-theme="dark"] .homolog-delete-btn,
-        .portal-root[data-theme="dark"] .lote-delete-btn {
+        .portal-root[data-theme="dark"] .lote-delete-btn,
+        .portal-root[data-theme="dark"] .client-analysis-delete-btn {
           border-color: rgba(255,120,120,0.45);
         }
         .portal-root[data-theme="dark"] .doc-row-delete-confirm {
@@ -24250,6 +24780,7 @@ function GrupoprimaPortal() {
         .portal-root[data-theme="dark"] .client-analysis-point-tag-informativo { background: rgba(46,125,166,0.20); color: #6FBBE3; }
         .portal-root[data-theme="dark"] .client-analysis-point-tag-atencao { background: rgba(255,214,10,0.22); color: #E3C23B; }
         .portal-root[data-theme="dark"] .client-analysis-point-tag-critico { background: rgba(214,69,69,0.20); color: #FF9B9B; }
+        .portal-root[data-theme="dark"] .client-analysis-point-tag-recomendado { background: rgba(46,163,99,0.20); color: #7FE6A0; }
         .portal-root[data-theme="dark"] .lote-item-base-row { border-top-color: rgba(255,255,255,0.06); }
         .portal-root[data-theme="dark"] .toast-error { background: #3A1414; color: #FF9B9B; border-color: rgba(255,120,120,0.35); }
         .portal-root * { box-sizing: border-box; }
@@ -25250,17 +25781,34 @@ function GrupoprimaPortal() {
         },
         /*#__PURE__*/ React.createElement(Sparkles, { size: 16 }),
         " ",
-        /*#__PURE__*/ React.createElement("span", null, "Análise Documental de Clientes"),
+        /*#__PURE__*/ React.createElement("span", null, "Análise Documental"),
       ),
-      // "Assistente" saiu do painel lateral (pedido explícito da Iasmin,
-      // 2026-09-28) — continua acessível pelo botão "Perguntar ao
-      // assistente" na barra de topo (ver .chat-toggle). Sincronização com
-      // o Google Drive e Auditoria continuam na nova ordem pedida (a
-      // primeira antes da segunda), mas SEM nenhum agrupamento visual —
-      // Iasmin pediu o retângulo verde ao redor dos dois, testou e voltou
-      // atrás porque dava destaque demais a essas duas opções (2026-09-28,
-      // mesma conversa); voltaram a ser nav-item comuns, iguais a todos os
+      // "Assistente" tinha saído do painel lateral em 2026-09-28 (pedido
+      // explícito da Iasmin), ficando acessível só pelo botão "Perguntar ao
+      // assistente" na barra de topo (.chat-toggle). Voltou ao menu lateral
+      // (pedido de 2026-09-29) — mesmo botão, agora também aqui: abre o
+      // mesmo ChatDrawer (setChatOpen), nunca uma tela própria. Usa a chave
+      // de permissão "assistente" (já existia na matriz de PERMISSOES_POR_PERFIL
+      // desde 2026-09-25, mas não era usada em nenhum lugar até agora) —
+      // hoje vale true pros 3 perfis, então aparece pra Administrador,
+      // Comercial e Usuário igualmente. Sincronização com o Google Drive e
+      // Auditoria continuam na nova ordem pedida (a primeira antes da
+      // segunda), mas SEM nenhum agrupamento visual — Iasmin pediu o
+      // retângulo verde ao redor dos dois, testou e voltou atrás porque
+      // dava destaque demais a essas duas opções (2026-09-28, mesma
+      // conversa); voltaram a ser nav-item comuns, iguais a todos os
       // outros itens deste menu.
+      can(currentUser, "assistente") &&
+        /*#__PURE__*/ React.createElement(
+          "button",
+          {
+            className: "nav-item",
+            onClick: () => setChatOpen(true),
+          },
+          /*#__PURE__*/ React.createElement(MessageSquare, { size: 16 }),
+          " ",
+          /*#__PURE__*/ React.createElement("span", null, "Assistente"),
+        ),
       can(currentUser, "sincronizarDrive") &&
         /*#__PURE__*/ React.createElement(
           "button",
