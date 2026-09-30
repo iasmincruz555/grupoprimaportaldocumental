@@ -1810,7 +1810,7 @@ const DRIVE_PROXY_KEY = "Z8ib8D02tbTvCsc4O54KjMbdTU1WGSBsx14m9Ng8";
  *  passo 5). Enquanto for o placeholder abaixo, o botão "Entrar com
  *  Google" fica oculto — nunca quebra a tela de quem ainda não configurou. */
 const GOOGLE_OAUTH_CLIENT_ID =
-  "350155686890-rupm6sguld32v1mart9qigumbs08m369.apps.googleusercontent.com";
+  "COLE_AQUI_O_CLIENT_ID_DO_GOOGLE.apps.googleusercontent.com";
 const GOOGLE_OAUTH_CONFIGURADO =
   !!GOOGLE_OAUTH_CLIENT_ID && !GOOGLE_OAUTH_CLIENT_ID.startsWith("COLE_AQUI");
 /** parseDateBR: converte "DD/MM/AAAA" em timestamp; retorna 0 se não reconhecer. */ function parseDateBR(
@@ -4048,6 +4048,22 @@ async function createDocumentPackageMultiBase(numerados, opts = {}) {
       // (ver CND Federal/Estadual/Municipal/FGTS acima) agora replicado aqui.
       match:
         /\bcndt\b|certid\w* negativ\w* de debitos trabalhistas|certid\w* negativ\w*.*trabalhista|cnd trabalhista/,
+    },
+    {
+      // CND Falência adicionada em 2026-09-30 (bug real relatado pela
+      // Iasmin: pedir "CND Municipal, CND estadual, CND falência e
+      // contrato social" numa linha só não reconhecia "CND falência" —
+      // não existia NENHUMA entrada pra esse tipo no dicionário, então
+      // `detectRequestedTypes` nunca podia encontrá-lo, independente de
+      // como a linha fosse escrita. Mesmo padrão "CND <esfera>" já usado
+      // pelos outros 5 tipos desta família (Federal/Estadual/Municipal/
+      // FGTS/Trabalhista, ver acima). Hoje nenhum documento real desse
+      // tipo foi indexado ainda no portal (mesmo caso de CND FGTS acima),
+      // então um pedido por ela aparece corretamente como "não localizado"
+      // até que um real venha a ser sincronizado.
+      key: "certidoes_negativas",
+      label: "CND Falência",
+      match: /certid\w* negativ\w*.*falenc\w*|cnd (de )?falenc\w*/,
     },
     // Licenças e Autorizações — tipo específico dentro da categoria (regra
     // explícita: AFE não é uma categoria própria, é um TIPO aqui dentro).
@@ -6482,7 +6498,11 @@ const CHECKLIST_MULTI_TIPO_GRUPOS = [
   // TIPO_LABEL_SINONIMOS_LEGADOS/DOC_TYPE_KEYWORDS) — atualizado aqui junto,
   // senão uma linha de checklist citando "trabalhista" deixaria de ser
   // reconhecida como parte deste grupo.
-  new Set(["CND Federal", "CND Estadual", "CND Municipal", "CND FGTS", "CND Trabalhista"]),
+  // "CND Falência" adicionada ao grupo em 2026-09-30 (mesmo pedido/bug que
+  // criou o tipo — ver DOC_TYPE_KEYWORDS acima): sem estar aqui, mesmo
+  // depois de virar um tipo reconhecido, ela ficaria de fora do grupo e
+  // cairia na mesma armadilha do "Contrato Social" corrigida logo abaixo.
+  new Set(["CND Federal", "CND Estadual", "CND Municipal", "CND FGTS", "CND Trabalhista", "CND Falência"]),
   new Set(["Apólice RCTR-C", "Apólice RC-DC"]),
 ];
 const CHECKLIST_MULTI_TIPO_LABELS = new Set(
@@ -6507,7 +6527,118 @@ function tiposDistintosParaChecklist(linha) {
     vistos.add(tipo.label);
     out.push(tipo);
   }
+  // Tipos que NÃO pertencem a nenhum CHECKLIST_MULTI_TIPO_GRUPOS não podem
+  // mais ser descartados incondicionalmente só porque a mesma linha também
+  // bateu num grupo — bug real relatado pela Iasmin (2026-09-30): "CND
+  // Municipal, CND estadual, CND falência e contrato social" numa linha só
+  // perdia o "Contrato Social" em silêncio, porque esta função antes só
+  // devolvia `doGrupo`. Mas simplesmente incluir todo tipo fora do grupo
+  // reintroduz o problema oposto que esta função existe pra evitar (ver
+  // comentário grande acima, "ambiguidade de regex"): ex. "Apólices RCTR-C
+  // e RC-DC" também bate no tipo genérico solto "Apólice" (`key: "seguros"`,
+  // regex `ap[oó]lice`) — a MESMA categoria que "Apólice RCTR-C"/"Apólice
+  // RC-DC" (também `key: "seguros"`) já cobrem em detalhe, não um terceiro
+  // documento pedido à parte. A diferença real entre os dois casos é a
+  // CATEGORIA (`key`): "contrato social" tem `key: "contratos_sociais"`,
+  // totalmente diferente da `key: "certidoes_negativas"` do grupo de CNDs
+  // — categoria nova, documento novo de verdade. Por isso: um tipo fora do
+  // grupo só vira item próprio se a categoria (`key`) dele ainda não foi
+  // usada por nenhum tipo já incluído (do grupo, ou já aceito aqui nesta
+  // mesma passada) — a categoria do grupo já está coberta em detalhe, um
+  // segundo tipo da mesma categoria é sempre o fallback genérico batendo
+  // no mesmo pedido, nunca um documento a mais.
+  const keysOcupadas = new Set(doGrupo.map((t) => t.key));
+  for (const tipo of tipos) {
+    if (vistos.has(tipo.label)) continue;
+    if (keysOcupadas.has(tipo.key)) continue;
+    vistos.add(tipo.label);
+    keysOcupadas.add(tipo.key);
+    out.push(tipo);
+  }
   return out;
+}
+/** categoriaSugeridaParaTrecho: mesmo fallback de categoria usado há tempo
+ *  por `gerarChecklistViaRegras` pra uma linha sem tipo específico
+ *  reconhecido — extraído aqui pra ser reaproveitado também por
+ *  `detectarSegmentosNaoCobertos` abaixo (2026-09-30), sem duplicar a
+ *  lógica. */
+function categoriaSugeridaParaTrecho(texto) {
+  const nTexto = normalize(texto);
+  const catHit = CATEGORY_ALIASES.find((k) => k.match.test(nTexto));
+  if (catHit) return catHit.key;
+  // Fallback seguro só para bate EXATO do trecho inteiro com o rótulo de
+  // uma categoria (ex.: trecho só com "CNPJ") — os padrões de
+  // CATEGORY_ALIASES de propósito não casam a palavra "cnpj" isolada (é
+  // boilerplate em quase todo documento real), mas numa CHECKLIST curta,
+  // um trecho que é só "CNPJ" só pode significar o documento CNPJ; nunca
+  // vira substring dentro de texto maior, só igualdade exata do trecho.
+  const catExata = CATEGORIES.find((c) => normalize(c.label) === nTexto);
+  return catExata ? catExata.key : null;
+}
+/** detectarSegmentosNaoCobertos: pedido explícito da Iasmin (2026-09-30,
+ *  logo depois de reportar o bug real do "CND Municipal, CND estadual, CND
+ *  falência e contrato social" perdendo itens numa linha só): "quero que
+ *  ele consiga separar pra identificar por ',' também" — uma linha de
+ *  checklist com vários pedidos separados por vírgula/" e " não pode fazer
+ *  um pedaço que NENHUM tipo do dicionário reconhece (ex.: um tipo que
+ *  ainda nem foi cadastrado, como "CND Falência" antes de existir uma
+ *  entrada pra ela) desaparecer em silêncio — precisa virar um item "não
+ *  identificado" próprio (categoria sugerida quando dá, senão só o texto
+ *  cru), esperando categorização manual, em vez de simplesmente sumir.
+ *
+ *  Funciona comparando os tipos já encontrados (`tiposDistintosParaChecklist`,
+ *  que casa a linha INTEIRA contra DOC_TYPE_KEYWORDS — o mesmo mecanismo
+ *  que já lida corretamente com listas sem vírgula nenhuma, tipo "Certidões
+ *  negativas federal, estadual, municipal, FGTS e trabalhista") contra um
+ *  PREFIXO cumulativo reconstruído pedaço a pedaço (nunca fatiando a linha
+ *  original por posição de caractere — evita todo problema de acento
+ *  mudando o tamanho da string na hora de normalizar): um pedaço "explica"
+ *  um tipo já encontrado quando esse tipo só aparece no prefixo a PARTIR
+ *  dele (nunca antes). Um pedaço que não introduz nenhum tipo já
+ *  encontrado E que, sozinho, também não bate em nenhum tipo do
+ *  dicionário, volta como texto cru pra virar item "não identificado". */
+function detectarSegmentosNaoCobertos(linha, tiposEncontrados) {
+  if (!tiposEncontrados || !tiposEncontrados.length) return [];
+  const rotulosEncontrados = new Set(tiposEncontrados.map((t) => t.label));
+  // Quebra por vírgula primeiro. "e" é uma palavra comum demais em
+  // português (conjunção normal em qualquer frase, não só separador de
+  // lista) pra quebrar em TODA ocorrência — isso já causou uma regressão
+  // real testada partindo frases sem vírgula nenhuma, tipo "Cartão CNPJ da
+  // matriz e filiais" ou "Contrato social e última alteração", em pedaços
+  // sem sentido ("filiais", "última alteração") tratados como tipo
+  // desconhecido. Por isso o "e" SÓ é considerado separador de lista no
+  // formato "A, B, C e D" (vírgula(s) + "e" antes do último item) — nunca
+  // dentro de uma frase que não tem vírgula nenhuma, e nunca em nenhum
+  // pedaço que não seja o último depois da vírgula.
+  const porVirgula = linha
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  let pedacos = porVirgula;
+  if (porVirgula.length > 1) {
+    const ultima = porVirgula[porVirgula.length - 1];
+    const ultimaPartida = ultima
+      .split(/\s+e\s+/i)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    pedacos = [...porVirgula.slice(0, -1), ...ultimaPartida];
+  }
+  if (pedacos.length <= 1) return [];
+  const naoIdentificados = [];
+  const rotulosJaVistos = new Set();
+  let prefixo = "";
+  pedacos.forEach((pedaco) => {
+    prefixo = prefixo ? `${prefixo}, ${pedaco}` : pedaco;
+    const rotulosNoPrefixo = detectRequestedTypes(prefixo)
+      .map((t) => t.label)
+      .filter((l) => rotulosEncontrados.has(l));
+    const introduzTipoNovo = rotulosNoPrefixo.some((l) => !rotulosJaVistos.has(l));
+    rotulosNoPrefixo.forEach((l) => rotulosJaVistos.add(l));
+    if (!introduzTipoNovo && detectRequestedTypes(pedaco).length === 0) {
+      naoIdentificados.push(pedaco);
+    }
+  });
+  return naoIdentificados;
 }
 function gerarChecklistViaRegras(texto) {
   const linhasBrutas = (texto || "")
@@ -6565,25 +6696,23 @@ function gerarChecklistViaRegras(texto) {
           valePorTodasAsBases: linhaValeTodasAsBases,
         });
       });
+      // Pedaços da mesma linha (separados por vírgula/" e ") que nenhum dos
+      // tipos acima explica — pedido explícito da Iasmin, 2026-09-30 (ver
+      // detectarSegmentosNaoCobertos) — também viram item, em vez de sumir.
+      detectarSegmentosNaoCobertos(linha, tipos).forEach((trecho, k) => {
+        itens.push({
+          id: `chk-${Date.now().toString(36)}-${i}-x${k}-${Math.random().toString(36).slice(2, 6)}`,
+          descricaoOriginal: trecho.slice(0, 300),
+          tipoSugerido: null,
+          categoriaSugerida: categoriaSugeridaParaTrecho(trecho),
+          editadoManualmente: false,
+          valePorTodasAsBases: linhaValeTodasAsBases,
+        });
+      });
       return;
     }
     const tipoSugerido = tipos.length > 0 ? tipos[0].label : null;
-    let categoriaSugerida = null;
-    if (!tipoSugerido) {
-      const nLinha = normalize(linha);
-      const catHit = CATEGORY_ALIASES.find((k) => k.match.test(nLinha));
-      categoriaSugerida = catHit ? catHit.key : null;
-      // Fallback seguro só para bate EXATO da linha inteira com o rótulo de
-      // uma categoria (ex.: linha só com "CNPJ") — os padrões acima de
-      // propósito não casam a palavra "cnpj" isolada (é boilerplate em
-      // quase todo documento real), mas numa CHECKLIST curta, uma linha que
-      // é só "CNPJ" só pode significar o documento CNPJ; nunca vira
-      // substring dentro de texto maior, só igualdade exata da linha. */
-      if (!categoriaSugerida) {
-        const catExata = CATEGORIES.find((c) => normalize(c.label) === nLinha);
-        if (catExata) categoriaSugerida = catExata.key;
-      }
-    }
+    const categoriaSugerida = tipoSugerido ? null : categoriaSugeridaParaTrecho(linha);
     itens.push({
       id: `chk-${Date.now().toString(36)}-${i}-${Math.random().toString(36).slice(2, 6)}`,
       descricaoOriginal: linha.slice(0, 300),
@@ -6591,6 +6720,19 @@ function gerarChecklistViaRegras(texto) {
       categoriaSugerida,
       editadoManualmente: false,
       valePorTodasAsBases: linhaValeTodasAsBases,
+    });
+    // Mesma lógica acima: se a linha tem 1 tipo reconhecido mas também
+    // outros pedaços (vírgula/" e ") que esse único tipo não explica, cada
+    // um também vira item "não identificado" (pedido da Iasmin, 2026-09-30).
+    detectarSegmentosNaoCobertos(linha, tipos).forEach((trecho, k) => {
+      itens.push({
+        id: `chk-${Date.now().toString(36)}-${i}-x${k}-${Math.random().toString(36).slice(2, 6)}`,
+        descricaoOriginal: trecho.slice(0, 300),
+        tipoSugerido: null,
+        categoriaSugerida: categoriaSugeridaParaTrecho(trecho),
+        editadoManualmente: false,
+        valePorTodasAsBases: linhaValeTodasAsBases,
+      });
     });
   });
   return { ok: true, itens };
