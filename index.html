@@ -20863,6 +20863,39 @@ function EnvioLoteStyles() {
     `,
   );
 }
+/** listarDocumentosVencidosParaProcessar: dry-run do MESMO casamento
+ *  item×base que processarLote() faz, só pra descobrir, ANTES de gerar o
+ *  ZIP, se algum documento que entraria no pacote está vencido — pedido
+ *  explícito da Iasmin (2026-09-30): "quando for solicitado algum
+ *  documento que esteja vencido [...] adicione um aviso sobre o
+ *  vencimento e pergunte ao usuário se ele ainda quer que a documentação
+ *  seja adicionada a pasta zip ou não". Nunca decide sozinho: só levanta
+ *  a lista pra a tela perguntar (ver LoteDocumentosVencidosModal em
+ *  EnvioLoteDetailView) — quem decide incluir ou não cada documento
+ *  vencido é sempre a pessoa usando o portal, nunca o código. Um mesmo
+ *  documento (doc.id) aparece só uma vez na lista mesmo que case com mais
+ *  de um item/base (ex.: documento de abrangência empresarial pedido pra
+ *  "matriz e filiais") — mesma ideia de dedup por id já usada em
+ *  processarLote() pra não duplicar entradas no ZIP. */
+function listarDocumentosVencidosParaProcessar(solicitacao, companies) {
+  const companiesPorId = new Map((companies || []).map((c) => [c.id, c]));
+  const vistos = new Map(); // doc.id -> { doc, itemNome, baseLabel }
+  (solicitacao.documentacoesSolicitadas || []).forEach((item) => {
+    Object.keys(item.statusPorBase || {}).forEach((baseId) => {
+      if (item.statusPorBase[baseId] === "nao_aplicavel") return;
+      const company = companiesPorId.get(baseId);
+      if (!company) return;
+      const r = matchChecklistItemToCompany(loteItemParaMatch(item), company);
+      const candidatos =
+        r.status === "encontrado" ? [r.doc] : r.status === "grupo" || r.status === "ambiguo" ? r.candidatos : [];
+      candidatos.forEach((doc) => {
+        if (!doc || doc.status !== "vencido" || vistos.has(doc.id)) return;
+        vistos.set(doc.id, { doc, itemNome: item.nome, baseLabel: companyLabelFor(company) });
+      });
+    });
+  });
+  return [...vistos.values()];
+}
 /** processarLote: pipeline REAL de processamento — 7 etapas
  *  (recebimento/upload/validação/organização-classificação/compactação/
  *  armazenamento/concluído), cada uma só marcada "ok" depois de
@@ -20876,13 +20909,29 @@ function EnvioLoteStyles() {
  *  quando o item foi criado ou processado da última vez. `deps` existe só
  *  para os testes automatizados injetarem tryPersistUploadedFile/
  *  createDocumentPackageMultiBase/createZip falsos, sem depender de rede
- *  real. */
-async function processarLote(solicitacao, { companies, usuarioProcessamento, deps } = {}) {
+ *  real. `permitirVencidos` (2026-09-30, pedido da Iasmin): Set de
+ *  `doc.id` que a pessoa usando o portal confirmou incluir mesmo estando
+ *  vencidos (ver listarDocumentosVencidosParaProcessar acima) — `null`/
+ *  `undefined` (comportamento padrão de quem chama sem saber desse
+ *  parâmetro novo) inclui tudo normalmente, sem nenhuma restrição extra,
+ *  exatamente como sempre foi. Um documento vencido fora desse conjunto
+ *  nunca entra no ZIP — a base correspondente fica "pendente" em vez de
+ *  "recebido", já que o documento foi localizado mas, por decisão de
+ *  quem processou, não foi incluído. */
+async function processarLote(solicitacao, { companies, usuarioProcessamento, deps, permitirVencidos } = {}) {
   const _tryPersistUploadedFile = (deps && deps.tryPersistUploadedFile) || tryPersistUploadedFile;
   const _createDocumentPackageMultiBase =
     (deps && deps.createDocumentPackageMultiBase) || createDocumentPackageMultiBase;
   const _createZip = (deps && deps.createZip) || createZip;
   const companiesPorId = new Map((companies || []).map((c) => [c.id, c]));
+  // `permitirVencidos` (2026-09-30): Set de `doc.id` liberados mesmo estando
+  // vencidos, confirmado pela pessoa que processou (ver
+  // listarDocumentosVencidosParaProcessar acima). `null`/`undefined` mantém
+  // o comportamento de sempre — inclui qualquer documento casado, vencido ou
+  // não.
+  function vencidoPermitido(doc) {
+    return !doc || doc.status !== "vencido" || permitirVencidos == null || permitirVencidos.has(doc.id);
+  }
   const etapas = [];
   function marcarEtapa(chave, status, detalhe) {
     etapas.push({ etapa: chave, status, em: new Date().toISOString(), ...(detalhe ? { detalhe } : {}) });
@@ -20988,13 +21037,22 @@ async function processarLote(solicitacao, { companies, usuarioProcessamento, dep
         ? matchChecklistItemToCompany(loteItemParaMatch(item), company)
         : { status: "sem_base", candidatos: [] };
       if (r.status === "encontrado") {
-        algumRecebivel = true;
-        pushResolvido(r.doc);
-        statusPorBase[baseId] = stAtual === "conferido" ? "conferido" : "recebido";
+        if (vencidoPermitido(r.doc)) {
+          algumRecebivel = true;
+          pushResolvido(r.doc);
+          statusPorBase[baseId] = stAtual === "conferido" ? "conferido" : "recebido";
+        } else {
+          statusPorBase[baseId] = "pendente";
+        }
       } else if (r.status === "grupo" || r.status === "ambiguo") {
-        algumRecebivel = true;
-        r.candidatos.forEach((doc) => pushResolvido(doc));
-        statusPorBase[baseId] = stAtual === "conferido" ? "conferido" : "recebido";
+        const candidatosPermitidos = r.candidatos.filter(vencidoPermitido);
+        if (candidatosPermitidos.length > 0) {
+          algumRecebivel = true;
+          candidatosPermitidos.forEach((doc) => pushResolvido(doc));
+          statusPorBase[baseId] = stAtual === "conferido" ? "conferido" : "recebido";
+        } else {
+          statusPorBase[baseId] = "pendente";
+        }
       } else if (stAtual === "recebido" || stAtual === "conferido") {
         algumRecebivel = true; // não é mais localizável agora, mas confia na confirmação anterior
       } else {
@@ -21581,6 +21639,19 @@ function EnvioLoteDetailView({ item, companies, onBack, onNotify, onView, onUpda
   // solicitadas" logo abaixo). Disponível pra qualquer perfil que já pode
   // ver a solicitação (não é uma ação administrativa como excluir).
   const [verOriginalOpen, setVerOriginalOpen] = useState(false);
+  // vencidosPendentes/vencidosSelecionados (2026-09-30, pedido explícito da
+  // Iasmin: "quando for solicitado algum documento que esteja vencido no
+  // envio de documentação em lote, adicione um aviso sobre o vencimento e
+  // pergunte ao usuário se ele ainda quer que a documentação seja
+  // adicionada a pasta zip ou não") — `vencidosPendentes` é `null` quando o
+  // modal de confirmação está fechado, ou a lista (vinda de
+  // listarDocumentosVencidosParaProcessar) quando handleProcessar encontrou
+  // ao menos 1 documento vencido casado e precisa perguntar antes de gerar
+  // o ZIP. `vencidosSelecionados` guarda os `doc.id` que a pessoa deixou
+  // marcados pra incluir mesmo vencidos (começa com todos marcados — mesmo
+  // comportamento de sempre, só que agora com aviso explícito).
+  const [vencidosPendentes, setVencidosPendentes] = useState(null);
+  const [vencidosSelecionados, setVencidosSelecionados] = useState(new Set());
   // isAdmin: exclusão da solicitação restrita a Administrador (pedido
   // explícito da Iasmin, 2026-09-28), mesmo gate já usado pra excluir um
   // documento do catálogo (DocRowActions) — nunca aberto pros perfis
@@ -21680,10 +21751,10 @@ function EnvioLoteDetailView({ item, companies, onBack, onNotify, onView, onUpda
     setNovoItemNome("");
     onNotify?.(`"${novoItem.nome}" adicionado à solicitação.`, "info");
   }
-  async function handleProcessar() {
+  async function executarProcessamento(permitirVencidos) {
     setProcessando(true);
     const usuarioProcessamento = { nome: currentUser?.nome || "Usuário do portal", email: currentUser?.email || "" };
-    const atualizado = await processarLote(item, { companies, usuarioProcessamento });
+    const atualizado = await processarLote(item, { companies, usuarioProcessamento, permitirVencidos });
     persistPatch(atualizado);
     setProcessando(false);
     logDocumentAction("processou_lote", { cliente: item.cliente, status: atualizado.status });
@@ -21704,6 +21775,37 @@ function EnvioLoteDetailView({ item, companies, onBack, onNotify, onView, onUpda
         "info",
       );
     }
+  }
+  // handleProcessar: antes de gerar o ZIP de fato, verifica se algum
+  // documento que seria incluído está vencido — se estiver, abre o modal de
+  // confirmação (vencidosPendentes) em vez de processar direto; só quando
+  // não há nenhum vencido casado (ou depois que a pessoa já respondeu ao
+  // modal) é que o processamento acontece de verdade via
+  // executarProcessamento.
+  function handleProcessar() {
+    const vencidos = listarDocumentosVencidosParaProcessar(item, companies);
+    if (vencidos.length > 0) {
+      setVencidosSelecionados(new Set(vencidos.map((v) => v.doc.id)));
+      setVencidosPendentes(vencidos);
+      return;
+    }
+    executarProcessamento(null);
+  }
+  function handleCancelarVencidos() {
+    setVencidosPendentes(null);
+  }
+  function handleConfirmarVencidos() {
+    const permitir = new Set(vencidosSelecionados);
+    setVencidosPendentes(null);
+    executarProcessamento(permitir);
+  }
+  function toggleVencidoSelecionado(docId) {
+    setVencidosSelecionados((prev) => {
+      const next = new Set(prev);
+      if (next.has(docId)) next.delete(docId);
+      else next.add(docId);
+      return next;
+    });
   }
   async function handleBaixarZip() {
     const ultimaVersao = (item.versoesZip || []).slice(-1)[0];
@@ -21917,6 +22019,104 @@ function EnvioLoteDetailView({ item, companies, onBack, onNotify, onView, onUpda
                   { className: "homolog-bases-hint" },
                   "Não há registro do texto original desta solicitação — ela foi criada antes desta função existir, ou as documentações foram adicionadas manualmente, uma a uma.",
                 ),
+          ),
+        ),
+      ),
+    // Modal "Documentos vencidos encontrados" (pedido explícito da Iasmin,
+    // 2026-09-30: "quando for solicitado algum documento que esteja vencido
+    // no envio de documentação em lote, adicione um aviso sobre o
+    // vencimento e pergunte ao usuário se ele ainda quer que a
+    // documentação seja adicionada a pasta zip ou não") — aparece só
+    // quando handleProcessar encontra, ao vivo, algum documento vencido
+    // que seria incluído no ZIP. Mesmo padrão visual dos outros modais do
+    // portal (docs-modal-overlay/docs-modal homolog-form-modal). Cada
+    // documento vem com um checkbox (todos marcados por padrão, mesmo
+    // comportamento de sempre); desmarcar um exclui só aquele documento do
+    // ZIP (a base correspondente fica "pendente" em vez de "recebido").
+    vencidosPendentes &&
+      React.createElement(
+        "div",
+        { className: "docs-modal-overlay", onClick: handleCancelarVencidos },
+        React.createElement(
+          "div",
+          { className: "docs-modal homolog-form-modal", onClick: (e) => e.stopPropagation() },
+          React.createElement(
+            "div",
+            { className: "docs-modal-head" },
+            React.createElement(
+              "div",
+              null,
+              React.createElement(
+                "div",
+                { className: "docs-modal-title" },
+                React.createElement(AlertTriangle, { size: 16 }),
+                " Documentos vencidos encontrados",
+              ),
+              React.createElement(
+                "div",
+                { className: "docs-modal-sub" },
+                `${vencidosPendentes.length === 1 ? "1 documento localizado está vencido" : `${vencidosPendentes.length} documentos localizados estão vencidos`} para esta solicitação de "${item.cliente}". Confira abaixo e escolha quais devem entrar no ZIP mesmo assim.`,
+              ),
+            ),
+            React.createElement(
+              "button",
+              { className: "icon-btn-dark", onClick: handleCancelarVencidos, "aria-label": "Fechar" },
+              React.createElement(X, { size: 18 }),
+            ),
+          ),
+          React.createElement(
+            "div",
+            { className: "docs-modal-body" },
+            vencidosPendentes.map((v) =>
+              React.createElement(
+                "label",
+                {
+                  key: v.doc.id,
+                  className: "homolog-anexo-item",
+                  style: { marginBottom: 8, cursor: "pointer", alignItems: "flex-start" },
+                },
+                React.createElement("input", {
+                  type: "checkbox",
+                  checked: vencidosSelecionados.has(v.doc.id),
+                  onChange: () => toggleVencidoSelecionado(v.doc.id),
+                  style: { marginTop: 3 },
+                }),
+                React.createElement(
+                  "div",
+                  null,
+                  React.createElement(
+                    "span",
+                    { className: "homolog-anexo-nome" },
+                    docTituloExibido(v.doc),
+                    ` — ${v.baseLabel}`,
+                  ),
+                  React.createElement(
+                    "div",
+                    { style: { fontSize: 12, color: "var(--vermelho-alerta, #c0392b)" } },
+                    formatValidadeResumo(v.doc),
+                  ),
+                ),
+              ),
+            ),
+            React.createElement(
+              "p",
+              { className: "homolog-bases-hint", style: { marginTop: 8 } },
+              "Documentos desmarcados não entram no ZIP — a base correspondente fica com pendência em vez de recebida.",
+            ),
+          ),
+          React.createElement(
+            "div",
+            { className: "homolog-form-actions" },
+            React.createElement(
+              "button",
+              { type: "button", className: "filters-clear-btn", onClick: handleCancelarVencidos, style: { flex: "none" } },
+              "Cancelar",
+            ),
+            React.createElement(
+              "button",
+              { type: "button", className: "doc-download-btn", onClick: handleConfirmarVencidos },
+              "Confirmar e processar",
+            ),
           ),
         ),
       ),
