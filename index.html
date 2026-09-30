@@ -3088,6 +3088,23 @@ const AUDIT_ACTION_LABELS = {
  *  atualizações de outra aba/pessoa aparecem em até este tempo, nunca
  *  instantaneamente como dentro do Artifact. Curto o bastante para parecer
  *  vivo, longo o bastante para não sobrecarregar o backend. */ const RESTDB_POLL_INTERVAL_MS = 8000;
+/** RESTDB_POLL_INTERVAL_OVERRIDES: coleções que não precisam de
+ *  atualização quase-instantânea ganham um intervalo maior (2026-09-30,
+ *  pedido da Iasmin: reduzir o custo de Firestore/Cloud Run conforme mais
+ *  gente usa o portal, sem mudar nada perceptível). audit_log é um
+ *  histórico só de consulta — nunca precisa refletir em segundos, e só
+ *  cresce com o tempo, então cada leitura fica mais cara conforme o
+ *  portal envelhece. conference_queue é uma fila de trabalho do
+ *  Administrador, que muda pouco no dia a dia. As demais coleções
+ *  (documentos, homologações, usuários, análises) continuam no intervalo
+ *  padrão, por serem telas onde "quase em tempo real" importa mais. */
+const RESTDB_POLL_INTERVAL_OVERRIDES = {
+  audit_log: 30000,
+  conference_queue: 20000,
+};
+function pollIntervalFor(nome) {
+  return RESTDB_POLL_INTERVAL_OVERRIDES[nome] || RESTDB_POLL_INTERVAL_MS;
+}
 /** createRestDb: implementa a MESMA interface que o resto do portal já
  *  espera da capability "db" do Artifact (collection(nome).onSnapshot/
  *  doc(id).set/delete, collection(nome).add) — só que falando com as rotas
@@ -3139,6 +3156,7 @@ const AUDIT_ACTION_LABELS = {
       },
       onSnapshot(onNext, onError) {
         let cancelled = false;
+        let intervalId = null;
         async function poll() {
           try {
             const docs = await fetchDocsOrdenados();
@@ -3148,11 +3166,46 @@ const AUDIT_ACTION_LABELS = {
             if (!cancelled && onError) onError(e);
           }
         }
+        function abaVisivel() {
+          // Sem `document` (ex.: harness de teste em Node) trata como
+          // sempre visível — nunca muda o comportamento já testado ali.
+          return typeof document === "undefined" || !document.hidden;
+        }
+        function iniciarIntervalo() {
+          if (intervalId != null) return;
+          intervalId = setInterval(poll, pollIntervalFor(nome));
+        }
+        function pararIntervalo() {
+          if (intervalId == null) return;
+          clearInterval(intervalId);
+          intervalId = null;
+        }
+        // Pausa de polling em aba oculta (2026-09-30, pedido da Iasmin):
+        // ninguém olhando a aba não precisa de dado fresco, então pausar
+        // aqui evita gastar leitura do Firestore/tráfego do Cloud Run à
+        // toa — o maior fator de custo que cresce junto com o número de
+        // pessoas usando o portal ao mesmo tempo. Zero diferença
+        // perceptível: ao voltar pra aba, consulta imediatamente, antes
+        // de qualquer re-render.
+        function onVisibilityChange() {
+          if (abaVisivel()) {
+            poll();
+            iniciarIntervalo();
+          } else {
+            pararIntervalo();
+          }
+        }
         poll();
-        const intervalId = setInterval(poll, RESTDB_POLL_INTERVAL_MS);
+        if (abaVisivel()) iniciarIntervalo();
+        if (typeof document !== "undefined" && document.addEventListener) {
+          document.addEventListener("visibilitychange", onVisibilityChange);
+        }
         return () => {
           cancelled = true;
-          clearInterval(intervalId);
+          pararIntervalo();
+          if (typeof document !== "undefined" && document.removeEventListener) {
+            document.removeEventListener("visibilitychange", onVisibilityChange);
+          }
         };
       },
       doc(id) {
