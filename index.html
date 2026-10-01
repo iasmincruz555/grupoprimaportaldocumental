@@ -2919,6 +2919,18 @@ function notificarHomologacao(tipo, item) {
       dataSolicitacao: item?.dataSolicitacao,
       dataConclusao: item?.dataConclusao,
       bases: item?.bases,
+      // anexosResposta (2026-10-01, pedido explícito da Iasmin): só nos
+      // e-mails de "concluida" o backend anexa de verdade esses arquivos
+      // (ver /api/homologacao/notify em index.js) — manda só os campos que
+      // o backend precisa pra baixar do Drive, nunca o objeto inteiro
+      // (nunca _localFile/_localUrl, que não existem mais depois que o
+      // upload real termina, nem enviadoPor/enviadoEm, irrelevantes aqui).
+      anexosResposta:
+        tipo === "concluida"
+          ? (item?.anexosResposta || [])
+              .filter((a) => a.driveFileId)
+              .map((a) => ({ nome: a.nome, driveFileId: a.driveFileId, tamanho: a.tamanho, tipo: a.tipo }))
+          : undefined,
     }),
   }).catch(() => {});
 }
@@ -8646,9 +8658,15 @@ function CompaniesView({
           ),
         ),
       ),
+    // compare-bar (2026-10-01, paridade mobile/desktop: antes era
+    // "desktop-only" — a comparação de bases ficava totalmente
+    // indisponível em telas <1024px, já que o checkbox de seleção também
+    // só existia na linha da tabela desktop). Agora aparece em qualquer
+    // largura; os checkboxes equivalentes foram adicionados aos cards
+    // mobile logo abaixo (mesmo estado `compareIds`/`toggleCompare`).
     /*#__PURE__*/ React.createElement(
       "div",
-      { className: "compare-bar desktop-only" },
+      { className: "compare-bar" },
       /*#__PURE__*/ React.createElement(
         "span",
         { className: "compare-bar-hint" },
@@ -8849,6 +8867,30 @@ function CompaniesView({
             { className: "company-card-mobile-row" },
             /*#__PURE__*/ React.createElement("span", null, "Documentos"),
             /*#__PURE__*/ React.createElement("span", null, c.totalDocs),
+          ),
+          // Checkbox "Comparar" (2026-10-01, paridade mobile/desktop —
+          // equivalente ao checkbox da 1ª coluna da tabela desktop; sem
+          // ele não havia nenhuma forma de selecionar bases pra comparação
+          // no celular/tablet).
+          /*#__PURE__*/ React.createElement(
+            "label",
+            {
+              className: "company-card-mobile-row",
+              style: { cursor: "pointer" },
+              onClick: (e) => e.stopPropagation(),
+            },
+            /*#__PURE__*/ React.createElement(
+              "span",
+              { style: { display: "flex", alignItems: "center", gap: 7 } },
+              /*#__PURE__*/ React.createElement("input", {
+                type: "checkbox",
+                checked: compareIds.includes(c.id),
+                onChange: () => toggleCompare(c.id),
+                disabled: !compareIds.includes(c.id) && compareIds.length >= 4,
+                "aria-label": `Selecionar ${c.razaoSocial} para comparação`,
+              }),
+              "Comparar",
+            ),
           ),
           /*#__PURE__*/ React.createElement(
             "div",
@@ -12347,6 +12389,16 @@ const HOMOLOGACAO_STATUS_META = {
   };
 const HOMOLOGACAO_MAX_ANEXOS = 10;
 const HOMOLOGACAO_MAX_ANEXOS_BYTES = 10 * 1024 * 1024 * 1024; // 10 GB
+// pastaHomologacaoResposta (2026-10-01, pedido explícito da Iasmin: área pra
+// anexar o arquivo final de devolução — formulário, PDF, pasta compactada
+// etc. — pra entregar ao solicitante quando a homologação for concluída).
+// Mesmo padrão já usado em pastaLoteParaSolicitacao (Envio em Lote): uma
+// subpasta dedicada por cliente/solicitação dentro do Drive oficial, nunca
+// solto na raiz.
+const NOME_PASTA_HOMOLOGACAO_RESPOSTA_DRIVE = "HOMOLOGAÇÃO - ARQUIVOS DE RESPOSTA";
+function pastaHomologacaoResposta(cliente, id) {
+  return `${NOME_PASTA_HOMOLOGACAO_RESPOSTA_DRIVE}/${cliente || "Cliente sem nome"}/${id}`;
+}
 /* Ver nota de segurança no cabeçalho deste bloco: propositalmente NUNCA
    persistidas, nem espelhadas em auditoria — só em memória, nesta aba. */ const homologSenhasSessao =
   {};
@@ -13183,6 +13235,17 @@ function avisoFonteExterna(descricao) {
   const [basesEdit, setBasesEdit] = useState(h.bases || []);
   const [confirmandoExclusao, setConfirmandoExclusao] = useState(false);
   const [excluindo, setExcluindo] = useState(false);
+  // anexosResposta (2026-10-01, pedido explícito da Iasmin: "adicione...
+  // uma area pra adicionar arquivos, essa area será util para finalizar a
+  // homologação caso hajam formulários, pdfs, pasta compactada ou
+  // qualquer que seja o arquivo a ser devolvido respondido ao
+  // solicitante") — `enviandoAnexoResposta` só controla o selo visual
+  // "enviando..." enquanto o upload real acontece; a lista em si vive
+  // direto em `h.anexosResposta` (persistida via onUpdate), nunca em
+  // estado local solto, pelo mesmo motivo de `alterarStatus`/anexos do
+  // Envio em Lote: precisa sobreviver a reabrir a tela.
+  const [enviandoAnexoResposta, setEnviandoAnexoResposta] = useState(false);
+  const anexoRespostaInputRef = useRef(null);
   // homologacoesInterno: mudar status, excluir a solicitação e revelar as
   // credenciais da plataforma do cliente são a "área interna/restrita"
   // que o Comercial não deve acessar (item 4 do pedido de permissões) —
@@ -13242,6 +13305,82 @@ function avisoFonteExterna(descricao) {
   function handleSalvarLink() {
     onUpdate(h.id, { linkHomologacao: linkEdit.trim() });
     onNotify?.("Link da homologação atualizado.", "info");
+  }
+  // handleAnexarArquivosResposta: mesmo upload real já usado em todo o
+  // portal (tryPersistUploadedFile — sobe pro Drive oficial, numa subpasta
+  // dedicada desta solicitação, via pastaHomologacaoResposta). Acumula num
+  // array LOCAL (`atual`) em vez de reler `h.anexosResposta` a cada volta
+  // do loop — `h` é a prop desta renderização e NÃO muda sozinha entre os
+  // `await`s, então reler `h.anexosResposta` depois do 1º upload perderia
+  // esse mesmo arquivo ao persistir o 2º (mesmo cuidado já tomado em
+  // EnvioLoteDetailView.handleAnexarArquivo, que só lida com 1 arquivo por
+  // vez — aqui precisa valer pra vários arquivos selecionados de uma vez).
+  async function handleAnexarArquivosResposta(fileList) {
+    const incoming = Array.from(fileList || []);
+    if (incoming.length === 0) return;
+    let atual = [...(h.anexosResposta || [])];
+    const aceitos = [];
+    let totalProjetado = atual.reduce((s, a) => s + (a.tamanho || 0), 0);
+    let vagas = HOMOLOGACAO_MAX_ANEXOS - atual.length;
+    for (const file of incoming) {
+      if (vagas <= 0) {
+        onNotify?.(`Máximo de ${HOMOLOGACAO_MAX_ANEXOS} arquivos de resposta por homologação.`, "info");
+        break;
+      }
+      totalProjetado += file.size;
+      if (totalProjetado > HOMOLOGACAO_MAX_ANEXOS_BYTES) {
+        onNotify?.(`O total de arquivos de resposta não pode passar de ${formatBytes(HOMOLOGACAO_MAX_ANEXOS_BYTES)}.`, "info");
+        break;
+      }
+      vagas--;
+      aceitos.push(file);
+    }
+    if (aceitos.length === 0) return;
+    setEnviandoAnexoResposta(true);
+    for (const file of aceitos) {
+      const res = await tryPersistUploadedFile(file, {
+        pasta: pastaHomologacaoResposta(h.cliente, h.id),
+      });
+      const novoItem = {
+        id: `anexo-resp-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
+        nome: file.name,
+        tamanho: file.size,
+        tipo: file.type || "application/octet-stream",
+        driveFileId: res.ok ? res.driveFileId || null : null,
+        assetId: res.ok ? res.assetId || null : null,
+        armazenamentoPendente: !(res.ok && (res.driveFileId || res.assetId)),
+        assetIssue: res.ok ? null : res.reason,
+        enviadoPor: currentUser?.nome || "Usuário do portal",
+        enviadoEm: new Date().toISOString(),
+      };
+      atual = [...atual, novoItem];
+      onUpdate(h.id, { anexosResposta: atual });
+      if (!res.ok) {
+        onNotify?.(
+          `"${file.name}" anexado (não foi possível salvá-lo no repositório agora — tente reenviar depois).`,
+          "error",
+        );
+      }
+    }
+    setEnviandoAnexoResposta(false);
+    logDocumentAction("anexou_arquivo_resposta_homologacao", {
+      homologacao: h.cliente,
+      quantidade: aceitos.length,
+    });
+    onNotify?.(
+      aceitos.length === 1 ? "1 arquivo de resposta anexado." : `${aceitos.length} arquivos de resposta anexados.`,
+      "info",
+    );
+  }
+  function handleRemoverAnexoResposta(anexo) {
+    onUpdate(h.id, {
+      anexosResposta: (h.anexosResposta || []).filter((a) => a.id !== anexo.id),
+    });
+    logDocumentAction("removeu_arquivo_resposta_homologacao", {
+      homologacao: h.cliente,
+      arquivo: anexo.nome,
+    });
+    onNotify?.(`"${anexo.nome}" removido.`, "info");
   }
   function toggleBaseEdit(base) {
     setBasesEdit((prev) =>
@@ -13405,7 +13544,7 @@ function avisoFonteExterna(descricao) {
     ),
     /*#__PURE__*/ React.createElement(
       "section",
-      { className: "section-block" },
+      { className: "section-block homolog-detail-card" },
       /*#__PURE__*/ React.createElement(
         "div",
         { className: "homolog-bases-section-head" },
@@ -13502,7 +13641,7 @@ function avisoFonteExterna(descricao) {
       h.acessoPlataforma &&
       /*#__PURE__*/ React.createElement(
         "section",
-        { className: "section-block" },
+        { className: "section-block homolog-detail-card" },
         /*#__PURE__*/ React.createElement(
           "h3",
           null,
@@ -13564,9 +13703,124 @@ function avisoFonteExterna(descricao) {
           ),
         ),
       ),
+    // Arquivos de resposta (2026-10-01, pedido explícito da Iasmin): área
+    // pra anexar o que será devolvido ao solicitante pra finalizar a
+    // homologação — formulário preenchido, PDF, pasta compactada, ou
+    // qualquer outro arquivo. Fica ACIMA de "Link da homologação", como
+    // pedido. Ao marcar a homologação como "Concluída", estes arquivos vão
+    // em anexo no e-mail enviado ao consultor (ver handleStatusChange
+    // acima + notificarHomologacao + /api/homologacao/notify em index.js).
     /*#__PURE__*/ React.createElement(
       "section",
-      { className: "section-block" },
+      { className: "section-block homolog-detail-card" },
+      /*#__PURE__*/ React.createElement("h3", null, "Arquivos de resposta"),
+      /*#__PURE__*/ React.createElement(
+        "p",
+        { className: "homolog-bases-hint" },
+        "Anexe aqui o que deve ser devolvido ao solicitante para finalizar esta homologação — formulário preenchido, PDF, pasta compactada etc. Ao marcar como “Concluída”, estes arquivos vão automaticamente em anexo no e-mail enviado ao consultor.",
+      ),
+      /*#__PURE__*/ React.createElement(
+        "div",
+        {
+          className: "homolog-dropzone",
+          onDragOver: (e) => e.preventDefault(),
+          onDrop: (e) => {
+            e.preventDefault();
+            handleAnexarArquivosResposta(e.dataTransfer.files);
+          },
+          onClick: () => anexoRespostaInputRef.current?.click(),
+          role: "button",
+          tabIndex: 0,
+        },
+        enviandoAnexoResposta
+          ? /*#__PURE__*/ React.createElement(Loader2, { size: 20, className: "spin" })
+          : /*#__PURE__*/ React.createElement(FolderArchive, { size: 20 }),
+        /*#__PURE__*/ React.createElement(
+          "span",
+          null,
+          enviandoAnexoResposta
+            ? "Enviando..."
+            : "Arraste arquivos aqui ou clique para selecionar",
+        ),
+        /*#__PURE__*/ React.createElement("input", {
+          ref: anexoRespostaInputRef,
+          type: "file",
+          multiple: true,
+          hidden: true,
+          onChange: (e) => {
+            handleAnexarArquivosResposta(e.target.files);
+            e.target.value = "";
+          },
+        }),
+      ),
+      (!h.anexosResposta || h.anexosResposta.length === 0) &&
+        !enviandoAnexoResposta &&
+        /*#__PURE__*/ React.createElement(
+          "p",
+          { className: "empty-note" },
+          "Nenhum arquivo de resposta anexado ainda.",
+        ),
+      h.anexosResposta &&
+        h.anexosResposta.length > 0 &&
+        /*#__PURE__*/ React.createElement(
+          "ul",
+          { className: "homolog-anexos-list" },
+          h.anexosResposta.map((a) =>
+            /*#__PURE__*/ React.createElement(
+              "li",
+              { key: a.id, className: "homolog-anexo-item" },
+              /*#__PURE__*/ React.createElement(FileText, { size: 14 }),
+              /*#__PURE__*/ React.createElement(
+                "span",
+                { className: "homolog-anexo-nome" },
+                a.nome,
+              ),
+              /*#__PURE__*/ React.createElement(
+                "span",
+                { className: "homolog-anexo-tamanho" },
+                formatBytes(a.tamanho),
+              ),
+              /*#__PURE__*/ React.createElement(
+                "button",
+                {
+                  className: "mini-download-btn",
+                  onClick: () => viewHomologAnexo(a, { onView, onNotify }),
+                },
+                /*#__PURE__*/ React.createElement(Eye, { size: 13 }),
+                " Ver",
+              ),
+              /*#__PURE__*/ React.createElement(
+                "button",
+                {
+                  className: "mini-download-btn",
+                  onClick: () => downloadHomologAnexo(a, { onNotify }),
+                },
+                /*#__PURE__*/ React.createElement(Download, { size: 13 }),
+                " Baixar",
+              ),
+              /*#__PURE__*/ React.createElement(
+                "button",
+                {
+                  className: "mini-download-btn",
+                  onClick: () => handleRemoverAnexoResposta(a),
+                },
+                /*#__PURE__*/ React.createElement(Trash2, { size: 13 }),
+                " Remover",
+              ),
+            ),
+          ),
+        ),
+      h.anexosResposta &&
+        h.anexosResposta.some((a) => a.armazenamentoPendente) &&
+        /*#__PURE__*/ React.createElement(
+          "p",
+          { className: "empty-note" },
+          "Um ou mais arquivos não foram salvos de forma permanente agora (backend indisponível no momento do envio) — continuam disponíveis para Ver/Baixar só enquanto esta página não recarrega, e não serão incluídos no e-mail de conclusão. Reenvie o arquivo para tentar salvar de verdade.",
+        ),
+    ),
+    /*#__PURE__*/ React.createElement(
+      "section",
+      { className: "section-block homolog-detail-card" },
       /*#__PURE__*/ React.createElement("h3", null, "Link da homologação"),
       /*#__PURE__*/ React.createElement(
         "div",
@@ -13599,7 +13853,7 @@ function avisoFonteExterna(descricao) {
     h.observacoes &&
       /*#__PURE__*/ React.createElement(
         "section",
-        { className: "section-block" },
+        { className: "section-block homolog-detail-card" },
         /*#__PURE__*/ React.createElement("h3", null, "Observações"),
         /*#__PURE__*/ React.createElement(
           "p",
@@ -13609,8 +13863,8 @@ function avisoFonteExterna(descricao) {
       ),
     /*#__PURE__*/ React.createElement(
       "section",
-      { className: "section-block" },
-      /*#__PURE__*/ React.createElement("h3", null, "Anexos"),
+      { className: "section-block homolog-detail-card" },
+      /*#__PURE__*/ React.createElement("h3", null, "Anexos recebidos do solicitante"),
       (!h.anexos || h.anexos.length === 0) &&
         /*#__PURE__*/ React.createElement(
           "div",
@@ -13668,7 +13922,7 @@ function avisoFonteExterna(descricao) {
     ),
     /*#__PURE__*/ React.createElement(
       "section",
-      { className: "section-block" },
+      { className: "section-block homolog-detail-card" },
       /*#__PURE__*/ React.createElement("h3", null, "Histórico"),
       /*#__PURE__*/ React.createElement(
         "div",
@@ -14235,6 +14489,28 @@ function avisoFonteExterna(descricao) {
               isoDateToBR(it.prazoRetorno),
             ),
           ),
+          // Link "Abrir" (2026-10-01, paridade mobile/desktop — a tabela
+          // desktop tem uma coluna "Link" com atalho direto; sem isso o
+          // card mobile não tinha; o link ainda fica acessível abrindo o
+          // card e indo até o detalhe, mas o atalho direto faltava).
+          it.linkHomologacao &&
+            /*#__PURE__*/ React.createElement(
+              "div",
+              { className: "company-card-mobile-row" },
+              /*#__PURE__*/ React.createElement("span", null, "Link"),
+              /*#__PURE__*/ React.createElement(
+                "a",
+                {
+                  href: it.linkHomologacao,
+                  target: "_blank",
+                  rel: "noreferrer",
+                  className: "link-btn",
+                  onClick: (e) => e.stopPropagation(),
+                },
+                "Abrir ",
+                /*#__PURE__*/ React.createElement(ChevronRight, { size: 13 }),
+              ),
+            ),
         );
       }),
       filtered.length === 0 &&
@@ -20649,6 +20925,14 @@ function ClientAnalysisView({ currentUser, onNotify, onView, companies }) {
             /*#__PURE__*/ React.createElement("span", null, "Data"),
             /*#__PURE__*/ React.createElement("span", null, isoDateToBR(it.dataSolicitacao.slice(0, 10))),
           ),
+          // Contagem de documentos (2026-10-01, paridade mobile/desktop —
+          // coluna "Documentos" da tabela desktop).
+          /*#__PURE__*/ React.createElement(
+            "div",
+            { className: "company-card-mobile-row" },
+            /*#__PURE__*/ React.createElement("span", null, "Documentos"),
+            /*#__PURE__*/ React.createElement("span", null, (it.documentos || []).length),
+          ),
         ),
       ),
       filtered.length === 0 &&
@@ -22649,6 +22933,25 @@ function EnvioLoteView({ currentUser, onNotify, onView, companies }) {
             { className: "company-card-mobile-row" },
             React.createElement("span", null, "Data"),
             React.createElement("span", null, isoDateToBR(it.criadoEm.slice(0, 10))),
+          ),
+          // Bases + contagem de documentos (2026-10-01, paridade
+          // mobile/desktop — colunas "Bases"/"Documentos" da tabela
+          // desktop).
+          React.createElement(
+            "div",
+            { className: "company-card-mobile-row" },
+            React.createElement("span", null, "Bases"),
+            React.createElement(
+              "span",
+              null,
+              (it.baseIds || []).map((bId) => companyLabelFor(companiesPorId.get(bId))).filter(Boolean).join(", ") || "—",
+            ),
+          ),
+          React.createElement(
+            "div",
+            { className: "company-card-mobile-row" },
+            React.createElement("span", null, "Documentos"),
+            React.createElement("span", null, (it.documentacoesSolicitadas || []).length),
           ),
         ),
       ),
@@ -24993,6 +25296,41 @@ function UsersManagementView({ currentUser, onNotify, onBack }) {
               },
               u.status === "inativo" ? "Ativar" : "Desativar",
             ),
+            // Excluir (2026-10-01, paridade mobile/desktop: faltava este
+            // botão aqui — só existia na linha da tabela desktop, então no
+            // celular não havia NENHUMA forma de excluir um usuário).
+            // Mesmo fluxo de confirmação inline já usado na tabela.
+            confirmandoExclusao === u.id
+              ? /*#__PURE__*/ React.createElement(
+                  "span",
+                  { className: "doc-row-delete-confirm", style: { display: "flex", gap: 6, flexWrap: "wrap" } },
+                  /*#__PURE__*/ React.createElement(
+                    "button",
+                    {
+                      className: "doc-row-delete-btn",
+                      onClick: () => handleExcluir(u),
+                    },
+                    "Confirmar exclusão",
+                  ),
+                  /*#__PURE__*/ React.createElement(
+                    "button",
+                    {
+                      className: "doc-view-btn",
+                      onClick: () => setConfirmandoExclusao(null),
+                    },
+                    "Cancelar",
+                  ),
+                )
+              : /*#__PURE__*/ React.createElement(
+                  "button",
+                  {
+                    className: "doc-row-delete-btn",
+                    disabled: u.id === currentUser.id,
+                    onClick: () => setConfirmandoExclusao(u.id),
+                  },
+                  /*#__PURE__*/ React.createElement(Trash2, { size: 12 }),
+                  " Excluir",
+                ),
           ),
         ),
       ),
@@ -26102,6 +26440,10 @@ function GrupoprimaPortal() {
         .homolog-checklist-select { border: 1px solid var(--cinza-frio); border-radius: 7px; padding: 7px 9px; font-size: 12px; color: var(--texto); background: var(--card-bg); outline: none; max-width: 220px; }
         .homolog-checklist-select:focus { border-color: var(--texto); }
         .homolog-checklist-actions { display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-top: 4px; }
+
+        /* ---- HomologacaoDetailView: cards com respiro (pedido da Iasmin, 2026-10-01: "Pouco estético, design otimizado, mas sem layout e sem áreas de respiro agradaveis") ---- */
+        .homolog-detail-card { background: var(--card-bg); border: 1px solid var(--cinza-frio); border-radius: 12px; padding: 20px 22px; margin-top: 22px; margin-bottom: 0; }
+        .homolog-detail-card h3 { margin-top: 0; }
 
         /* ---- Cards de empresa (mobile) ---- */
         .desktop-only { display: block !important; }
