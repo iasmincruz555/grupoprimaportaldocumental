@@ -2925,11 +2925,23 @@ function notificarHomologacao(tipo, item) {
       // o backend precisa pra baixar do Drive, nunca o objeto inteiro
       // (nunca _localFile/_localUrl, que não existem mais depois que o
       // upload real termina, nem enviadoPor/enviadoEm, irrelevantes aqui).
+      // IMPORTANTE (corrigido em 2026-10-01, depois da Iasmin reportar que
+      // anexos não chegaram num e-mail de verdade): manda TODOS os
+      // anexosResposta aqui, mesmo os que não têm driveFileId (upload
+      // ainda pendente/falhou) — antes esse filtro acontecia aqui no
+      // frontend, então um anexo sem driveFileId nunca nem chegava a ser
+      // visto pelo backend, e o e-mail saía em silêncio, sem anexo e sem
+      // nenhum aviso. Agora é o backend quem decide o que consegue
+      // realmente anexar, e lista no corpo do e-mail qualquer um que não
+      // conseguiu — nunca mais some sem explicação nenhuma.
       anexosResposta:
         tipo === "concluida"
-          ? (item?.anexosResposta || [])
-              .filter((a) => a.driveFileId)
-              .map((a) => ({ nome: a.nome, driveFileId: a.driveFileId, tamanho: a.tamanho, tipo: a.tipo }))
+          ? (item?.anexosResposta || []).map((a) => ({
+              nome: a.nome,
+              driveFileId: a.driveFileId || null,
+              tamanho: a.tamanho,
+              tipo: a.tipo,
+            }))
           : undefined,
     }),
   }).catch(() => {});
@@ -13448,6 +13460,15 @@ function avisoFonteExterna(descricao) {
               {
                 key: t,
                 className: "doc-view-btn",
+                // Trava durante o envio dos arquivos de resposta (2026-10-01,
+                // corrigindo o relato da Iasmin de um e-mail de "Concluída"
+                // sem os anexos): evita marcar como concluída NO MEIO do
+                // upload, antes do arquivo ganhar o driveFileId que o e-mail
+                // precisa pra anexar de verdade.
+                disabled: enviandoAnexoResposta,
+                title: enviandoAnexoResposta
+                  ? "Aguarde o envio dos arquivos de resposta terminar."
+                  : undefined,
                 onClick: () => handleStatusChange(t),
               },
               "Marcar como ",
