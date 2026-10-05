@@ -15635,7 +15635,7 @@ function ConferenceQueueView({ onNotify, onView, companies }) {
           docs.forEach((it) => {
             if (it.status !== "pendente") return;
             const arquivoFake = { title: it.nomeOriginal, folderPath: it.folderPathArr || [] };
-            if (isArquivoDeHomologacao(arquivoFake) || isArquivoDeEnvioLote(arquivoFake)) {
+            if (isArquivoDeHomologacao(arquivoFake) || isArquivoDeEnvioLote(arquivoFake) || isArquivoDeAreaInternaDoPortal(arquivoFake)) {
               col.doc(it.id).delete().catch(() => {});
             }
           });
@@ -17676,6 +17676,28 @@ function isArquivoDeEnvioLote(arquivo) {
   if (arquivo.title === NOME_PASTA_ENVIO_LOTE_DRIVE) return true;
   return (arquivo.folderPath || []).includes(NOME_PASTA_ENVIO_LOTE_DRIVE);
 }
+/** isArquivoDeAreaInternaDoPortal: pastas do Drive que o PRÓPRIO portal
+ *  alimenta para uso de outras abas — nunca fazem parte da documentação das
+ *  Bases e, portanto, NUNCA entram na sincronização, na fila "Necessita de
+ *  conferência" nem nos totais (pedido explícito da Iasmin, 2026-10-05, com
+ *  prints: ZIPs de resposta de homologação e a Ficha de Cadastro de
+ *  "Informações Financeiras" apareciam na fila "sob nenhuma instância"):
+ *   - "HOMOLOGAÇÃO - ARQUIVOS DE RESPOSTA" (anexos de resposta da
+ *     Homologação — NOME_PASTA_HOMOLOGACAO_RESPOSTA_DRIVE);
+ *   - "INFORMAÇÕES FINANCEIRAS" (respostas dos clientes na aba Informações
+ *     Financeiras — FIN_NOME_PASTA_DRIVE).
+ *  Os nomes ficam em AREAS_INTERNAS_PASTAS_DRIVE (literais, porque esta
+ *  função roda também na carga da tela, antes de outras constantes do
+ *  arquivo existirem). Compara sem acento/caixa, em qualquer nível do
+ *  caminho — e a própria pasta, quando listada como se fosse arquivo. */
+const AREAS_INTERNAS_PASTAS_DRIVE = ["HOMOLOGAÇÃO - ARQUIVOS DE RESPOSTA", "INFORMAÇÕES FINANCEIRAS"];
+function isArquivoDeAreaInternaDoPortal(arquivo) {
+  if (!arquivo) return false;
+  const alvos = AREAS_INTERNAS_PASTAS_DRIVE.map((n) => normalize(n).trim());
+  const noCaminho = (txt) => alvos.includes(normalize(txt || "").trim());
+  if (noCaminho(arquivo.title)) return true;
+  return (arquivo.folderPath || []).some(noCaminho);
+}
 /** ARQUIVOS_EXCLUIDOS_COLLECTION: registra, pelo `driveFileId`, todo
  *  documento que a usuária excluiu manualmente do portal
  *  (`excluirDocumentoConfirmado`) — pedido explícito da Iasmin, 2026-09-21:
@@ -17742,7 +17764,7 @@ async function fetchArquivosExcluidosIds(db) {
       fileSize: a.tamanho || null,
       folderPath: a.pasta ? a.pasta.split(" / ") : [],
     }))
-    .filter((a) => !isArquivoDeHomologacao(a) && !isArquivoDeEnvioLote(a));
+    .filter((a) => !isArquivoDeHomologacao(a) && !isArquivoDeEnvioLote(a) && !isArquivoDeAreaInternaDoPortal(a));
 }
 /** renderPdfFirstPageToBlob: renderiza a 1ª página do PDF (bytes reais) num
  *  canvas e devolve um PNG — usado só pelo botão manual "Analisar com IA"
@@ -17884,7 +17906,7 @@ function SyncView({ companies, onNotify }) {
       // alternativo via crawlDriveFolder/mcp, que não passa por aquela
       // função e por isso não seria filtrado sem esta linha.
       files = (files || []).filter(
-        (f) => !isArquivoDeHomologacao(f) && !isArquivoDeEnvioLote(f),
+        (f) => !isArquivoDeHomologacao(f) && !isArquivoDeEnvioLote(f) && !isArquivoDeAreaInternaDoPortal(f),
       );
       // Arquivos excluídos manualmente do portal (ver
       // ARQUIVOS_EXCLUIDOS_COLLECTION/registrarArquivoExcluido) nunca
