@@ -4689,24 +4689,52 @@ function formatAnosLabel(anoOuAnos) {
   if (lista.length <= 1) return lista[0] || "";
   return `${lista.slice(0, -1).join(", ")} e ${lista[lista.length - 1]}`;
 }
-/** detectSelecaoAlteracao: quais alterações contratuais foram pedidas pelo
- *  NÚMERO no chat/checklist. Devolve `{ numeros: [..], incluiVigente }` ou
- *  null quando nenhum número foi citado (o pedido genérico "contrato
- *  social" continua trazendo só a alteração vigente). Entende um número
- *  ("contrato social 22", "22ª alteração", "alteração 22", "ACS 21"),
- *  sequências ("contrato social, 23, 22, 21", "alterações 22 e 21") e
- *  intervalos ("alterações de 20 a 23", "20 até 23"). Palavras como "mais
- *  atualizado/recente/atual/vigente" somam a alteração vigente à lista
- *  ("contrato mais atualizado, 22 e 21"). Só vale com contexto societário
- *  (contrato social / alteração / ACS / contrato atualizado), e ignora
- *  anos ("2025"), datas ("22/2025"), filiais ("filial 04"), quantidades
- *  ("últimas 3 alterações") e contagens ("2 filiais"). Pedidos da Iasmin,
- *  2026-10-05: "Contrato social 22" devolvia a 23ª; depois, sequências. */
+/** detectSelecaoAlteracao: QUAIS documentos societários (contrato social e
+ *  suas alterações) foram pedidos no chat/checklist, para além do padrão
+ *  ("contrato social" sozinho = só a alteração vigente). Devolve `null` se
+ *  nada além do padrão foi pedido; senão
+ *  `{ numeros, incluiVigente, todas, anteriores, ultimas, primeiras,
+ *  penultima, de, ate }`. Sem limite de quantidade — pedidos reais:
+ *   - por número: "contrato social 22", "22ª alteração", "alteração 22",
+ *     sequências de QUALQUER tamanho ("23, 22, 21, 20, 19...") e
+ *     intervalos ("de 20 a 23", "20 até 23");
+ *   - todas: "todos os contratos sociais", "todas as alterações", "todas as
+ *     versões do contrato social", "histórico do contrato social", plural
+ *     solto ("me manda os contratos sociais");
+ *   - por posição: "as 5 últimas alterações", "as 3 mais recentes", "as 2
+ *     primeiras", "a penúltima alteração", "alterações anteriores" (todas
+ *     menos a vigente);
+ *   - por faixa: "da 15 em diante", "a partir da 10ª", "até a 8ª";
+ *   - "mais atualizado/recente/atual/vigente" soma a vigente à lista.
+ *  Só vale com contexto societário; ignora anos ("2025"), datas, filiais,
+ *  contagens ("2 filiais", "2 vias"). Pedidos da Iasmin, 2026-10-05. */
+const NUMEROS_POR_EXTENSO = { um: 1, uma: 1, dois: 2, duas: 2, tres: 3, quatro: 4, cinco: 5, seis: 6, sete: 7, oito: 8, nove: 9, dez: 10, onze: 11, doze: 12 };
 function detectSelecaoAlteracao(text) {
-  const t = normalize(text);
+  let t = normalize(text);
   const contexto =
-    /contrato social|altera[c]ao|alteracoes|\bacs\b|contratos?\s+(?:mais\s+)?(?:atualizad|atual\b|vigente|recente)/.test(t);
+    /contratos?\s+sociais?|contrato social|altera[c]ao|alteracoes|\bacs\b|historico|contratos?\s+(?:mais\s+)?(?:atualizad|atual\b|vigente|recente)/.test(t);
   if (!contexto) return null;
+  const NUM = "(\\d{1,2}|" + Object.keys(NUMEROS_POR_EXTENSO).join("|") + ")";
+  const valor = (v) => (/^\d+$/.test(v) ? parseInt(v, 10) : NUMEROS_POR_EXTENSO[v]);
+  const sel = { numeros: [], incluiVigente: false, todas: false, anteriores: false, ultimas: null, primeiras: null, penultima: false, de: null, ate: null };
+  // Remove do texto cada trecho já interpretado, para não virar "número de alteração" depois.
+  const consome = (re, fn) => {
+    t = t.replace(re, (...args) => {
+      fn(args);
+      return " ";
+    });
+  };
+  consome(new RegExp(`\\b${NUM}\\s+(?:ultim[ao]s?|mais\\s+(?:recentes?|novas?|atuais))\\b`, "g"), (a) => (sel.ultimas = valor(a[1])));
+  consome(new RegExp(`\\bultim[ao]s?\\s+${NUM}\\b(?!\\s*(?:filiais|bases|vias|copias))`, "g"), (a) => (sel.ultimas = valor(a[1])));
+  consome(new RegExp(`\\b${NUM}\\s+primeir[ao]s?\\b|\\bprimeir[ao]s\\s+${NUM}\\b`, "g"), (a) => (sel.primeiras = valor(a[1] || a[2])));
+  consome(/\bpenultim[ao]\b/g, () => (sel.penultima = true));
+  consome(/(?:a\s+partir\s+d[aeo]s?|apartir\s+d[aeo]s?|desde\s+(?:a\s+|o\s+)?)\s*(\d{1,2})\s*[ªº°]?(?:\s+(?:em\s+diante|pra\s+frente|para\s+frente|ate\s+(?:a\s+)?(?:atual|vigente|ultima|mais\s+recente)))?/g, (a) => (sel.de = parseInt(a[1], 10)));
+  consome(/(\d{1,2})\s*[ªº°]?\s+(?:em\s+diante|pra\s+frente|para\s+frente)\b/g, (a) => (sel.de = parseInt(a[1], 10)));
+  // "até a 10ª" (limite superior) — mas "20 até 23" é intervalo, tratado abaixo.
+  t = t.replace(/(^|[^\d\sªº°])(\s*)ate\s+(?:a\s+|o\s+)?(\d{1,2})\s*[ªº°]?(?![\d/])/g, (m0, pre, esp, n) => {
+    sel.ate = parseInt(n, 10);
+    return `${pre} `;
+  });
   const tokens = [];
   const re = /\d+/g;
   let m;
@@ -4721,23 +4749,21 @@ function detectSelecaoAlteracao(text) {
     const n = parseInt(m[0], 10);
     if (n < 1 || n > 99) continue;
     const prefixo = t.slice(Math.max(0, ini - 14), ini);
-    if (/(filial|filiais|base|bases|cnpj|unidade|ultim[ao]s?|primeir[ao]s?|top)\s*$/.test(prefixo)) continue;
+    if (/(filial|filiais|base|bases|cnpj|unidade|top)\s*$/.test(prefixo)) continue;
     const resto = t.slice(fim, fim + 14);
-    if (/^\s*(filiais|filial|bases|unidades|vias|copias|paginas|anos|dias|meses)\b/.test(resto)) continue;
+    if (/^\s*(filiais|filial|bases?|unidades?|vias?|copias?|paginas?|folhas?|anos?|dias?|mes(?:es)?|vezes|vez|pessoas?|socios?)\b/.test(resto)) continue;
     tokens.push({ n, ini, fim });
   }
-  if (tokens.length === 0) return null;
-  const numeros = [];
   const add = (n) => {
-    if (!numeros.includes(n)) numeros.push(n);
+    if (!sel.numeros.includes(n)) sel.numeros.push(n);
   };
   for (let k = 0; k < tokens.length; k++) {
     const a = tokens[k];
     const b = tokens[k + 1];
     if (b) {
       const meio = t.slice(a.fim, b.ini);
-      const ehIntervalo = /^\s*[ªº°oa]?\s*(?:a|ate|ao|as|à)\s*$/.test(meio) || /^[ªº°]?-$/.test(meio);
-      if (ehIntervalo && Math.abs(b.n - a.n) <= 40 && a.n !== b.n) {
+      const ehIntervalo = /^\s*[ªº°oa]?\s*(?:a|ate(?:\s+(?:a|o))?|ao|as|à)\s*$/.test(meio) || /^[ªº°]?-$/.test(meio);
+      if (ehIntervalo && Math.abs(b.n - a.n) <= 60 && a.n !== b.n) {
         const lo = Math.min(a.n, b.n);
         const hi = Math.max(a.n, b.n);
         const crescente = a.n < b.n;
@@ -4748,18 +4774,46 @@ function detectSelecaoAlteracao(text) {
     }
     add(a.n);
   }
-  if (numeros.length === 0) return null;
-  const incluiVigente =
+  sel.incluiVigente =
     /mais\s+(?:atualizad|recente|atual\b)|\b(?:vigente|atualizad[oa]s?|atual)\b|\bultim[ao]\b/.test(t);
-  return { numeros, incluiVigente };
+  sel.anteriores = /(?:altera[c]oes|versoes|contratos?(?:\s+sociais?)?)\s+anteriores|\banteriores\b/.test(t);
+  const temFaixa = sel.de !== null || sel.ate !== null;
+  const temOutroCriterio = sel.numeros.length > 0 || sel.ultimas || sel.primeiras || sel.penultima || temFaixa || sel.anteriores;
+  sel.todas =
+    !temOutroCriterio &&
+    (/\b(?:todos?|todas?)\b.{0,30}?(?:contratos?\s+sociais?|contrato social|altera[c]oes|altera[c]ao|versoes|versao|acs)/.test(t) ||
+      /\bhistorico\b|contrato social completo|\bcompleto\b.{0,20}contrato/.test(t) ||
+      /\bcontratos\s+sociais\b|\balteracoes\b(?!\s+(?:de|da|do)\s+\d)/.test(t));
+  if (!(sel.numeros.length > 0 || sel.ultimas || sel.primeiras || sel.penultima || temFaixa || sel.anteriores || sel.todas)) return null;
+  return sel;
 }
 /** filtrarPorSelecaoAlteracao: dos documentos societários recebidos, só os
- *  da seleção (números pedidos + a vigente, quando "mais atualizado" foi
- *  dito). `faltantes` = números pedidos que não existem no portal (nunca
- *  substitui por outra alteração). */
+ *  da seleção (ver detectSelecaoAlteracao). `faltantes` = números pedidos
+ *  explicitamente que não existem no portal (nunca substitui por outra
+ *  alteração). Devolve do mais recente para o mais antigo. */
 function filtrarPorSelecaoAlteracao(docs, selecao) {
-  const vigentes = selecao.incluiVigente ? new Set(currentDocsFor(docs).map((d) => d.id)) : new Set();
-  const out = docs.filter((d) => vigentes.has(d.id) || selecao.numeros.includes(docNumeroAlteracao(d)));
+  const vigentes = new Set(currentDocsFor(docs).map((d) => d.id));
+  const numerados = docs
+    .filter((d) => docNumeroAlteracao(d) !== null)
+    .sort((a, b) => docNumeroAlteracao(b) - docNumeroAlteracao(a));
+  const escolhidos = new Set();
+  const incluir = (d) => d && escolhidos.add(d.id);
+  if (selecao.todas) docs.forEach(incluir);
+  if (selecao.anteriores) docs.filter((d) => !vigentes.has(d.id)).forEach(incluir);
+  docs.filter((d) => selecao.numeros.includes(docNumeroAlteracao(d))).forEach(incluir);
+  if (selecao.incluiVigente) docs.filter((d) => vigentes.has(d.id)).forEach(incluir);
+  if (selecao.ultimas) numerados.slice(0, selecao.ultimas).forEach(incluir);
+  if (selecao.primeiras) numerados.slice(-selecao.primeiras).forEach(incluir);
+  if (selecao.penultima) incluir(numerados[1]);
+  if (selecao.de !== null || selecao.ate !== null) {
+    numerados
+      .filter((d) => {
+        const n = docNumeroAlteracao(d);
+        return (selecao.de === null || n >= selecao.de) && (selecao.ate === null || n <= selecao.ate);
+      })
+      .forEach(incluir);
+  }
+  const out = sortDocumentsByVersion(docs.filter((d) => escolhidos.has(d.id)));
   const achados = new Set(out.map(docNumeroAlteracao));
   const faltantes = selecao.numeros.filter((n) => !achados.has(n));
   return { docs: out, faltantes };
@@ -5540,6 +5594,7 @@ function findCompaniesInQuery(q, companies) {
       // 23, 22 e 21"): traz TODAS as pedidas, cada uma como documento
       // próprio, e avisa individualmente quais números não existem.
       refinado.faltantes.forEach((n) => notFoundLabels.push(`${n}ª Alteração Contratual`));
+      if (matches.length === 0 && refinado.faltantes.length === 0) notFoundLabels.push("Contrato Social (alterações pedidas)");
       matches.forEach((d) => {
         if (!seenIds.has(d.id)) {
           found.push(d);
@@ -5585,6 +5640,7 @@ function findCompaniesInQuery(q, companies) {
         const l = `${n}ª Alteração Contratual`;
         if (!notFoundLabels.includes(l)) notFoundLabels.push(l);
       });
+      if (f.docs.length === 0 && f.faltantes.length === 0) notFoundLabels.push("Contrato Social (alterações pedidas)");
       f.docs.forEach((d) => {
         if (!seenIds.has(d.id)) {
           found.push(d);
@@ -6872,6 +6928,21 @@ function detectarSegmentosNaoCobertos(linha, tiposEncontrados) {
     pedacos = [...porVirgula.slice(0, -1), ...ultimaPartida];
   }
   if (pedacos.length <= 1) return [];
+  // Seleção de alterações contratuais por número ("Contrato social, 23, 22,
+  // 21", "contrato mais atualizado, 22 e 21", "alterações 20 a 23"): os
+  // números/palavras soltos entre as vírgulas NÃO são documentos à parte —
+  // já fazem parte do mesmo item de Contrato Social (ver
+  // detectSelecaoAlteracao em matchChecklistItemToCompany). Sem isto, cada
+  // número virava um item "não identificado" extra.
+  const temSelecaoAlteracao =
+    tiposEncontrados.some((t) => TIPOS_ALTERACAO_CONTRATUAL.has(t.label)) &&
+    detectSelecaoAlteracao(linha) !== null;
+  const soSelecaoDeAlteracao = (pedaco) =>
+    normalize(pedaco)
+      .replace(/\b(?:contratos?|social|altera[c]ao|alteracoes|acs|contratual|contratuais|de|da|do|das|dos|a|as|o|os|e|ate|ao|mais|atualizad[oa]s?|atual|vigente|recente|numeros?|n[ºo°]|todos?|todas?|ultim[ao]s?|primeir[ao]s?|penultim[ao]|anteriores|historico|completo|versoes?|partir|desde|diante|frente|pra|para|em|na|no|nas|nos|tem|temos|quais|existem|que)\b/g, " ")
+      .replace(/\d{1,2}\s*[ªº°]?/g, " ")
+      .replace(/[ªº°.\-–]/g, " ")
+      .trim() === "";
   const naoIdentificados = [];
   const rotulosJaVistos = new Set();
   let prefixo = "";
@@ -6882,6 +6953,7 @@ function detectarSegmentosNaoCobertos(linha, tiposEncontrados) {
       .filter((l) => rotulosEncontrados.has(l));
     const introduzTipoNovo = rotulosNoPrefixo.some((l) => !rotulosJaVistos.has(l));
     rotulosNoPrefixo.forEach((l) => rotulosJaVistos.add(l));
+    if (temSelecaoAlteracao && soSelecaoDeAlteracao(pedaco)) return;
     if (!introduzTipoNovo && detectRequestedTypes(pedaco).length === 0) {
       naoIdentificados.push(pedaco);
     }
@@ -6907,7 +6979,14 @@ function gerarChecklistViaRegras(texto) {
   if (linhas.length === 0) return { ok: false, motivo: "nenhum_item_identificado" };
   const itens = [];
   linhas.forEach((linha, i) => {
-    const tipos = tiposDistintosParaChecklist(linha);
+    let tipos = tiposDistintosParaChecklist(linha);
+    // Linha que só cita alterações pelo número ("alterações 20 a 23",
+    // "contrato mais atualizado, 22 e 21") não traz o nome de nenhum tipo
+    // do dicionário, mas é inequivocamente Contrato Social.
+    if (tipos.length === 0 && detectSelecaoAlteracao(linha)) {
+      const tipoContrato = DOC_TYPE_KEYWORDS.find((k) => k.label === "Contrato Social");
+      if (tipoContrato) tipos = [tipoContrato];
+    }
     // Uma linha só pode pedir várias documentações distintas de uma vez
     // (pedido explícito da Iasmin, 2026-09-21: "Certidões negativas
     // federal, estadual, municipal, FGTS e trabalhista" são 5 documentos
