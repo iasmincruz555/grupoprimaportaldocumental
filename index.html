@@ -4689,6 +4689,92 @@ function formatAnosLabel(anoOuAnos) {
   if (lista.length <= 1) return lista[0] || "";
   return `${lista.slice(0, -1).join(", ")} e ${lista[lista.length - 1]}`;
 }
+/** detectSelecaoAlteracao: quais alterações contratuais foram pedidas pelo
+ *  NÚMERO no chat/checklist. Devolve `{ numeros: [..], incluiVigente }` ou
+ *  null quando nenhum número foi citado (o pedido genérico "contrato
+ *  social" continua trazendo só a alteração vigente). Entende um número
+ *  ("contrato social 22", "22ª alteração", "alteração 22", "ACS 21"),
+ *  sequências ("contrato social, 23, 22, 21", "alterações 22 e 21") e
+ *  intervalos ("alterações de 20 a 23", "20 até 23"). Palavras como "mais
+ *  atualizado/recente/atual/vigente" somam a alteração vigente à lista
+ *  ("contrato mais atualizado, 22 e 21"). Só vale com contexto societário
+ *  (contrato social / alteração / ACS / contrato atualizado), e ignora
+ *  anos ("2025"), datas ("22/2025"), filiais ("filial 04"), quantidades
+ *  ("últimas 3 alterações") e contagens ("2 filiais"). Pedidos da Iasmin,
+ *  2026-10-05: "Contrato social 22" devolvia a 23ª; depois, sequências. */
+function detectSelecaoAlteracao(text) {
+  const t = normalize(text);
+  const contexto =
+    /contrato social|altera[c]ao|alteracoes|\bacs\b|contratos?\s+(?:mais\s+)?(?:atualizad|atual\b|vigente|recente)/.test(t);
+  if (!contexto) return null;
+  const tokens = [];
+  const re = /\d+/g;
+  let m;
+  while ((m = re.exec(t))) {
+    if (m[0].length > 2) continue; // anos, números de filial/CNPJ
+    const ini = m.index;
+    const fim = ini + m[0].length;
+    const antes = t[ini - 1] || "";
+    const depois = t[fim] || "";
+    if (/[\d/.:]/.test(antes)) continue; // datas, decimais ("20-23" com hífen é intervalo, tratado abaixo)
+    if (/[/:]/.test(depois) || (depois === "." && /\d/.test(t[fim + 1] || ""))) continue;
+    const n = parseInt(m[0], 10);
+    if (n < 1 || n > 99) continue;
+    const prefixo = t.slice(Math.max(0, ini - 14), ini);
+    if (/(filial|filiais|base|bases|cnpj|unidade|ultim[ao]s?|primeir[ao]s?|top)\s*$/.test(prefixo)) continue;
+    const resto = t.slice(fim, fim + 14);
+    if (/^\s*(filiais|filial|bases|unidades|vias|copias|paginas|anos|dias|meses)\b/.test(resto)) continue;
+    tokens.push({ n, ini, fim });
+  }
+  if (tokens.length === 0) return null;
+  const numeros = [];
+  const add = (n) => {
+    if (!numeros.includes(n)) numeros.push(n);
+  };
+  for (let k = 0; k < tokens.length; k++) {
+    const a = tokens[k];
+    const b = tokens[k + 1];
+    if (b) {
+      const meio = t.slice(a.fim, b.ini);
+      const ehIntervalo = /^\s*[ªº°oa]?\s*(?:a|ate|ao|as|à)\s*$/.test(meio) || /^[ªº°]?-$/.test(meio);
+      if (ehIntervalo && Math.abs(b.n - a.n) <= 40 && a.n !== b.n) {
+        const lo = Math.min(a.n, b.n);
+        const hi = Math.max(a.n, b.n);
+        const crescente = a.n < b.n;
+        for (let x = crescente ? lo : hi; crescente ? x <= hi : x >= lo; x += crescente ? 1 : -1) add(x);
+        k++;
+        continue;
+      }
+    }
+    add(a.n);
+  }
+  if (numeros.length === 0) return null;
+  const incluiVigente =
+    /mais\s+(?:atualizad|recente|atual\b)|\b(?:vigente|atualizad[oa]s?|atual)\b|\bultim[ao]\b/.test(t);
+  return { numeros, incluiVigente };
+}
+/** filtrarPorSelecaoAlteracao: dos documentos societários recebidos, só os
+ *  da seleção (números pedidos + a vigente, quando "mais atualizado" foi
+ *  dito). `faltantes` = números pedidos que não existem no portal (nunca
+ *  substitui por outra alteração). */
+function filtrarPorSelecaoAlteracao(docs, selecao) {
+  const vigentes = selecao.incluiVigente ? new Set(currentDocsFor(docs).map((d) => d.id)) : new Set();
+  const out = docs.filter((d) => vigentes.has(d.id) || selecao.numeros.includes(docNumeroAlteracao(d)));
+  const achados = new Set(out.map(docNumeroAlteracao));
+  const faltantes = selecao.numeros.filter((n) => !achados.has(n));
+  return { docs: out, faltantes };
+}
+/** docNumeroAlteracao: número da alteração de UM documento societário
+ *  (campo `versao` "23ª Alteração"; senão tenta o título/nome do arquivo,
+ *  com a mesma regra de extractVersaoLabel). null quando não identificável. */
+function docNumeroAlteracao(d) {
+  const m = /^(\d+)(?!\.\d)/.exec(String(d.versao || "").trim());
+  if (m) return parseInt(m[1], 10);
+  const v = extractVersaoLabel("contratos_sociais", [d.titulo, d.arquivo?.nomeOriginal].filter(Boolean).join(" "));
+  const m2 = v && /^(\d+)/.exec(v);
+  return m2 ? parseInt(m2[1], 10) : null;
+}
+const TIPOS_ALTERACAO_CONTRATUAL = new Set(["Contrato Social", "Alteração Contratual"]);
 /** docTextMentionsAno: testa se UM DOCUMENTO (título/nome do arquivo/
  *  descrição) cita ALGUM dos anos pedidos — usado junto com
  *  detectAnoDocumento pra filtrar documentos de Contabilidade (e, quando
@@ -5381,6 +5467,7 @@ function findCompaniesInQuery(q, companies) {
   seguroCliente = null,
   afeAtividade = null,
   anoDocumento = null,
+  selecaoAlteracao = null,
 }) {
   const found = [];
   const notFoundLabels = [];
@@ -5430,6 +5517,12 @@ function findCompaniesInQuery(q, companies) {
   wantedTypeKeys.forEach((t) => {
     const labelsAceitos = tipoLabelsAceitos(t.label);
     let matches = company.documentos.filter((d) => labelsAceitos.includes(d.tipo));
+    // Pedido de UMA alteração específica ("contrato social 22"): busca na
+    // categoria societária inteira, já que o `tipo` gravado varia ("Contrato
+    // Social" x "Alteração Contratual") entre os documentos reais.
+    if (selecaoAlteracao && TIPOS_ALTERACAO_CONTRATUAL.has(t.label)) {
+      matches = company.documentos.filter((d) => d.categoria === "contratos_sociais");
+    }
     const semSubstituicao = SEM_SUBSTITUICAO_TIPOS.has(t.label);
     // Refinamento de AFE/seguro-cliente/ano — mesma regra reaproveitada pelo
     // "Envio de documentações em lote" (`matchChecklistItemToCompany`), via
@@ -5439,8 +5532,22 @@ function findCompaniesInQuery(q, companies) {
       seguroCliente,
       afeAtividade,
       anoDocumento,
+      selecaoAlteracao,
     });
     matches = refinado.matches;
+    if (selecaoAlteracao && TIPOS_ALTERACAO_CONTRATUAL.has(t.label)) {
+      // Seleção por número (uma ou várias alterações, ex.: "contrato social
+      // 23, 22 e 21"): traz TODAS as pedidas, cada uma como documento
+      // próprio, e avisa individualmente quais números não existem.
+      refinado.faltantes.forEach((n) => notFoundLabels.push(`${n}ª Alteração Contratual`));
+      matches.forEach((d) => {
+        if (!seenIds.has(d.id)) {
+          found.push(d);
+          seenIds.add(d.id);
+        }
+      });
+      return;
+    }
     let notFoundLabel = `${t.label}${refinado.sufixo}`;
     if (matches.length === 0) {
       notFoundLabels.push(notFoundLabel);
@@ -5472,6 +5579,20 @@ function findCompaniesInQuery(q, companies) {
   categoryKeysEfetivos.forEach((catKey) => {
     let matches = company.documentos.filter((d) => d.categoria === catKey);
     let notFoundLabel = CATEGORIES.find((c) => c.key === catKey)?.label || catKey;
+    if (catKey === "contratos_sociais" && selecaoAlteracao) {
+      const f = filtrarPorSelecaoAlteracao(matches, selecaoAlteracao);
+      f.faltantes.forEach((n) => {
+        const l = `${n}ª Alteração Contratual`;
+        if (!notFoundLabels.includes(l)) notFoundLabels.push(l);
+      });
+      f.docs.forEach((d) => {
+        if (!seenIds.has(d.id)) {
+          found.push(d);
+          seenIds.add(d.id);
+        }
+      });
+      return;
+    }
     if (catKey === "seguros") {
       const clientePrefix = seguroCliente
         ? `seguro_cliente_${slugifyDocFamily(seguroCliente)}`
@@ -5616,7 +5737,7 @@ function currentDocsFor(docsFiltrados) {
 function refinarMatchesPorRegraDeTipoEspecifico(
   matches,
   tipoLabel,
-  { seguroCliente = null, afeAtividade = null, anoDocumento = null } = {},
+  { seguroCliente = null, afeAtividade = null, anoDocumento = null, selecaoAlteracao = null } = {},
 ) {
   let out = matches;
   let sufixo = "";
@@ -5633,11 +5754,18 @@ function refinarMatchesPorRegraDeTipoEspecifico(
       : out.filter((d) => (d.subcategoria || "geral") !== "clientes_especificos");
     if (seguroCliente) sufixo += ` ${seguroCliente}`;
   }
+  let faltantes = [];
+  if (selecaoAlteracao && TIPOS_ALTERACAO_CONTRATUAL.has(tipoLabel)) {
+    const f = filtrarPorSelecaoAlteracao(out, selecaoAlteracao);
+    out = f.docs;
+    faltantes = f.faltantes;
+    sufixo = ` ${selecaoAlteracao.numeros.map((n) => `${n}ª`).join(", ")} alteração`;
+  }
   if (SEM_SUBSTITUICAO_TIPOS.has(tipoLabel) && anoDocumento) {
     out = out.filter((d) => docTextMentionsAno(d, anoDocumento));
     sufixo += ` ${formatAnosLabel(anoDocumento)}`;
   }
-  return { matches: out, sufixo };
+  return { matches: out, sufixo, faltantes };
 }
 /** matchChecklistItemToCompany: resolve um item da checklist a documento(s)
  *  real(is) de UMA empresa, em camadas — nunca "chuta" quando há mais de
@@ -5708,15 +5836,20 @@ function matchChecklistItemToCompany(item, company) {
     );
     const afeAtividade = detectAfeAtividade(item.descricaoOriginal || "");
     const anoDocumento = detectAnoDocumento(item.descricaoOriginal || "");
+    const selecaoAlteracao = detectSelecaoAlteracao(item.descricaoOriginal || "");
     const brutos = refinarMatchesPorRegraDeTipoEspecifico(
       brutosIniciais,
       item.tipoSugerido,
-      { seguroCliente, afeAtividade, anoDocumento },
+      { seguroCliente, afeAtividade, anoDocumento, selecaoAlteracao },
     ).matches;
-    const atuais = currentDocsFor(brutos);
+    // Seleção por número ("contrato social 23, 22 e 21"): nunca colapsa pra
+    // alteração vigente — cada alteração pedida é um documento próprio.
+    const porNumero = selecaoAlteracao && TIPOS_ALTERACAO_CONTRATUAL.has(item.tipoSugerido);
+    const atuais = porNumero ? brutos : currentDocsFor(brutos);
     if (atuais.length === 0) return { status: "nao_localizado", candidatos: [] };
     if (atuais.length === 1)
       return { status: "encontrado", doc: atuais[0], candidatos: atuais };
+    if (porNumero) return { status: "grupo", candidatos: atuais };
     // Tipo de SEM_SUBSTITUICAO_TIPOS (Faturamento, DRE, Balanço, Balancete,
     // Demonstração Contábil, AFE, Apólice RCTR-C/RC-DC) com mais de um
     // documento restante: NUNCA ambíguo — é exatamente o mesmo raciocínio
@@ -6855,7 +6988,16 @@ function gerarChecklistViaRegras(texto) {
 function parseIntent(text) {
   const t = normalize(text);
   const types = detectRequestedTypes(text);
-  const categories = detectRequestedCategories(text); // seguroCliente (pedido explícito da Iasmin, 2026-09-17): quando a
+  const categories = detectRequestedCategories(text);
+  // "alteração 22" / "22ª alteração" já é, por si só, um pedido de documento
+  // societário — mesmo quando o texto não traz "contrato social" por extenso
+  // (pedido da Iasmin, 2026-10-05).
+  if (
+    detectSelecaoAlteracao(text) &&
+    !categories.includes("contratos_sociais") &&
+    !types.some((k) => k.key === "contratos_sociais")
+  )
+    categories.push("contratos_sociais"); // seguroCliente (pedido explícito da Iasmin, 2026-09-17): quando a
   // categoria "seguros" é pedida junto de um cliente conhecido ("seguro da
   // Nestlé"), searchDocuments precisa saber disso pra buscar só os
   // documentos daquele cliente — nunca os gerais da empresa junto. Sem
@@ -6871,6 +7013,7 @@ function parseIntent(text) {
   // "DRE de 2025") — sem ano citado, fica null (searchDocuments então traz
   // todos os anos disponíveis daquele tipo).
   const anoDocumento = detectAnoDocumento(text);
+  const selecaoAlteracao = detectSelecaoAlteracao(text);
   const wantsAll =
     /toda\s?a?\s?documentacao|todos os documentos|documentacao completa|tudo que tiver|documentacao dessa (filial|empresa)/.test(
       t,
@@ -6907,13 +7050,13 @@ function parseIntent(text) {
       t,
     );
   if (wantsAll)
-    return { intent: "DOWNLOAD_ALL_DOCUMENTS", types, categories, seguroCliente, afeAtividade, anoDocumento };
+    return { intent: "DOWNLOAD_ALL_DOCUMENTS", types, categories, seguroCliente, afeAtividade, anoDocumento, selecaoAlteracao };
   if (wantsList)
-    return { intent: "LIST_COMPANY_DOCUMENTS", types, categories, seguroCliente, afeAtividade, anoDocumento };
+    return { intent: "LIST_COMPANY_DOCUMENTS", types, categories, seguroCliente, afeAtividade, anoDocumento, selecaoAlteracao };
   if (wantsCategories)
-    return { intent: "LIST_DOCUMENT_CATEGORIES", types, categories, seguroCliente, afeAtividade, anoDocumento };
+    return { intent: "LIST_DOCUMENT_CATEGORIES", types, categories, seguroCliente, afeAtividade, anoDocumento, selecaoAlteracao };
   if (wantsValidadeOnly && (types.length > 0 || categories.length > 0)) {
-    return { intent: "DOCUMENT_FIELD_VALIDADE", types, categories, seguroCliente, afeAtividade, anoDocumento };
+    return { intent: "DOCUMENT_FIELD_VALIDADE", types, categories, seguroCliente, afeAtividade, anoDocumento, selecaoAlteracao };
   }
   if (
     (types.length > 1 ||
@@ -6921,23 +7064,23 @@ function parseIntent(text) {
       types.length + categories.length > 1) &&
     (wantsDownload || wantsZip || wantsFind)
   ) {
-    return { intent: "DOWNLOAD_MULTIPLE_DOCUMENTS", types, categories, seguroCliente, afeAtividade, anoDocumento };
+    return { intent: "DOWNLOAD_MULTIPLE_DOCUMENTS", types, categories, seguroCliente, afeAtividade, anoDocumento, selecaoAlteracao };
   }
   if (
     (types.length === 1 || categories.length === 1) &&
     wantsFind &&
     !wantsDownload
   ) {
-    return { intent: "SEARCH_DOCUMENT", types, categories, seguroCliente, afeAtividade, anoDocumento };
+    return { intent: "SEARCH_DOCUMENT", types, categories, seguroCliente, afeAtividade, anoDocumento, selecaoAlteracao };
   }
   if (
     (types.length === 1 || categories.length === 1) &&
     (wantsDownload || wantsZip)
   ) {
-    return { intent: "DOWNLOAD_DOCUMENT", types, categories, seguroCliente, afeAtividade, anoDocumento };
+    return { intent: "DOWNLOAD_DOCUMENT", types, categories, seguroCliente, afeAtividade, anoDocumento, selecaoAlteracao };
   }
   if (wantsZip && types.length === 0 && categories.length === 0) {
-    return { intent: "CREATE_ZIP", types, categories, seguroCliente, afeAtividade, anoDocumento };
+    return { intent: "CREATE_ZIP", types, categories, seguroCliente, afeAtividade, anoDocumento, selecaoAlteracao };
   } // Integração do Assistente Documental ao Portal (regra explícita, seção 3
   // do prompt): quando a pessoa cita um tipo/categoria específico junto de
   // uma empresa, mesmo sem verbo de ação ("CNPJ de PE", "alvará de MG"), a
@@ -6945,7 +7088,7 @@ function parseIntent(text) {
   // texto. Só não entrega quando a pergunta pede claramente o valor
   // (wantsValueOnly).
   if (!wantsValueOnly && (types.length === 1 || categories.length === 1)) {
-    return { intent: "DOWNLOAD_DOCUMENT", types, categories, seguroCliente, afeAtividade, anoDocumento };
+    return { intent: "DOWNLOAD_DOCUMENT", types, categories, seguroCliente, afeAtividade, anoDocumento, selecaoAlteracao };
   }
   // Mesma regra acima, generalizada pra MAIS de um tipo/categoria citado
   // junto na mesma frase, ainda sem nenhum verbo de ação (pedido explícito
@@ -6958,9 +7101,9 @@ function parseIntent(text) {
   // múltiplos itens, mais acima) já resolveu — ou seja, especificamente o
   // caso de 2+ tipos/categorias reconhecidos sem nenhum verbo de ação.
   if (!wantsValueOnly && types.length + categories.length > 1) {
-    return { intent: "DOWNLOAD_MULTIPLE_DOCUMENTS", types, categories, seguroCliente, afeAtividade, anoDocumento };
+    return { intent: "DOWNLOAD_MULTIPLE_DOCUMENTS", types, categories, seguroCliente, afeAtividade, anoDocumento, selecaoAlteracao };
   }
-  return { intent: "SEARCH_INFO", types, categories, seguroCliente, afeAtividade, anoDocumento };
+  return { intent: "SEARCH_INFO", types, categories, seguroCliente, afeAtividade, anoDocumento, selecaoAlteracao };
 }
 /* =========================================================================
    COMPONENTES DE APOIO
@@ -11050,6 +11193,7 @@ function ChatDrawer({
       seguroCliente: parsed.seguroCliente || null,
       afeAtividade: parsed.afeAtividade || null,
       anoDocumento: parsed.anoDocumento || null,
+      selecaoAlteracao: parsed.selecaoAlteracao || null,
     });
     if (found.length === 0) {
       pushMessage({
@@ -11127,6 +11271,7 @@ function ChatDrawer({
       seguroCliente: parsed.seguroCliente || null,
       afeAtividade: parsed.afeAtividade || null,
       anoDocumento: parsed.anoDocumento || null,
+      selecaoAlteracao: parsed.selecaoAlteracao || null,
     });
     const localLabel = company.tipo === "Matriz" ? "a Matriz" : `a Filial ${company.id}`;
     if (found.length === 0) {
@@ -11173,6 +11318,7 @@ function ChatDrawer({
         seguroCliente: parsed.seguroCliente || null,
         afeAtividade: parsed.afeAtividade || null,
         anoDocumento: parsed.anoDocumento || null,
+        selecaoAlteracao: parsed.selecaoAlteracao || null,
       });
       found.forEach((doc) => items.push({ company, doc }));
       notFoundLabels.forEach((label) => notFoundItems.push({ company, label }));
@@ -11845,9 +11991,10 @@ function ChatDrawer({
         // anoDocumento: mesma regra, mas pra diferenciar Contabilidade por
         // ano (ex.: "DRE de 2024").
         const anoDocumento = detectAnoDocumento(tipoOuCategoria);
+        const selecaoAlteracao = detectSelecaoAlteracao(tipoOuCategoria);
         const result = handleDocumentIntent(
           tipoOuCategoria,
-          { types: wantedTypes, categories: wantedCategories, seguroCliente, afeAtividade, anoDocumento },
+          { types: wantedTypes, categories: wantedCategories, seguroCliente, afeAtividade, anoDocumento, selecaoAlteracao },
           c,
         );
         const found = result?.found || [];
