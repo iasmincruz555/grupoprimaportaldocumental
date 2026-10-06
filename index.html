@@ -5392,6 +5392,100 @@ function DocTituloEditable({ doc, onNotify, className, isAdmin }) {
  *  arquivo enviado. */ const CHAT_ONLY_CATEGORY_ALIASES = [
   { key: "cnpj", match: /\bcnpj\b/ },
 ];
+/* ---- Tolerância a erros de digitação + busca livre por título (2026-10-06) ----
+ * Pedido da Iasmin: "PSCMO" (letras trocadas) não era reconhecido, e documentos
+ * cujo tipo ainda não existe na lista fixa (DOC_TYPE_KEYWORDS) só podiam ser
+ * achados se alguém acrescentasse uma entrada nova. Aqui: (1) pequenas
+ * digitações erradas de NOMES/SIGLAS de documentos são corrigidas antes do
+ * reconhecimento (só contra um vocabulário conhecido — nunca "adivinha"
+ * palavra qualquer); (2) quando nada é reconhecido, procura as palavras (ou a
+ * SIGLA formada pelas iniciais do título, ex.: PCMSO = Programa de Controle
+ * Médico de Saúde Ocupacional) nos títulos dos documentos reais. */
+const TITULO_STOPWORDS = new Set(["de", "da", "do", "das", "dos", "e", "a", "o", "as", "os", "para", "por", "em", "no", "na", "nos", "nas", "com", "um", "uma", "me", "manda", "mande", "envia", "enviar", "quero", "preciso", "queria", "pode", "voce", "documento", "documentos", "arquivo", "arquivos", "da", "tem", "ter", "mostra", "mostrar", "favor", "por favor", "pfv", "pf", "matriz", "filial", "base", "mais", "recente", "atual", "ultimo", "ultima"]);
+const DIGITACAO_VOCAB_EXTRA = ["pcmso", "sassmaq", "avcb", "cnpj", "ibama", "rctr", "cndt", "fgts", "alvara", "licenca", "sanitaria", "ambiental", "certidao", "negativa", "apolice", "contrato", "social", "alteracao", "contratual", "balanco", "balancete", "faturamento", "inscricao", "estadual", "municipal", "federal", "trabalhista", "falencia", "seguro", "matriz", "filial", "funcionamento", "bombeiros", "qualidade", "gerenciamento", "emergencia", "procuracao", "regularidade"];
+let _vocabDigitacaoBase = null;
+function vocabularioDigitacaoBase() {
+  if (_vocabDigitacaoBase) return _vocabDigitacaoBase;
+  const set = new Set(DIGITACAO_VOCAB_EXTRA);
+  DOC_TYPE_KEYWORDS.forEach((k) => normalize(k.label).split(/[^a-z0-9]+/).forEach((w) => { if (w.length >= 4 && !TITULO_STOPWORDS.has(w)) set.add(w); }));
+  _vocabDigitacaoBase = set;
+  return set;
+}
+/** Distância de edição (inserção/remoção/troca) com troca de letras vizinhas contando 1. */
+function distanciaDigitacao(a, b) {
+  const d = [];
+  for (let i = 0; i <= a.length; i++) { d[i] = [i]; }
+  for (let j = 1; j <= b.length; j++) d[0][j] = j;
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      const custo = a[i - 1] === b[j - 1] ? 0 : 1;
+      d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + custo);
+      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) d[i][j] = Math.min(d[i][j], d[i - 2][j - 2] + 1);
+    }
+  }
+  return d[a.length][b.length];
+}
+/** Sigla formada pelas iniciais das palavras de um título (sem "de/da/e..."). */
+function siglaDoTitulo(titulo) {
+  return normalize(titulo).split(/[^a-z0-9]+/).filter((w) => w && !TITULO_STOPWORDS.has(w) && w.length > 1).map((w) => w[0]).join("");
+}
+function vocabularioDosDocumentos(companies) {
+  const set = new Set();
+  (companies || []).forEach((c) => (c.documentos || []).forEach((d) => {
+    const titulo = `${d.titulo || ""} ${d.tipo || ""}`;
+    normalize(titulo).split(/[^a-z0-9]+/).forEach((w) => { if (w.length >= 4 && !TITULO_STOPWORDS.has(w)) set.add(w); });
+    const sg = siglaDoTitulo(d.titulo || d.tipo || "");
+    if (sg.length >= 4 && sg.length <= 8) set.add(sg);
+  }));
+  return set;
+}
+/** corrigirDigitacao: devolve { texto, correcoes:[{de,para}] }. Só troca uma
+ *  palavra quando ela NÃO é uma palavra conhecida e há UM vocábulo conhecido a
+ *  1 edição (2 para palavras longas); variações só de plural não contam. */
+function corrigirDigitacao(texto, vocabExtra) {
+  const vocab = vocabularioDigitacaoBase();
+  const extra = vocabExtra || new Set();
+  const correcoes = [];
+  const out = (texto || "").replace(/[\p{L}\p{N}]+/gu, (palavra) => {
+    const n = normalize(palavra);
+    if (n.length < 4 || /\d/.test(n) || vocab.has(n) || extra.has(n) || TITULO_STOPWORDS.has(n)) return palavra;
+    const tol = n.length >= 8 ? 2 : 1;
+    let melhor = null;
+    let melhorD = 99;
+    let empate = false;
+    const candidatos = [...vocab, ...extra];
+    for (const v of candidatos) {
+      if (Math.abs(v.length - n.length) > tol) continue;
+      let dist = distanciaDigitacao(n, v);
+      // letras embaralhadas (mesmas letras, outra ordem — ex.: PSCMO/PCMSO)
+      const embaralhada = n.length >= 5 && n !== v && n.split("").sort().join("") === v.split("").sort().join("");
+      if (embaralhada && dist > tol) dist = tol;
+      if (dist === 0 || dist > tol) continue;
+      if (n.replace(/(es|s)$/, "") === v.replace(/(es|s)$/, "")) return palavra; // só plural: não mexe
+      if (n.slice(0, -1) === v.slice(0, -1) && /[aeo]/.test(n.slice(-1)) && /[aeo]/.test(v.slice(-1))) return palavra; // só a vogal final (gênero: sanitário/sanitária): variação válida, não é erro
+      if (dist < melhorD) { melhor = v; melhorD = dist; empate = false; }
+      else if (dist === melhorD && v !== melhor) empate = true;
+    }
+    if (!melhor || empate) return palavra;
+    const para = palavra === palavra.toUpperCase() ? melhor.toUpperCase() : melhor;
+    correcoes.push({ de: palavra, para });
+    return para;
+  });
+  return { texto: out, correcoes };
+}
+/** buscarDocsPorTituloLivre: documentos cujo título/tipo/nome do arquivo contém
+ *  TODAS as palavras relevantes do texto — ou cuja sigla (iniciais do título)
+ *  é uma das palavras (ex.: "pcmso"). Devolve [] se o texto não tiver nada
+ *  relevante (evita casar frases genéricas com qualquer documento). */
+function buscarDocsPorTituloLivre(docs, texto) {
+  const toks = normalize(texto).split(/[^a-z0-9]+/).filter((w) => w.length >= 3 && !TITULO_STOPWORDS.has(w));
+  if (toks.length === 0 || !toks.some((w) => w.length >= 4)) return [];
+  return (docs || []).filter((d) => {
+    const base = normalize(`${d.titulo || ""} ${d.tipo || ""} ${(d.arquivo && d.arquivo.nome) || ""}`);
+    const sigla = siglaDoTitulo(d.titulo || d.tipo || "");
+    return toks.every((w) => base.includes(w) || (sigla.length >= 3 && w === sigla));
+  });
+}
 function detectRequestedTypes(text) {
   const t = normalize(text);
   return DOC_TYPE_KEYWORDS.filter((k) => k.match.test(t));
@@ -6021,6 +6115,13 @@ function matchChecklistItemToCompany(item, company) {
     const atuais = currentDocsFor(brutos);
     if (atuais.length === 0) return { status: "nao_localizado", candidatos: [] };
     return { status: "grupo", candidatos: atuais };
+  }
+  // Nenhum tipo/categoria reconhecido: tenta pelo TÍTULO (palavras ou sigla
+  // formada pelas iniciais) dos documentos reais da base.
+  if (item.descricaoOriginal) {
+    const atuaisTitulo = currentDocsFor(buscarDocsPorTituloLivre(docs, item.descricaoOriginal));
+    if (atuaisTitulo.length === 1) return { status: "encontrado", doc: atuaisTitulo[0], candidatos: atuaisTitulo };
+    if (atuaisTitulo.length > 1) return { status: "ambiguo", candidatos: atuaisTitulo };
   }
   return { status: "tipo_nao_identificado", candidatos: [] };
 }
@@ -6988,6 +7089,7 @@ function detectarSegmentosNaoCobertos(linha, tiposEncontrados) {
   return naoIdentificados;
 }
 function gerarChecklistViaRegras(texto) {
+  texto = corrigirDigitacao(texto).texto; // "PSCMO" → "PCMSO" etc. (só vocabulário conhecido)
   const linhasBrutas = (texto || "")
     .split(/\r?\n/)
     .map((l) =>
@@ -11302,6 +11404,29 @@ function ChatDrawer({
       selecaoAlteracao: parsed.selecaoAlteracao || null,
     });
     if (found.length === 0) {
+      // Segurança, Qualidade e Compliance (PCMSO, PGR, PAE, SASSMAQ...): se a
+      // base consultada não tem o documento, procura nas DEMAIS bases e
+      // mostra onde ele está (pedido da Iasmin, 2026-10-06: "de todas as
+      // filiais"). Só para esta categoria — outros documentos (CND, alvará)
+      // são específicos de cada CNPJ e nunca devem ser trocados por os de
+      // outra base.
+      const pedeSeguranca =
+        (parsed.types || []).some((t) => t.key === "seguranca_qualidade_compliance") ||
+        (parsed.categories || []).includes("seguranca_qualidade_compliance");
+      if (pedeSeguranca) {
+        const outras = companies.filter((c) => c.id !== company.id).filter((c) =>
+          searchDocuments({ company: c, wantedTypeKeys: parsed.types, wantedCategoryKeys: parsed.categories, seguroCliente: null, afeAtividade: null, anoDocumento: parsed.anoDocumento || null, selecaoAlteracao: null }).found.length > 0,
+        );
+        if (outras.length > 0) {
+          pushMessage({
+            role: "assistant",
+            type: "text",
+            text: `Não localizei ${notFoundLabels.length > 0 ? notFoundLabels.join(", ") : "o documento solicitado"} para ${company.tipo === "Matriz" ? "a Matriz" : `a Filial ${company.id}`}, mas há em outra(s) base(s):`,
+          });
+          const multi = handleDocumentIntentMultiCompany(rawText, parsed, outras);
+          return { found: multi.items.map((i) => i.doc), notFoundLabels: multi.notFoundItems.map((x) => x.label) };
+        }
+      }
       pushMessage({
         role: "assistant",
         type: "text",
@@ -11864,10 +11989,21 @@ function ChatDrawer({
     return false;
   }
   async function send(q) {
-    const text = (q ?? input).trim();
-    if (!text) return;
-    pushMessage({ role: "user", type: "text", text });
+    const textoDigitado = (q ?? input).trim();
+    if (!textoDigitado) return;
+    pushMessage({ role: "user", type: "text", text: textoDigitado });
     setInput("");
+    // Pequenos erros de digitação em nomes/siglas de documentos ("PSCMO" →
+    // "PCMSO"): corrigidos antes de qualquer reconhecimento; a mensagem da
+    // pessoa continua exibida como foi digitada e a correção é avisada.
+    const { texto: text, correcoes: correcoesDigitacao } = corrigirDigitacao(textoDigitado, vocabularioDosDocumentos(companies));
+    if (correcoesDigitacao.length > 0) {
+      pushMessage({
+        role: "assistant",
+        type: "text",
+        text: `Entendi ${correcoesDigitacao.map((c) => `"${c.de}" como "${c.para}"`).join(" e ")}.`,
+      });
+    }
     const explicitCompany = findCompanyInQuery(text, companies);
     const company = resolveContextualCompany(text, explicitCompany);
     if (isHelpQuestion(text)) {
@@ -12056,6 +12192,30 @@ function ChatDrawer({
     ) {
       pushMessage({ role: "assistant", type: "text", text: ruleAnswer });
       return;
+    }
+    // O motor de regras também não soube responder: procura as palavras (ou a sigla)
+    // nos TÍTULOS dos documentos reais — assim documentos de tipos ainda não
+    // cadastrados na lista fixa também são achados, sem mexer no código.
+    {
+      const alvoTitulo = company || companies.find((c) => c.tipo === "Matriz") || null;
+      const emBase = (c) => currentDocsFor(buscarDocsPorTituloLivre((c && c.documentos) || [], text));
+      let baseAchada = alvoTitulo;
+      let achados = alvoTitulo ? emBase(alvoTitulo) : [];
+      let intro = "";
+      if (achados.length === 0) {
+        const outra = companies.find((c) => alvoTitulo && c.id !== alvoTitulo.id && emBase(c).length > 0);
+        if (outra) { baseAchada = outra; achados = emBase(outra); intro = `Não localizei na ${alvoTitulo.tipo === "Matriz" ? "Matriz" : `Filial ${alvoTitulo.id}`}, mas encontrei ${achados.length === 1 ? "o documento" : "os documentos"} ${outra.tipo === "Matriz" ? "da Matriz" : `da Filial ${outra.id}`}:`; }
+      }
+      if (achados.length > 0 && baseAchada) {
+        if (!intro) intro = achados.length === 1 ? `Encontrei o documento solicitado ${baseAchada.tipo === "Matriz" ? "da Matriz" : `da Filial ${baseAchada.id}`}:` : `Encontrei ${achados.length} documentos ${baseAchada.tipo === "Matriz" ? "da Matriz" : `da Filial ${baseAchada.id}`}:`;
+        if (achados.length === 1) {
+          pushMessage({ role: "assistant", type: "doc-result", text: intro, company: baseAchada, doc: achados[0] });
+        } else {
+          pushMessage({ role: "assistant", type: "doc-multi", text: intro, company: baseAchada, found: achados, notFound: [], zipState: "idle", zipName: `Documentos_${safeFileSlug(baseAchada.nomeFantasia || baseAchada.razaoSocial)}_${baseAchada.id}.zip` });
+        }
+        lastFoundRef.current = { company: baseAchada, docs: achados };
+        return;
+      }
     }
     const pendingId = nextId();
     setMessages((prev) => [
