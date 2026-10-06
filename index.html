@@ -12553,6 +12553,8 @@ function ViewerModal({ viewer, onClose }) {
           /*#__PURE__*/ React.createElement(FileText, { size: 15 }),
           " ",
           docTituloExibido(viewer.doc),
+          viewer.versaoLabel &&
+            /*#__PURE__*/ React.createElement("span", { className: "fin-versao-tag fin-viewer-versao" }, viewer.versaoLabel),
         ),
         /*#__PURE__*/ React.createElement(
           "div",
@@ -12790,7 +12792,7 @@ function isoDateToBR(iso) {
 /** viewHomologAnexo / downloadHomologAnexo: equivalentes a viewDocument/
  *  downloadDocument, mas para anexos do formulário de homologação. */ async function viewHomologAnexo(
   anexo,
-  { onView, onNotify, onAuditDownload } = {},
+  { onView, onNotify, onAuditDownload, versaoLabel } = {},
 ) {
   const kind = renderKindForMime(anexo.tipo, anexo.nome);
   if (!kind) {
@@ -12812,6 +12814,7 @@ function isoDateToBR(iso) {
         mimeType: mimeType || anexo.tipo,
         bytes,
         kind,
+        versaoLabel,
         onDownload: () => downloadHomologAnexo(anexo, { onNotify, onAuditDownload }),
       });
     } else {
@@ -12831,6 +12834,7 @@ function isoDateToBR(iso) {
         mimeType: mimeType || anexo.tipo,
         bytes,
         kind,
+        versaoLabel,
         ...preview,
         onDownload: () => downloadHomologAnexo(anexo, { onNotify, onAuditDownload }),
       });
@@ -26363,11 +26367,12 @@ function finExecutarCriacao(campos, user, modeloVersao) {
     },
   };
 }
-function finVerArquivo(arq, item, { onView, onNotify } = {}) {
+function finVerArquivo(arq, item, { onView, onNotify, versao } = {}) {
   logDocumentAction("visualizou_arquivo_financeiro", { cliente: item.cliente, arquivo: arq.nome });
   return viewHomologAnexo(arq, {
     onView,
     onNotify,
+    versaoLabel: versao ? `Versão ${versao}` : undefined,
     onAuditDownload: () => logDocumentAction("baixou_arquivo_financeiro", { cliente: item.cliente, arquivo: arq.nome }),
   });
 }
@@ -26696,11 +26701,15 @@ function finRetornoCliente(it, { onView, onNotify } = {}) {
   if (respostas.length === 0) return finEl("span", { className: "fin-retorno-vazio" }, "—");
   const r = respostas[respostas.length - 1];
   return finEl(
-    "div",
-    { className: "fin-retorno" },
-    finEl("span", { className: "fin-retorno-nome", title: `${r.arquivo.nome} (versão ${r.versao}${respostas.length > 1 ? ` de ${respostas.length}` : ""})` }, `v${r.versao}`),
-    finEl("button", { type: "button", className: "mini-download-btn", title: `Ver ${r.arquivo.nome}`, "aria-label": "Ver retorno do cliente", onClick: () => finVerArquivo(r.arquivo, it, { onView, onNotify }) }, finEl(Eye, { size: 13 }), " Ver"),
-    finEl("button", { type: "button", className: "mini-download-btn", title: `Baixar ${r.arquivo.nome}`, "aria-label": "Baixar retorno do cliente", onClick: () => finBaixarArquivo(r.arquivo, it, { onNotify }) }, finEl(Download, { size: 13 }), " Baixar"),
+    "button",
+    {
+      type: "button",
+      className: "mini-download-btn fin-retorno-btn",
+      title: `${r.arquivo.nome} · versão ${r.versao}${respostas.length > 1 ? ` (mais recente de ${respostas.length})` : ""}`,
+      onClick: () => finVerArquivo(r.arquivo, it, { onView, onNotify, versao: r.versao }),
+    },
+    finEl(Eye, { size: 13 }),
+    " Visualizar arquivo",
   );
 }
 function FinDetalheView({ item, currentUser, onBack, onExecutar, onExcluir, onView, onNotify }) {
@@ -26779,15 +26788,10 @@ function FinDetalheView({ item, currentUser, onBack, onExecutar, onExcluir, onVi
             !concluido && !emPendencia && finEl("button", { className: "doc-view-btn", onClick: () => setModal("pendencia") }, finEl(AlertTriangle, { size: 14 }), " Sinalizar pendência"),
             emPendencia && finEl("button", { className: "doc-view-btn", onClick: () => setModal("resolver") }, finEl(CheckCircle2, { size: 14 }), " Resolver pendência"),
             finEl("button", { className: "doc-view-btn", onClick: () => setModal("observacao") }, finEl(FileText, { size: 14 }), " Adicionar observação"),
+            admin && finEl("button", { className: "doc-view-btn", onClick: () => setModal("editar") }, finEl(Pencil, { size: 14 }), " Editar dados"),
+            admin && !confirmandoExclusao && finEl("button", { className: "doc-view-btn homolog-delete-btn", onClick: () => setConfirmandoExclusao(true) }, finEl(XCircle, { size: 14 }), " Excluir solicitação"),
           )
         : finEl("p", { className: "homolog-bases-hint", style: { marginTop: 14 } }, "Seu perfil é de consulta: você pode visualizar esta solicitação e abrir os arquivos, mas não alterá-la."),
-      admin &&
-        finEl(
-          "div",
-          { className: "homolog-status-actions fin-admin-actions" },
-          finEl("button", { className: "doc-view-btn", onClick: () => setModal("editar") }, finEl(Pencil, { size: 14 }), " Editar dados"),
-          !confirmandoExclusao && finEl("button", { className: "doc-view-btn homolog-delete-btn", onClick: () => setConfirmandoExclusao(true) }, finEl(XCircle, { size: 14 }), " Excluir solicitação"),
-        ),
       admin &&
         confirmandoExclusao &&
         finEl(
@@ -26801,6 +26805,21 @@ function FinDetalheView({ item, currentUser, onBack, onExecutar, onExcluir, onVi
             finEl("button", { className: "filters-clear-btn filters-clear-inline", onClick: () => setConfirmandoExclusao(false) }, "Cancelar"),
           ),
         ),
+      finEl(
+        "div",
+        { className: "fin-dados-compacto", "data-testid": "fin-dados" },
+      finEl(
+          "div",
+          { className: "fin-dados-grid" },
+          dado("E-mail do cliente", item.emailCliente),
+          dado("Data do envio ao cliente", item.dataEnvio ? isoDateToBR(item.dataEnvio) : "Ainda não enviado"),
+          dado("Modelo utilizado", modeloUsado ? (modeloAtualVersao && modeloAtualVersao !== item.modeloVersao ? `${modeloUsado} (hoje a vigente é a ${modeloAtualVersao})` : modeloUsado) : null),
+          dado("E-mail do Financeiro", item.emailFinanceiro),
+          dado("Data do encaminhamento", item.dataEncaminhamento ? isoDateToBR(item.dataEncaminhamento) : null),
+          dado("Última atualização", `${formatAuditWhen(new Date(finUltimaAtualizacao(item)))}${item.atualizadoPor ? " · " + item.atualizadoPor : ""}`),
+          item.observacoes ? dado("Observações", item.observacoes, true) : null,
+        ),
+      ),
     ),
     (operar || admin) &&
       finEl(
@@ -26896,22 +26915,6 @@ function FinDetalheView({ item, currentUser, onBack, onExecutar, onExcluir, onVi
     finEl(
       "section",
       { className: "section-block homolog-detail-card" },
-      finEl("h3", null, "Dados da solicitação"),
-      finEl(
-        "div",
-        { className: "fin-dados-grid" },
-        dado("E-mail do cliente", item.emailCliente),
-        dado("Data do envio ao cliente", item.dataEnvio ? isoDateToBR(item.dataEnvio) : "Ainda não enviado"),
-        dado("Modelo utilizado", modeloUsado ? (modeloAtualVersao && modeloAtualVersao !== item.modeloVersao ? `${modeloUsado} (hoje a vigente é a ${modeloAtualVersao})` : modeloUsado) : null),
-        dado("E-mail do Financeiro", item.emailFinanceiro),
-        dado("Data do encaminhamento", item.dataEncaminhamento ? isoDateToBR(item.dataEncaminhamento) : null),
-        dado("Última atualização", `${formatAuditWhen(new Date(finUltimaAtualizacao(item)))}${item.atualizadoPor ? " · " + item.atualizadoPor : ""}`),
-        item.observacoes ? dado("Observações", item.observacoes, true) : null,
-      ),
-    ),
-    finEl(
-      "section",
-      { className: "section-block homolog-detail-card" },
       finEl("h3", null, "Resposta do cliente"),
       respostas.length === 0 && finEl("p", { className: "empty-note" }, "Nenhuma resposta anexada ainda. Quando o cliente devolver o modelo preenchido, anexe o arquivo aqui."),
       respostas.length > 0 &&
@@ -26936,7 +26939,7 @@ function FinDetalheView({ item, currentUser, onBack, onExecutar, onExcluir, onVi
                 finEl("div", { className: "homolog-historico-when" }, `${formatBytes(r.arquivo.tamanho)} · recebida em ${isoDateToBR(r.dataRecebimento)} · registrada por ${r.registradoPor} em ${formatAuditWhen(new Date(r.registradoEm))}`),
                 r.observacoes && finEl("div", { className: "fin-resposta-obs" }, r.observacoes),
               ),
-              finEl("button", { className: "mini-download-btn", onClick: () => finVerArquivo(r.arquivo, item, { onView, onNotify }) }, finEl(Eye, { size: 13 }), " Ver"),
+              finEl("button", { className: "mini-download-btn", onClick: () => finVerArquivo(r.arquivo, item, { onView, onNotify, versao: r.versao }) }, finEl(Eye, { size: 13 }), " Ver"),
               finEl("button", { className: "mini-download-btn", onClick: () => finBaixarArquivo(r.arquivo, item, { onNotify }) }, finEl(Download, { size: 13 }), " Baixar"),
             ),
           ),
@@ -28405,6 +28408,10 @@ function GrupoprimaPortal() {
         .fin-check-field { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; color: var(--texto); padding-bottom: 8px; cursor: pointer; }
         .fin-cell-email { max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .fin-dados-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 24px; }
+        .fin-dados-compacto { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--cinza-frio); }
+        .fin-dados-compacto .fin-dados-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 11px 20px; }
+        .fin-dados-compacto .fin-dado-valor { font-size: 12.5px; }
+        .fin-dados-compacto .fin-dado-rotulo { font-size: 10px; }
         .fin-dado { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
         .fin-dado-larga { grid-column: 1 / -1; }
         .fin-dado-rotulo { font-size: 10.5px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.04em; color: var(--carvao); }
@@ -28439,6 +28446,7 @@ function GrupoprimaPortal() {
         .portal-root[data-theme="dark"] .fin-passo-btn { color: #7FE6A0; }
         .portal-root[data-theme="dark"] .fin-passo-btn:hover:not(:disabled) { color: #fff; }
         .fin-detalhe-topo + .homolog-detail-card { margin-top: 18px; }
+        @media (min-width: 721px) and (max-width: 1000px) { .fin-dados-compacto .fin-dados-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
         @media (max-width: 1000px) { .fin-detalhe-topo { grid-template-columns: 1fr; } .fin-detalhe-topo .company-header { margin-bottom: 0; } }
         /* Filtros da lista numa linha só (telas largas) + coluna "Retorno do cliente" */
         .fin-filters-bar { padding: 8px 12px; margin: 14px 0 14px; gap: 10px; }
@@ -28454,12 +28462,12 @@ function GrupoprimaPortal() {
         }
         .fin-table th, .fin-table td { padding-left: 12px; padding-right: 12px; }
         .fin-cell-retorno { white-space: nowrap; }
-        .fin-retorno { display: inline-flex; align-items: center; gap: 6px; }
-        .fin-retorno-nome { font-size: 10.5px; font-weight: 800; padding: 2px 7px; border-radius: 999px; background: rgba(107,254,156,0.18); border: 1px solid rgba(107,254,156,0.65); color: #0b4a2c; }
-        .portal-root[data-theme="dark"] .fin-retorno-nome { color: #7FE6A0; }
+        .fin-retorno-btn { white-space: nowrap; border-color: #1FA85A; }
+        .fin-retorno-btn:hover { background: #1FA85A; color: #fff; }
+        .fin-viewer-versao { margin-left: 10px; }
         .fin-retorno-vazio { color: var(--carvao); }
         @media (max-width: 1100px) { .fin-kpi-grid { grid-template-columns: repeat(3, 1fr); } }
-        @media (max-width: 720px) { .fin-kpi-grid { grid-template-columns: repeat(2, 1fr); gap: 8px; } .fin-dados-grid { grid-template-columns: 1fr; } .fin-modelo-acoes { width: 100%; } .fin-cell-email { max-width: 140px; } }
+        @media (max-width: 720px) { .fin-kpi-grid { grid-template-columns: repeat(2, 1fr); gap: 8px; } .fin-dados-grid, .fin-dados-compacto .fin-dados-grid { grid-template-columns: 1fr; } .fin-modelo-acoes { width: 100%; } .fin-cell-email { max-width: 140px; } }
 
         /* ---- Cards de empresa (mobile) ---- */
         .desktop-only { display: block !important; }
