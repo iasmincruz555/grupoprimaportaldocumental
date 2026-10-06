@@ -4352,6 +4352,17 @@ async function createDocumentPackageMultiBase(numerados, opts = {}) {
       label: "PAE",
       match: /\bpae\b|plano de a[cç][aã]o de emerg[eê]ncia/,
     },
+    {
+      key: "seguranca_qualidade_compliance",
+      // PCMSO adicionado em 2026-10-06 (bug real relatado pela Iasmin: pedir
+      // "PCMSO" no chat não achava nada, embora o "Programa de Controle
+      // Médico de Saúde Ocupacional" já estivesse cadastrado em Segurança,
+      // Qualidade e Compliance — não existia nenhum tipo reconhecendo a
+      // sigla nem o nome por extenso). Texto já chega normalizado (sem
+      // acento): "controle medico de saude ocupacional".
+      label: "PCMSO",
+      match: /\bpcmso\b|controle medico( de)? saude ocupacional/,
+    },
     // "Certificação de Qualidade" removida daqui em 2026-09-22 (pedido
     // explícito da Iasmin: "SASSMAQ é certificado de qualidade... caso
     // peçam qualquer ISO/certificado ISO, envie SASSMAQ") — era uma
@@ -4537,7 +4548,7 @@ function tipoLabelsAceitos(label) {
       // sozinho, sem a sigla "PGR" na frase, não batia nem com a categoria
       // inteira antes disso).
       match:
-        /seguranca|qualidade|compliance|\bavcb\b|\bclcb\b|bombeiro|vistoria|sassmaq|brigada de inc[eê]ndio|\bpgr\b|\bpae\b|auditoria|certifica[cç][aã]o|(gerenciamento|gest[aã]o) de riscos?/,
+        /seguranca|qualidade|compliance|\bavcb\b|\bclcb\b|bombeiro|vistoria|sassmaq|brigada de inc[eê]ndio|\bpgr\b|\bpae\b|\bpcmso\b|controle medico( de)? saude ocupacional|auditoria|certifica[cç][aã]o|(gerenciamento|gest[aã]o) de riscos?/,
     },
     { key: "outros", match: /^outros/ },
     {
@@ -5488,6 +5499,23 @@ function findCompaniesInQuery(q, companies) {
   }
   return found;
 }
+/** docsDoTipoPedido: documentos de um TIPO pedido. Primeiro pelo `tipo`
+ *  gravado (regra de sempre); só se NADA bater, cai na rede de segurança —
+ *  documentos da MESMA categoria do tipo cujo título/nome do arquivo casa
+ *  com o mesmo padrão de reconhecimento (DOC_TYPE_KEYWORDS). Cobre
+ *  documentos já cadastrados com tipo vazio/diferente (ex.: "Programa de
+ *  Controle Médico de Saúde Ocupacional" salvo antes de existir o tipo
+ *  PCMSO), sem alterar nenhum pedido que já encontrava documentos. */
+function docsDoTipoPedido(docs, label, keyword) {
+  const labels = tipoLabelsAceitos(label);
+  const porTipo = docs.filter((d) => labels.includes(d.tipo));
+  if (porTipo.length > 0 || !keyword || !keyword.match) return porTipo;
+  return docs.filter((d) => {
+    if (d.categoria !== keyword.key) return false;
+    const texto = normalize(`${d.titulo || ""} ${(d.arquivo && d.arquivo.nome) || ""}`);
+    return keyword.match.test(texto);
+  });
+}
 /** searchDocuments: localiza documentos de uma empresa por tipo/categoria.
  *  Pedido de TIPO específico (`wantedTypeKeys`, ex.: "CND municipal") filtra
  *  por `d.tipo === t.label` — o tipo específico, nunca a categoria inteira
@@ -5569,8 +5597,7 @@ function findCompaniesInQuery(q, companies) {
       !wantedTypeKeys.some((t) => t.key === catKey && t.label !== "Apólice"),
   );
   wantedTypeKeys.forEach((t) => {
-    const labelsAceitos = tipoLabelsAceitos(t.label);
-    let matches = company.documentos.filter((d) => labelsAceitos.includes(d.tipo));
+    let matches = docsDoTipoPedido(company.documentos, t.label, t);
     // Pedido de UMA alteração específica ("contrato social 22"): busca na
     // categoria societária inteira, já que o `tipo` gravado varia ("Contrato
     // Social" x "Alteração Contratual") entre os documentos reais.
@@ -5878,7 +5905,7 @@ function matchChecklistItemToCompany(item, company) {
         ? docs.filter((d) => d.categoria === "contratos_sociais")
         : item.tipoSugerido === "Cartão CNPJ"
           ? docs.filter((d) => d.categoria === "cnpj" || d.tipo === "Cartão CNPJ")
-          : docs.filter((d) => tipoLabelsAceitos(item.tipoSugerido).includes(d.tipo));
+          : docsDoTipoPedido(docs, item.tipoSugerido, DOC_TYPE_KEYWORDS.find((k) => k.label === item.tipoSugerido));
     // Mesmo refinamento já usado pelo chat (searchDocuments) — sem isso, um
     // item de checklist com tipo específico reconhecido (ex.: "Seguro
     // RCDC" → "Apólice RC-DC") batia com TODOS os documentos daquele tipo,
