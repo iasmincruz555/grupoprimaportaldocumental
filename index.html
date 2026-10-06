@@ -26722,6 +26722,12 @@ function FinDetalheView({ item, currentUser, onBack, onExecutar, onExcluir, onVi
   const emPendencia = item.status === "pendencia";
   const respostas = item.respostas || [];
   const encaminhamentos = item.encaminhamentos || [];
+  // Etapas já cumpridas (o retângulo da etapa deixa de ficar verde): 1 = há ao
+  // menos uma resposta anexada; 2 = já encaminhado ao Financeiro; 3 = registro
+  // concluído. Registro concluído encerra todas as etapas.
+  const feito1 = respostas.length > 0 || concluido;
+  const feito2 = encaminhamentos.length > 0 || concluido;
+  const feito3 = concluido;
   const opcoesStatus = Object.keys(FIN_STATUS_META).filter((k) => k !== item.status && k !== "pendencia");
   function executar(chave, args) {
     const res = onExecutar(item.id, chave, args);
@@ -26833,8 +26839,8 @@ function FinDetalheView({ item, currentUser, onBack, onExecutar, onExcluir, onVi
           // Etapa 1 — anexar resposta
           finEl(
             "div",
-            { className: "fin-passo" },
-            finEl("span", { className: "fin-passo-num" }, "1"),
+            { className: "fin-passo" + (feito1 ? " fin-passo-feito" : ""), "data-feito": feito1 ? "sim" : "nao" },
+            finEl("span", { className: "fin-passo-num" }, feito1 ? finEl(CheckCircle2, { size: 15 }) : "1"),
             finEl(
               "div",
               { className: "fin-passo-corpo" },
@@ -26847,8 +26853,8 @@ function FinDetalheView({ item, currentUser, onBack, onExecutar, onExcluir, onVi
           // Etapa 2 — encaminhar ao Financeiro
           finEl(
             "div",
-            { className: "fin-passo" },
-            finEl("span", { className: "fin-passo-num" }, "2"),
+            { className: "fin-passo" + (feito2 ? " fin-passo-feito" : ""), "data-feito": feito2 ? "sim" : "nao" },
+            finEl("span", { className: "fin-passo-num" }, feito2 ? finEl(CheckCircle2, { size: 15 }) : "2"),
             finEl(
               "div",
               { className: "fin-passo-corpo" },
@@ -26870,8 +26876,8 @@ function FinDetalheView({ item, currentUser, onBack, onExecutar, onExcluir, onVi
           // Etapa 3 — status
           finEl(
             "div",
-            { className: "fin-passo" },
-            finEl("span", { className: "fin-passo-num" }, "3"),
+            { className: "fin-passo" + (feito3 ? " fin-passo-feito" : ""), "data-feito": feito3 ? "sim" : "nao" },
+            finEl("span", { className: "fin-passo-num" }, feito3 ? finEl(CheckCircle2, { size: 15 }) : "3"),
             finEl(
               "div",
               { className: "fin-passo-corpo" },
@@ -28409,6 +28415,7 @@ function GrupoprimaPortal() {
         .fin-cell-email { max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .fin-dados-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 24px; }
         .fin-dados-compacto { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--cinza-frio); }
+        .fin-detalhe-topo .fin-dados-compacto { border-top: 1px solid var(--cinza-frio); }
         .fin-dados-compacto .fin-dados-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 11px 20px; }
         .fin-dados-compacto .fin-dado-valor { font-size: 12.5px; }
         .fin-dados-compacto .fin-dado-rotulo { font-size: 10px; }
@@ -28426,12 +28433,18 @@ function GrupoprimaPortal() {
         .fin-status-select { border: 1px solid var(--cinza-frio); border-radius: 7px; background: var(--card-bg); color: var(--texto); padding: 7px 10px; font-size: 11.5px; font-weight: 700; }
         .fin-detalhe-topo { display: grid; grid-template-columns: minmax(0, 1fr) 390px; gap: 18px; align-items: stretch; margin-bottom: 0; }
         .fin-detalhe-topo .company-header { margin-bottom: 0; }
-        .fin-passos { background: var(--card-bg); border: 1px solid var(--cinza-frio); border-radius: 12px; padding: 18px 18px 16px; display: flex; flex-direction: column; }
+        .fin-detalhe-topo .company-header { display: flex; flex-direction: column; }
+        .fin-detalhe-topo .fin-dados-compacto { flex: 1; display: flex; align-items: center; margin-top: 16px; padding-top: 0; }
+        .fin-detalhe-topo .fin-dados-compacto .fin-dados-grid { width: 100%; }
+        .fin-passos { background: var(--card-bg); border: 1px solid var(--cinza-frio); border-radius: 12px; padding: 16px 16px 14px; display: flex; flex-direction: column; }
         .fin-passos h3 { margin: 0; font-size: 15px; }
         .fin-passos-sub { font-size: 11.5px; color: var(--carvao); margin: 3px 0 12px; }
-        .fin-passos-lista { display: flex; flex-direction: column; gap: 9px; }
-        .fin-passo { display: grid; grid-template-columns: 26px minmax(0, 1fr); column-gap: 10px; row-gap: 8px; align-items: start; border: 1.5px solid #1FA85A; border-radius: 10px; padding: 10px 12px; background: transparent; }
+        .fin-passos-lista { display: flex; flex-direction: column; gap: 8px; }
+        .fin-passo { display: grid; grid-template-columns: 26px minmax(0, 1fr); column-gap: 10px; row-gap: 8px; align-items: start; border: 1.5px solid #1FA85A; border-radius: 10px; padding: 9px 12px; background: transparent; }
         .fin-passo-num { grid-row: 1; width: 24px; height: 24px; border-radius: 50%; background: #1FA85A; color: #fff; font-weight: 800; font-size: 12px; display: inline-flex; align-items: center; justify-content: center; }
+        .fin-passo-feito { border-color: var(--cinza-frio); background: transparent; }
+        .fin-passo-feito .fin-passo-titulo { color: var(--carvao); }
+        .fin-passo-feito .fin-passo-num { background: transparent; color: #1FA85A; border: 1.5px solid #1FA85A; }
         .fin-passo-corpo { min-width: 0; }
         .fin-passo-titulo { font-weight: 800; font-size: 13px; color: var(--texto); }
         .fin-passo-dica { font-size: 11px; color: var(--carvao); margin-top: 2px; line-height: 1.4; }
