@@ -2532,6 +2532,7 @@ function garantirExtensaoArquivo(filename, mimeType) {
       // encaminhar, pendência, baixar modelo) / administrar (editar, status livre,
       // excluir, atualizar o modelo). "Consulta" = perfil "usuario".
       informacoesFinanceiras: true,
+      viagensDespesas: true,
       financeiroOperar: true,
       financeiroAdmin: true,
       auditoria: true,
@@ -2554,6 +2555,7 @@ function garantirExtensaoArquivo(filename, mimeType) {
       homologacoes: true,
       homologacoesInterno: false,
       informacoesFinanceiras: true,
+      viagensDespesas: true,
       financeiroOperar: true,
       financeiroAdmin: false,
       auditoria: false,
@@ -2576,6 +2578,7 @@ function garantirExtensaoArquivo(filename, mimeType) {
       homologacoes: false,
       homologacoesInterno: false,
       informacoesFinanceiras: true,
+      viagensDespesas: true,
       financeiroOperar: false,
       financeiroAdmin: false,
       auditoria: false,
@@ -27462,6 +27465,1249 @@ function FinanceiroView({ currentUser, onNotify, onView }) {
   );
 }
 /* FIN_BLOCK_END */
+const Plane = (p) =>
+  /*#__PURE__*/ React.createElement(
+    Icon,
+    p,
+    /*#__PURE__*/ React.createElement("path", { d: "M17.8 19.2 16 11l3.5-3.5C21 6 21.5 4 21 3c-1-.5-3 0-4.5 1.5L13 8 4.8 6.2c-.5-.1-.9.1-1.1.5l-.3.5c-.2.5-.1 1 .3 1.3L9 12l-2 3H4l-1 1 3 2 2 3 1-1v-3l3-2 3.5 5.3c.3.4.8.5 1.3.3l.5-.2c.4-.3.6-.7.5-1.2z" }),
+  );
+/* VG_BLOCK_START */
+/* =========================================================================
+   VIAGENS E DESPESAS (2026-10) — módulo do portal que substitui o
+   Google Forms + planilha de adiantamento e prestação de contas de viagem.
+   UMA VIAGEM = UM REGISTRO, do pedido do consultor ao documento final.
+
+   SEGURANÇA — LEIA ANTES DE MEXER:
+   - Este arquivo NÃO decide nada sobre quem pode ver ou fazer o quê. Toda
+     regra (perfis, status, cálculos, permissão por viagem) mora no servidor
+     (viagens-core.js / viagens.js no Cloud Run). Aqui só se desenha a tela
+     com o que o servidor devolveu — esconder um botão aqui nunca é
+     proteção; o servidor recusa mesmo que alguém chame a API na mão.
+   - O login é o do Firebase Authentication (e-mail + senha individuais). O
+     navegador guarda só o token do próprio Firebase; o servidor o valida a
+     cada chamada (header Authorization). Não existe senha, usuário ou
+     "perfil" salvo aqui — nada em localStorage serve para autorizar algo.
+   - A "Web API key" do Firebase abaixo NÃO é segredo (é um identificador
+     público do projeto, exposto em qualquer site que use Firebase). Chaves
+     secretas (Resend, conta de serviço) existem só no servidor.
+   - Valores, comprovantes e dados pessoais NUNCA são gravados no GitHub nem
+     nesta página: ficam no Firestore e no bucket privado, via API.
+   ========================================================================= */
+const VG_FIREBASE_API_KEY = "COLE_AQUI_A_WEB_API_KEY_DO_FIREBASE";
+const VG_FIREBASE_CONFIGURADO = !!VG_FIREBASE_API_KEY && !VG_FIREBASE_API_KEY.startsWith("COLE_AQUI");
+/** Link do processo antigo (Google Forms), mantido em paralelo durante a transição. Deixe "" para ocultar. */
+const VG_PROCESSO_ANTIGO_URL = "";
+const VG_API = DRIVE_PROXY_URL + "/api/viagens";
+const VG_SESSION_KEY = "vg_refresh_v1";
+const vgEl = React.createElement;
+
+const VG_STATUS_META = {
+  rascunho: { label: "Rascunho", className: "status-cancelada" },
+  aguardando_aprovacao: { label: "Aguardando aprovação do gestor", className: "status-proximo" },
+  devolvida: { label: "Devolvida para ajuste", className: "status-vencido" },
+  reprovada: { label: "Reprovada", className: "status-vencido" },
+  cancelada: { label: "Cancelada", className: "status-cancelada" },
+  aprovada: { label: "Aprovada", className: "status-ok" },
+  adiantamento_solicitado: { label: "Adiantamento solicitado", className: "status-andamento" },
+  adiantamento_liberado: { label: "Adiantamento liberado", className: "status-ok" },
+  viagem_em_andamento: { label: "Viagem em andamento", className: "status-andamento" },
+  aguardando_prestacao: { label: "Aguardando prestação", className: "status-proximo" },
+  prestacao_em_analise: { label: "Prestação em análise", className: "status-conferencia" },
+  ajuste_solicitado: { label: "Ajuste solicitado", className: "status-vencido" },
+  finalizada: { label: "Finalizada", className: "status-ok" },
+};
+const VG_PERFIL_LABEL = { consultor: "Consultor", administrador: "Gestor / Administrador", financeiro: "Financeiro" };
+const VG_STATUS_PRESTACAO = ["viagem_em_andamento", "aguardando_prestacao", "ajuste_solicitado", "prestacao_em_analise", "finalizada"];
+const VG_ACAO_ROTULO = {
+  salvar_rascunho: "Rascunho salvo", criar: "Viagem criada", enviar: "Enviada para aprovação", cancelar: "Cancelada", aprovar: "Aprovada",
+  devolver: "Devolvida para ajuste", reprovar: "Reprovada", registrar_adiantamento: "Adiantamento registrado",
+  salvar_prestacao: "Prestação salva", enviar_prestacao: "Prestação enviada", aprovar_prestacao: "Prestação aprovada",
+  solicitar_ajuste: "Ajuste solicitado", registrar_acerto: "Acerto financeiro registrado", sincronizar_data: "Atualização automática",
+  anexar: "Anexo enviado", remover_anexo: "Anexo removido",
+};
+
+/* ---------- formatação / conversão (apenas exibição e entrada de dados) ---------- */
+function vgBRL(centavos) {
+  const n = Number(centavos || 0) / 100;
+  return n.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+}
+/** "1.234,56" | "1234,56" | "1234.56" | "R$ 10" → centavos inteiros; null se inválido/negativo. */
+function vgParseMoney(texto) {
+  let t = String(texto === undefined || texto === null ? "" : texto).replace(/R\$|\s/g, "");
+  if (t === "") return 0;
+  if (t.includes(",")) t = t.replace(/\./g, "").replace(",", ".");
+  else if (/^\d{1,3}(\.\d{3})+$/.test(t)) t = t.replace(/\./g, "");
+  if (!/^\d+(\.\d{1,2})?$/.test(t)) return null;
+  const c = Math.round(parseFloat(t) * 100);
+  return Number.isFinite(c) && c >= 0 && c <= 100000000000 ? c : null;
+}
+function vgMoneyInput(centavos) {
+  if (!centavos) return "";
+  return (centavos / 100).toFixed(2).replace(".", ",");
+}
+function vgDataBR(iso) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso || "");
+  return m ? `${m[3]}/${m[2]}/${m[1]}` : "";
+}
+function vgDataHoraBR(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+function vgDias(saida, retorno) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(saida || "") || !/^\d{4}-\d{2}-\d{2}$/.test(retorno || "")) return 0;
+  const d = Math.round((Date.parse(retorno + "T00:00:00Z") - Date.parse(saida + "T00:00:00Z")) / 86400000) + 1;
+  return d > 0 ? d : 0;
+}
+function vgPeriodo(v) {
+  return v.dataSaida && v.dataRetorno ? `${vgDataBR(v.dataSaida)} a ${vgDataBR(v.dataRetorno)}` : "—";
+}
+function vgDestino(v) {
+  return v.destinoCidade ? `${v.destinoCidade}${v.destinoUF ? "/" + v.destinoUF : ""}` : "—";
+}
+function vgIdLocal(prefixo) {
+  return prefixo + Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
+}
+/** Mesma conta que o servidor faz — usada só para mostrar o total enquanto a pessoa digita. */
+function vgCalcTotais(estimado, itens, adiantamentoRecebido) {
+  const realizado = (itens || []).reduce((s, i) => s + (i.valorRealizado || 0), 0);
+  const adi = adiantamentoRecebido || 0;
+  const diff = adi - realizado;
+  return { estimado: estimado || 0, realizado, adiantamentoRecebido: adi, saldoDevolver: diff > 0 ? diff : 0, reembolsar: diff < 0 ? -diff : 0 };
+}
+function VgStatusBadge({ status, label }) {
+  const meta = VG_STATUS_META[status] || { label: label || status, className: "status-ok" };
+  return vgEl("span", { className: "status-badge " + meta.className }, meta.label);
+}
+function vgLerArquivoBase64(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result).split(",")[1] || "");
+    r.onerror = () => reject(new Error("Não foi possível ler o arquivo."));
+    r.readAsDataURL(file);
+  });
+}
+function vgMimeDoArquivo(file) {
+  const nome = (file.name || "").toLowerCase();
+  if (file.type) return file.type === "image/jpg" ? "image/jpeg" : file.type;
+  if (nome.endsWith(".pdf")) return "application/pdf";
+  if (nome.endsWith(".png")) return "image/png";
+  if (nome.endsWith(".jpg") || nome.endsWith(".jpeg")) return "image/jpeg";
+  return "";
+}
+
+/* ---------- sessão e chamadas à API ---------- */
+class VgErro extends Error {
+  constructor(status, message, detalhes) {
+    super(message);
+    this.status = status;
+    this.detalhes = detalhes || null;
+  }
+}
+let vgSessao = { idToken: null, expira: 0, refreshToken: null };
+function vgGuardarRefresh(rt) {
+  try {
+    if (rt) sessionStorage.setItem(VG_SESSION_KEY, rt);
+    else sessionStorage.removeItem(VG_SESSION_KEY);
+  } catch (e) {}
+}
+function vgTemSessao() {
+  return !!vgSessao.refreshToken;
+}
+function vgSair() {
+  vgSessao = { idToken: null, expira: 0, refreshToken: null };
+  vgGuardarRefresh(null);
+}
+const VG_ERROS_FIREBASE = {
+  EMAIL_NOT_FOUND: "E-mail ou senha incorretos.",
+  INVALID_PASSWORD: "E-mail ou senha incorretos.",
+  INVALID_LOGIN_CREDENTIALS: "E-mail ou senha incorretos.",
+  INVALID_EMAIL: "Informe um e-mail válido.",
+  USER_DISABLED: "Este acesso está desativado. Fale com o administrador.",
+  TOO_MANY_ATTEMPTS_TRY_LATER: "Muitas tentativas. Aguarde alguns minutos e tente novamente.",
+  MISSING_PASSWORD: "Informe a senha.",
+};
+async function vgFirebasePost(url, corpo, tipo) {
+  let r;
+  try {
+    r = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": tipo === "form" ? "application/x-www-form-urlencoded" : "application/json" },
+      body: tipo === "form" ? new URLSearchParams(corpo).toString() : JSON.stringify(corpo),
+    });
+  } catch (e) {
+    throw new VgErro(0, "Sem conexão. Verifique sua internet e tente novamente.");
+  }
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const cod = String((j && j.error && j.error.message) || "").split(" ")[0];
+    throw new VgErro(r.status, VG_ERROS_FIREBASE[cod] || "Não foi possível entrar agora. Tente novamente.");
+  }
+  return j;
+}
+async function vgLogin(email, senha) {
+  if (!VG_FIREBASE_CONFIGURADO) throw new VgErro(0, "O módulo ainda não foi configurado.");
+  const j = await vgFirebasePost(
+    `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${VG_FIREBASE_API_KEY}`,
+    { email: String(email || "").trim(), password: senha, returnSecureToken: true },
+  );
+  vgSessao = { idToken: j.idToken, expira: Date.now() + Number(j.expiresIn || 3600) * 1000, refreshToken: j.refreshToken };
+  vgGuardarRefresh(j.refreshToken);
+}
+async function vgRenovar() {
+  if (!vgSessao.refreshToken) throw new VgErro(401, "Entre novamente.");
+  try {
+    const j = await vgFirebasePost(
+      `https://securetoken.googleapis.com/v1/token?key=${VG_FIREBASE_API_KEY}`,
+      { grant_type: "refresh_token", refresh_token: vgSessao.refreshToken },
+      "form",
+    );
+    vgSessao = { idToken: j.id_token, expira: Date.now() + Number(j.expires_in || 3600) * 1000, refreshToken: j.refresh_token || vgSessao.refreshToken };
+    vgGuardarRefresh(vgSessao.refreshToken);
+  } catch (e) {
+    if (e.status !== 0) vgSair();
+    throw new VgErro(e.status === 0 ? 0 : 401, e.status === 0 ? e.message : "Sua sessão expirou. Entre novamente.");
+  }
+}
+async function vgRestaurarSessao() {
+  let rt = null;
+  try {
+    rt = sessionStorage.getItem(VG_SESSION_KEY);
+  } catch (e) {}
+  if (!rt || !VG_FIREBASE_CONFIGURADO) return false;
+  vgSessao = { idToken: null, expira: 0, refreshToken: rt };
+  try {
+    await vgRenovar();
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+async function vgEsqueciSenha(email) {
+  if (!VG_FIREBASE_CONFIGURADO) throw new VgErro(0, "O módulo ainda não foi configurado.");
+  await vgFirebasePost(`https://identitytoolkit.googleapis.com/v1/accounts:sendOobCode?key=${VG_FIREBASE_API_KEY}`, { requestType: "PASSWORD_RESET", email: String(email || "").trim() });
+}
+/** Chamada autenticada. `blob: true` devolve { blob, tipo, nome } (comprovantes/PDF/Excel). */
+async function vgApi(metodo, caminho, { corpo, blob } = {}, tentativa = 0) {
+  if (!vgTemSessao()) throw new VgErro(401, "Entre no módulo para continuar.");
+  if (!vgSessao.idToken || Date.now() > vgSessao.expira - 60000) await vgRenovar();
+  let r;
+  try {
+    r = await fetch(VG_API + caminho, {
+      method: metodo,
+      headers: { Authorization: "Bearer " + vgSessao.idToken, ...(corpo !== undefined ? { "Content-Type": "application/json" } : {}) },
+      body: corpo !== undefined ? JSON.stringify(corpo) : undefined,
+    });
+  } catch (e) {
+    throw new VgErro(0, "Sem conexão com o servidor. Tente novamente.");
+  }
+  if (r.status === 401 && tentativa === 0) {
+    await vgRenovar();
+    return vgApi(metodo, caminho, { corpo, blob }, 1);
+  }
+  if (!r.ok) {
+    const j = await r.json().catch(() => ({}));
+    throw new VgErro(r.status, (j && j.erro) || "Não foi possível concluir a operação agora.", j && j.erros);
+  }
+  if (blob) {
+    const cd = r.headers.get("Content-Disposition") || "";
+    const m = /filename\*=UTF-8''([^;]+)|filename="?([^";]+)"?/i.exec(cd);
+    return { blob: await r.blob(), tipo: r.headers.get("Content-Type") || "", nome: m ? decodeURIComponent(m[1] || m[2]) : "arquivo" };
+  }
+  return r.json();
+}
+function vgQuery(obj) {
+  const p = Object.entries(obj || {}).filter(([, v]) => v !== "" && v !== null && v !== undefined);
+  return p.length ? "?" + p.map(([k, v]) => encodeURIComponent(k) + "=" + encodeURIComponent(v)).join("&") : "";
+}
+async function vgBaixarBlob(caminho, nomeFallback, onNotify) {
+  try {
+    const { blob, nome } = await vgApi("GET", caminho, { blob: true });
+    await entregaArquivo(blob, nome || nomeFallback);
+  } catch (e) {
+    onNotify?.(e.message || "Não foi possível baixar agora.", "error");
+  }
+}
+async function vgVerAnexo(viagemId, anexo, { onView, onNotify }) {
+  try {
+    const { blob, tipo } = await vgApi("GET", `/viagens/${encodeURIComponent(viagemId)}/anexos/${encodeURIComponent(anexo.id)}`, { blob: true });
+    const mime = anexo.mime || tipo;
+    const kind = mime === "application/pdf" ? "pdf" : mime.startsWith("image/") ? "image" : null;
+    if (!kind) return vgBaixarBlob(`/viagens/${encodeURIComponent(viagemId)}/anexos/${encodeURIComponent(anexo.id)}?download=1`, anexo.nome, onNotify);
+    const bytes = await blob.arrayBuffer();
+    onView?.({
+      url: URL.createObjectURL(blob),
+      doc: { tipo: anexo.nome, arquivo: { mimeType: mime } },
+      company: null,
+      mimeType: mime,
+      bytes,
+      kind,
+      onDownload: () => vgBaixarBlob(`/viagens/${encodeURIComponent(viagemId)}/anexos/${encodeURIComponent(anexo.id)}?download=1`, anexo.nome, onNotify),
+    });
+  } catch (e) {
+    onNotify?.(e.message || "Não foi possível abrir o arquivo.", "error");
+  }
+}
+
+/* ---------- formulário da solicitação (funções puras, testadas) ---------- */
+function vgFormVazio() {
+  return {
+    motivo: "", cliente: "", destinoCidade: "", destinoUF: "", dataSaida: "", dataRetorno: "", roteiro: "", observacoes: "",
+    orcamento: [{ id: vgIdLocal("o"), categoria: "", descricao: "", valor: "", observacao: "" }],
+    adiantamento: "", saldoAnterior: "",
+  };
+}
+function vgFormDaViagem(v) {
+  if (!v) return vgFormVazio();
+  const f = {
+    motivo: v.motivo || "", cliente: v.cliente || "", destinoCidade: v.destinoCidade || "", destinoUF: v.destinoUF || "",
+    dataSaida: v.dataSaida || "", dataRetorno: v.dataRetorno || "", roteiro: v.roteiro || "", observacoes: v.observacoes || "",
+    orcamento: (v.orcamento || []).map((o) => ({ id: o.id, categoria: o.categoria, descricao: o.descricao || "", valor: vgMoneyInput(o.valorEstimado), observacao: o.observacao || "" })),
+    adiantamento: vgMoneyInput(v.adiantamentoSolicitado), saldoAnterior: vgMoneyInput(v.saldoAnterior),
+  };
+  if (!f.orcamento.length) f.orcamento = vgFormVazio().orcamento;
+  return f;
+}
+function vgTotalOrcamento(form) {
+  return (form.orcamento || []).reduce((s, o) => s + (vgParseMoney(o.valor) || 0), 0);
+}
+/** Converte o formulário (textos) no payload que o servidor espera (centavos). */
+function vgFormParaPayload(form) {
+  const orc = [];
+  for (let i = 0; i < form.orcamento.length; i++) {
+    const o = form.orcamento[i];
+    const vazia = !o.categoria && !o.descricao && !o.valor && !o.observacao;
+    if (vazia) continue;
+    const valor = vgParseMoney(o.valor);
+    if (valor === null) return { ok: false, erro: `Orçamento, item ${i + 1}: valor inválido.` };
+    orc.push({ id: o.id, categoria: o.categoria, descricao: o.descricao, valorEstimado: valor, observacao: o.observacao });
+  }
+  const adi = vgParseMoney(form.adiantamento);
+  if (adi === null) return { ok: false, erro: "Valor de adiantamento inválido." };
+  const sal = vgParseMoney(form.saldoAnterior);
+  if (sal === null) return { ok: false, erro: "Saldo anterior inválido." };
+  return {
+    ok: true,
+    dados: {
+      motivo: form.motivo, cliente: form.cliente, destinoCidade: form.destinoCidade, destinoUF: form.destinoUF,
+      dataSaida: form.dataSaida, dataRetorno: form.dataRetorno, roteiro: form.roteiro, observacoes: form.observacoes,
+      orcamento: orc, adiantamentoSolicitado: adi, saldoAnterior: sal,
+    },
+  };
+}
+/** Validação amigável por etapa (o servidor valida tudo de novo). */
+function vgValidarPasso(passo, form) {
+  if (passo >= 1) {
+    if (String(form.motivo).trim().length < 3) return "Informe o motivo da viagem.";
+    if (!String(form.cliente).trim()) return "Informe o cliente ou projeto.";
+    if (!String(form.destinoCidade).trim()) return "Informe a cidade de destino.";
+    if (!form.destinoUF) return "Escolha a UF de destino.";
+    if (!form.dataSaida) return "Informe a data de saída.";
+    if (!form.dataRetorno) return "Informe a data de retorno.";
+    if (form.dataRetorno < form.dataSaida) return "A data de retorno não pode ser anterior à saída.";
+  }
+  if (passo >= 2) {
+    const itens = form.orcamento.filter((o) => o.categoria || o.descricao || o.valor);
+    if (!itens.length) return "Inclua ao menos um item no orçamento.";
+    for (let i = 0; i < itens.length; i++) {
+      if (!itens[i].categoria) return `Orçamento, item ${i + 1}: escolha a categoria.`;
+      const v = vgParseMoney(itens[i].valor);
+      if (v === null) return `Orçamento, item ${i + 1}: valor inválido.`;
+      if (v <= 0) return `Orçamento, item ${i + 1}: informe o valor estimado.`;
+    }
+  }
+  if (passo >= 3) {
+    const adi = vgParseMoney(form.adiantamento);
+    if (adi === null) return "Valor de adiantamento inválido.";
+    if (vgParseMoney(form.saldoAnterior) === null) return "Saldo anterior inválido.";
+    if (adi > vgTotalOrcamento(form)) return "O adiantamento não pode ser maior que o total estimado.";
+  }
+  return null;
+}
+
+/* ---------- componentes básicos ---------- */
+function VgMoneyInput({ value, onChange, placeholder, disabled, ...resto }) {
+  return vgEl("input", {
+    type: "text", inputMode: "decimal", className: "vg-input-money", value, disabled, autoComplete: "off",
+    placeholder: placeholder || "0,00",
+    onChange: (e) => onChange(e.target.value.replace(/[^\d.,]/g, "")),
+    onBlur: () => { const c = vgParseMoney(value); if (c !== null && value !== "") onChange(vgMoneyInput(c)); },
+    ...resto,
+  });
+}
+function VgAcaoModal({ titulo, subtitulo, icon, rotuloOk, motivo, motivoObrigatorio, motivoRotulo, valor, valorRotulo, valorInicial, onConfirmar, onClose, aviso }) {
+  const [texto, setTexto] = useState("");
+  const [dinheiro, setDinheiro] = useState(valorInicial ? vgMoneyInput(valorInicial) : "");
+  const [erro, setErro] = useState(null);
+  const [ocupado, setOcupado] = useState(false);
+  async function enviar(e) {
+    e.preventDefault();
+    if (ocupado) return;
+    if (motivo && motivoObrigatorio && texto.trim().length < 3) return setErro("Informe o motivo.");
+    let cents;
+    if (valor) {
+      cents = vgParseMoney(dinheiro);
+      if (cents === null || cents <= 0) return setErro("Informe um valor válido.");
+    }
+    setErro(null);
+    setOcupado(true);
+    try {
+      await onConfirmar({ motivo: texto.trim(), observacao: texto.trim(), valor: cents });
+    } catch (err) {
+      setErro(err.message || "Não foi possível concluir.");
+      setOcupado(false);
+    }
+  }
+  return vgEl(
+    FinModal,
+    { titulo, subtitulo, icon, onClose },
+    vgEl(
+      "form",
+      { onSubmit: enviar },
+      vgEl(FinErro, { erro }),
+      aviso && vgEl("p", { className: "homolog-bases-hint" }, aviso),
+      valor && vgEl(FinCampo, { rotulo: valorRotulo || "Valor" }, vgEl(VgMoneyInput, { value: dinheiro, onChange: setDinheiro })),
+      motivo && vgEl(FinCampo, { rotulo: motivoRotulo || "Motivo", dica: motivoObrigatorio ? " (obrigatório)" : " (opcional)" }, vgEl("textarea", { value: texto, onChange: (e) => setTexto(e.target.value), autoFocus: true, maxLength: 1000 })),
+      vgEl(FinAcoesForm, { onCancel: onClose, ocupado, rotuloOk, rotuloOcupado: "Enviando..." }),
+    ),
+  );
+}
+function VgAnexos({ viagemId, tipo, itemId, anexos, editavel, onAnexado, onRemovido, onView, onNotify, antesDeAnexar, compacto }) {
+  const [enviando, setEnviando] = useState(false);
+  const inputRef = useRef(null);
+  const lista = (anexos || []).filter((a) => a.tipo === tipo && (a.itemId || null) === (itemId || null));
+  async function escolher(e) {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    const mime = vgMimeDoArquivo(file);
+    if (!["application/pdf", "image/jpeg", "image/png"].includes(mime)) return onNotify?.("Formato não permitido. Envie PDF, JPG, JPEG ou PNG.", "error");
+    if (file.size > 8 * 1024 * 1024) return onNotify?.("Arquivo muito grande (máximo 8 MB).", "error");
+    setEnviando(true);
+    try {
+      if (antesDeAnexar) await antesDeAnexar();
+      const conteudoBase64 = await vgLerArquivoBase64(file);
+      const r = await vgApi("POST", `/viagens/${encodeURIComponent(viagemId)}/anexos`, { corpo: { tipo, itemId: itemId || undefined, nome: file.name, mime, conteudoBase64 } });
+      onAnexado?.(r.anexo);
+    } catch (err) {
+      onNotify?.(err.message || "Não foi possível enviar o arquivo.", "error");
+    }
+    setEnviando(false);
+  }
+  async function remover(a) {
+    try {
+      await vgApi("DELETE", `/viagens/${encodeURIComponent(viagemId)}/anexos/${encodeURIComponent(a.id)}`);
+      onRemovido?.(a);
+    } catch (err) {
+      onNotify?.(err.message || "Não foi possível remover.", "error");
+    }
+  }
+  return vgEl(
+    "div",
+    { className: "vg-anexos" + (compacto ? " vg-anexos-compacto" : "") },
+    lista.map((a) =>
+      vgEl(
+        "div",
+        { key: a.id, className: "vg-anexo" },
+        vgEl("button", { type: "button", className: "vg-anexo-nome", title: a.nome, onClick: () => vgVerAnexo(viagemId, a, { onView, onNotify }) }, vgEl(FileText, { size: 13 }), " ", a.nome),
+        editavel && vgEl("button", { type: "button", className: "vg-anexo-x", "aria-label": "Remover " + a.nome, onClick: () => remover(a) }, vgEl(X, { size: 12 })),
+      ),
+    ),
+    editavel &&
+      vgEl(
+        "label",
+        { className: "mini-download-btn vg-anexar" + (enviando ? " vg-desabilitado" : "") },
+        vgEl(UploadCloud, { size: 13 }),
+        enviando ? " Enviando..." : lista.length ? " Anexar outro" : " Anexar arquivo",
+        vgEl("input", { ref: inputRef, type: "file", accept: ".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png", onChange: escolher, disabled: enviando, hidden: true }),
+      ),
+    !editavel && lista.length === 0 && vgEl("span", { className: "vg-vazio" }, "—"),
+  );
+}
+
+/* ---------- entrada (login) e estados do módulo ---------- */
+function VgLogin({ onEntrou, processoAntigo, emailInicial }) {
+  const [email, setEmail] = useState(emailInicial || "");
+  const [senha, setSenha] = useState("");
+  const [erro, setErro] = useState(null);
+  const [info, setInfo] = useState(null);
+  const [ocupado, setOcupado] = useState(false);
+  async function entrar(e) {
+    e.preventDefault();
+    if (ocupado) return;
+    if (!email.trim() || !senha) return setErro("Informe e-mail e senha.");
+    setErro(null); setInfo(null); setOcupado(true);
+    try {
+      await vgLogin(email, senha);
+      await onEntrou();
+    } catch (err) {
+      setErro(err.message || "Não foi possível entrar.");
+      setOcupado(false);
+    }
+  }
+  async function esqueci() {
+    if (!email.trim()) return setErro("Digite seu e-mail acima e clique novamente em “Esqueci minha senha”.");
+    setErro(null);
+    try {
+      await vgEsqueciSenha(email);
+      setInfo("Se este e-mail estiver cadastrado, enviamos um link para criar uma nova senha.");
+    } catch (err) {
+      setInfo("Se este e-mail estiver cadastrado, enviamos um link para criar uma nova senha.");
+    }
+  }
+  return vgEl(
+    "div",
+    { className: "vg-login-wrap" },
+    vgEl(
+      "form",
+      { className: "vg-login-card", onSubmit: entrar, "data-testid": "vg-login" },
+      vgEl("div", { className: "vg-login-icon" }, vgEl(Lock, { size: 20 })),
+      vgEl("h2", null, "Acesso ao módulo Viagens e Despesas"),
+      vgEl("p", { className: "vg-muted" }, "Este módulo tem acesso individual. Entre com o e-mail corporativo e a senha cadastrados pelo administrador."),
+      vgEl(FinErro, { erro }),
+      info && vgEl("div", { className: "vg-info" }, info),
+      vgEl(FinCampo, { rotulo: "E-mail corporativo" }, vgEl("input", { type: "email", value: email, onChange: (e) => setEmail(e.target.value), autoComplete: "username", autoFocus: true })),
+      vgEl(FinCampo, { rotulo: "Senha" }, vgEl("input", { type: "password", value: senha, onChange: (e) => setSenha(e.target.value), autoComplete: "current-password" })),
+      vgEl("button", { type: "submit", className: "doc-download-btn vg-btn-block", disabled: ocupado }, ocupado ? "Entrando..." : "Entrar"),
+      vgEl("button", { type: "button", className: "link-btn vg-esqueci", onClick: esqueci }, "Esqueci minha senha"),
+      processoAntigo && vgEl("a", { className: "vg-antigo", href: processoAntigo, target: "_blank", rel: "noopener noreferrer" }, "Precisa usar o processo antigo (Google Forms)? Clique aqui."),
+    ),
+  );
+}
+function VgNaoConfigurado() {
+  return vgEl(
+    "div",
+    { className: "vg-setup", "data-testid": "vg-setup" },
+    vgEl(AlertTriangle, { size: 20 }),
+    vgEl("h2", null, "Módulo ainda não configurado"),
+    vgEl("p", null, "O módulo Viagens e Despesas já está instalado no portal, mas ainda falta ligar o login do Firebase. Nada é simulado: enquanto isso, a tela não permite entrar nem registrar viagens."),
+    vgEl("p", { className: "vg-muted" }, "Siga o passo a passo do arquivo LEIA-ME-VIAGENS.md (Firebase Authentication → copiar a “Web API key” para a constante VG_FIREBASE_API_KEY → publicar o portal)."),
+  );
+}
+
+/* ---------- Lista / painel ---------- */
+const VG_GRUPOS = {
+  emAnalise: { label: "Em análise", status: ["aguardando_aprovacao"], icon: Clock },
+  aprovadas: { label: "Aprovadas", status: ["aprovada", "adiantamento_solicitado", "adiantamento_liberado"], icon: CheckCircle2 },
+  emAndamento: { label: "Em andamento", status: ["viagem_em_andamento"], icon: MapPin },
+  prestacoesPendentes: { label: "Prestações pendentes", status: ["aguardando_prestacao", "ajuste_solicitado"], icon: AlertTriangle },
+  prestacoesEnviadas: { label: "Prestações enviadas", status: ["prestacao_em_analise"], icon: Send },
+  concluidas: { label: "Concluídas", status: ["finalizada"], icon: CheckCircle2 },
+};
+function vgFiltrarLista(lista, { escopo, grupo, busca }) {
+  let l = lista;
+  if (escopo === "minhas") l = l.filter((v) => v.ehDono);
+  if (escopo === "aprovacoes") l = l.filter((v) => ["aguardando_aprovacao", "prestacao_em_analise"].includes(v.status));
+  if (grupo && VG_GRUPOS[grupo]) l = l.filter((v) => VG_GRUPOS[grupo].status.includes(v.status));
+  const q = String(busca || "").trim().toLowerCase();
+  if (q) l = l.filter((v) => `${v.consultorNome} ${v.cliente} ${v.destinoCidade} ${v.destinoUF} ${v.motivo}`.toLowerCase().includes(q));
+  return l;
+}
+function VgLista({ me, escopo, onAbrir, onNova, onNotify, refreshKey, usuarios }) {
+  const admin = me.perfil === "administrador";
+  const [lista, setLista] = useState(null);
+  const [resumo, setResumo] = useState(null);
+  const [grupo, setGrupo] = useState(null);
+  const [busca, setBusca] = useState("");
+  const [fConsultor, setFConsultor] = useState("");
+  const [fDestino, setFDestino] = useState("");
+  const [fDe, setFDe] = useState("");
+  const [fAte, setFAte] = useState("");
+  const [fStatus, setFStatus] = useState("");
+  const [erro, setErro] = useState(null);
+  const [modal, setModal] = useState(null);
+  const [tick, setTick] = useState(0);
+  const filtrosServidor = { consultorId: admin ? fConsultor : "", destino: fDestino, de: fDe, ate: fAte, status: fStatus };
+  const chave = JSON.stringify(filtrosServidor);
+  useEffect(() => {
+    let vivo = true;
+    const t = setTimeout(() => {
+      Promise.all([vgApi("GET", "/viagens" + vgQuery(filtrosServidor)), vgApi("GET", "/painel" + vgQuery(filtrosServidor))])
+        .then(([a, b]) => { if (vivo) { setLista(a.viagens); setResumo(b.resumo); setErro(null); } })
+        .catch((e) => { if (vivo) setErro(e.message); });
+    }, 200);
+    return () => { vivo = false; clearTimeout(t); };
+  }, [chave, refreshKey, tick]);
+  const visiveis = lista ? vgFiltrarLista(lista, { escopo, grupo, busca }) : [];
+  const titulo = escopo === "aprovacoes" ? "Aprovações" : escopo === "minhas" ? "Minhas viagens" : admin ? "Visão geral" : me.perfil === "financeiro" ? "Viagens na etapa financeira" : "Minhas viagens";
+  const R = resumo || {};
+  const cards = admin && escopo !== "minhas"
+    ? [
+        ["emAnalise", "Aguardando aprovação", R.emAnalise], ["emAndamento", "Em andamento", R.emAndamento],
+        ["prestacoesPendentes", "Prestações pendentes", R.prestacoesPendentes], ["prestacoesEnviadas", "Prestações em análise", R.prestacoesEnviadas], ["concluidas", "Concluídas", R.concluidas],
+      ]
+    : Object.entries(VG_GRUPOS).map(([k, g]) => [k, g.label, { emAnalise: R.emAnalise, aprovadas: R.aprovadas, emAndamento: R.emAndamento, prestacoesPendentes: R.prestacoesPendentes, prestacoesEnviadas: R.prestacoesEnviadas, concluidas: R.concluidas }[k]]);
+  async function executar(v, acao, entrada) {
+    await vgApi("POST", `/viagens/${encodeURIComponent(v.id)}/acoes/${acao}`, { corpo: entrada || {} });
+    setModal(null);
+    setTick((t) => t + 1);
+    onNotify?.(VG_MSG_ACAO[acao] || "Pronto.", "info");
+  }
+  function acoesRapidas(v) {
+    const a = v.acoes || [];
+    const btns = [];
+    if (a.includes("aprovar")) btns.push(["aprovar", "Aprovar", "vg-btn-ok"]);
+    if (a.includes("devolver")) btns.push(["devolver", "Devolver para ajuste", "vg-btn-neutro"]);
+    if (a.includes("reprovar")) btns.push(["reprovar", "Reprovar", "vg-btn-perigo"]);
+    if (a.includes("aprovar_prestacao")) btns.push(["aprovar_prestacao", "Aprovar prestação", "vg-btn-ok"]);
+    if (a.includes("solicitar_ajuste")) btns.push(["solicitar_ajuste", "Solicitar ajuste", "vg-btn-neutro"]);
+    return btns;
+  }
+  function abrirModal(v, acao) {
+    const cfg = vgConfigModalAcao(v, acao);
+    if (cfg) setModal({ ...cfg, onClose: () => setModal(null), onConfirmar: (x) => executar(v, acao, x) });
+  }
+  const colunasAdmin = admin || me.perfil === "financeiro";
+  return vgEl(
+    "div",
+    { className: "vg-lista", "data-testid": "vg-lista" },
+    vgEl(
+      "div",
+      { className: "vg-toolbar" },
+      vgEl("h2", { className: "vg-h2" }, titulo),
+      vgEl(
+        "div",
+        { className: "vg-toolbar-btns" },
+        admin && escopo !== "minhas" && vgEl("button", { type: "button", className: "mini-download-btn", onClick: () => vgBaixarBlob("/exportar.xlsx" + vgQuery(filtrosServidor), "viagens-e-despesas.xlsx", onNotify) }, vgEl(Download, { size: 13 }), " Exportar Excel"),
+        me.podeCriar && escopo !== "aprovacoes" && vgEl("button", { type: "button", className: "kpi-new-homolog-btn", onClick: onNova, "data-testid": "vg-nova" }, vgEl(Plus, { size: 14 }), " Nova viagem"),
+      ),
+    ),
+    erro && vgEl("div", { className: "fin-banner" }, vgEl(AlertTriangle, { size: 15 }), " ", erro),
+    escopo !== "aprovacoes" &&
+      vgEl("div", { className: "fin-kpi-grid vg-kpis" }, cards.map(([k, label, valor]) => vgEl(KpiCard, { key: k, icon: VG_GRUPOS[k].icon, label, value: valor === undefined ? "—" : valor, tone: grupo === k ? "accent" : "default", onClick: () => setGrupo(grupo === k ? null : k) }))),
+    admin && escopo === "todas" && resumo &&
+      vgEl("div", { className: "vg-money-kpis", "data-testid": "vg-money-kpis" },
+        [["Total de viagens", resumo.total, true], ["Adiantamentos", vgBRL(resumo.totalAdiantamentos)], ["Realizado (finalizadas)", vgBRL(resumo.totalRealizado)], ["A devolver", vgBRL(resumo.totalDevolver)], ["A reembolsar", vgBRL(resumo.totalReembolsar)]]
+          .map(([l, v]) => vgEl("div", { key: l, className: "vg-money-kpi" }, vgEl("span", null, l), vgEl("strong", null, v)))),
+    vgEl(
+      "div",
+      { className: "vg-filtros" },
+      vgEl("input", { className: "vg-filtro-busca", placeholder: "Buscar por cliente, destino, motivo...", value: busca, onChange: (e) => setBusca(e.target.value) }),
+      admin && escopo !== "minhas" && vgEl("select", { value: fConsultor, onChange: (e) => setFConsultor(e.target.value), "aria-label": "Consultor" }, vgEl("option", { value: "" }, "Todos os consultores"), (usuarios || []).filter((u) => u.ativo).map((u) => vgEl("option", { key: u.uid, value: u.uid }, u.nome))),
+      vgEl("select", { value: fStatus, onChange: (e) => setFStatus(e.target.value), "aria-label": "Status" }, vgEl("option", { value: "" }, "Todos os status"), Object.entries(VG_STATUS_META).filter(([k]) => k !== "rascunho" || me.podeCriar).map(([k, m]) => vgEl("option", { key: k, value: k }, m.label))),
+      vgEl("input", { placeholder: "Destino", value: fDestino, onChange: (e) => setFDestino(e.target.value) }),
+      vgEl("label", { className: "vg-filtro-data" }, vgEl("span", null, "Saída de"), vgEl("input", { type: "date", value: fDe, onChange: (e) => setFDe(e.target.value) })),
+      vgEl("label", { className: "vg-filtro-data" }, vgEl("span", null, "até"), vgEl("input", { type: "date", value: fAte, onChange: (e) => setFAte(e.target.value) })),
+      (grupo || busca || fConsultor || fDestino || fDe || fAte || fStatus) && vgEl("button", { type: "button", className: "filters-clear-btn filters-clear-inline", onClick: () => { setGrupo(null); setBusca(""); setFConsultor(""); setFDestino(""); setFDe(""); setFAte(""); setFStatus(""); } }, "Limpar"),
+    ),
+    vgEl(
+      "div",
+      { className: "table-wrap desktop-only" },
+      vgEl(
+        "table",
+        { className: "company-table vg-table" },
+        vgEl("thead", null, vgEl("tr", null, ["Viagem", colunasAdmin && "Consultor", "Destino", "Período", escopo === "aprovacoes" ? "Valor / Adiantamento" : "Valor", "Status", "Última atualização", "Ação"].filter(Boolean).map((t) => vgEl("th", { key: t }, t)))),
+        vgEl(
+          "tbody",
+          null,
+          visiveis.map((v) =>
+            vgEl(
+              "tr",
+              { key: v.id, onClick: () => onAbrir(v.id), style: { cursor: "pointer" } },
+              vgEl("td", null, vgEl("strong", null, v.cliente || "(sem cliente)"), vgEl("div", { className: "vg-sub" }, v.motivo)),
+              colunasAdmin && vgEl("td", null, v.consultorNome),
+              vgEl("td", null, vgDestino(v)),
+              vgEl("td", { className: "mono" }, vgPeriodo(v)),
+              vgEl("td", { className: "mono" }, vgBRL(v.totalEstimado), escopo === "aprovacoes" && vgEl("div", { className: "vg-sub" }, "Adiant.: " + vgBRL(v.adiantamentoSolicitado))),
+              vgEl("td", null, vgEl(VgStatusBadge, { status: v.status, label: v.statusLabel })),
+              vgEl("td", { className: "mono" }, vgDataHoraBR(v.atualizadoEm)),
+              vgEl(
+                "td",
+                { onClick: (e) => e.stopPropagation(), className: "vg-acoes-cell" },
+                escopo === "aprovacoes" ? acoesRapidas(v).map(([a, l, c]) => vgEl("button", { key: a, type: "button", className: "vg-btn " + c, onClick: () => abrirModal(v, a) }, l)) : null,
+                vgEl("button", { type: "button", className: "link-btn", onClick: () => onAbrir(v.id) }, v.status === "rascunho" || v.status === "devolvida" ? "Continuar " : "Ver ", vgEl(ChevronRight, { size: 13 })),
+              ),
+            ),
+          ),
+        ),
+      ),
+      lista && visiveis.length === 0 && vgEl("div", { className: "empty-state" }, lista.length === 0 ? (escopo === "aprovacoes" ? "Nenhuma solicitação aguardando sua análise." : "Nenhuma viagem registrada ainda.") : "Nenhuma viagem encontrada para os filtros."),
+      !lista && !erro && vgEl("div", { className: "empty-state" }, "Carregando..."),
+    ),
+    vgEl(
+      "div",
+      { className: "company-cards mobile-only" },
+      visiveis.map((v) =>
+        vgEl(
+          "div",
+          { key: v.id, className: "company-card-mobile", onClick: () => onAbrir(v.id) },
+          vgEl("div", { className: "company-card-mobile-top" }, vgEl("span", { className: "company-mini-tag" }, vgDestino(v)), vgEl(VgStatusBadge, { status: v.status, label: v.statusLabel })),
+          colunasAdmin && vgEl("div", { className: "company-card-mobile-row" }, vgEl("span", null, "Consultor"), vgEl("span", null, v.consultorNome)),
+          vgEl("div", { className: "company-card-mobile-row" }, vgEl("span", null, "Cliente"), vgEl("span", null, v.cliente)),
+          vgEl("div", { className: "company-card-mobile-row" }, vgEl("span", null, "Período"), vgEl("span", null, vgPeriodo(v))),
+          vgEl("div", { className: "company-card-mobile-row" }, vgEl("span", null, "Valor"), vgEl("span", null, vgBRL(v.totalEstimado))),
+          escopo === "aprovacoes" && vgEl("div", { className: "vg-acoes-cell", onClick: (e) => e.stopPropagation() }, acoesRapidas(v).map(([a, l, c]) => vgEl("button", { key: a, type: "button", className: "vg-btn " + c, onClick: () => abrirModal(v, a) }, l))),
+          vgEl("div", { className: "company-card-mobile-cta" }, "Abrir ", vgEl(ChevronRight, { size: 13 })),
+        ),
+      ),
+      lista && visiveis.length === 0 && vgEl("div", { className: "empty-state" }, "Nenhuma viagem encontrada."),
+    ),
+    modal && vgEl(VgAcaoModal, modal),
+  );
+}
+
+/* ---------- Assistente de nova viagem / edição ---------- */
+const VG_PASSOS = ["Dados da viagem", "Orçamento", "Adiantamento e anexos", "Revisão e envio"];
+function VgWizard({ me, viagemId, onCancelar, onConcluido, onNotify, onView }) {
+  const [passo, setPasso] = useState(0);
+  const [form, setForm] = useState(vgFormVazio());
+  const [id, setId] = useState(viagemId || null);
+  const [anexos, setAnexos] = useState([]);
+  const [motivoDevolucao, setMotivoDevolucao] = useState("");
+  const [carregando, setCarregando] = useState(!!viagemId);
+  const [erro, setErro] = useState(null);
+  const [ocupado, setOcupado] = useState(false);
+  const [salvoEm, setSalvoEm] = useState(null);
+  useEffect(() => {
+    if (!viagemId) return;
+    let vivo = true;
+    vgApi("GET", "/viagens/" + encodeURIComponent(viagemId))
+      .then((r) => {
+        if (!vivo) return;
+        setForm(vgFormDaViagem(r.viagem));
+        setAnexos(r.anexos || []);
+        const dev = (r.aprovacoes || []).filter((a) => a.decisao === "devolvida").pop();
+        if (r.viagem.status === "devolvida" && dev) setMotivoDevolucao(dev.motivo);
+        setCarregando(false);
+      })
+      .catch((e) => { if (vivo) { setErro(e.message); setCarregando(false); } });
+    return () => { vivo = false; };
+  }, [viagemId]);
+  const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+  const setItem = (i, k, v) => setForm((f) => ({ ...f, orcamento: f.orcamento.map((o, j) => (j === i ? { ...o, [k]: v } : o)) }));
+  const total = vgTotalOrcamento(form);
+  const dias = vgDias(form.dataSaida, form.dataRetorno);
+  /** Salva o rascunho (cria na primeira vez). Devolve o id. */
+  async function salvarRascunho() {
+    const p = vgFormParaPayload(form);
+    if (!p.ok) throw new Error(p.erro);
+    if (!id) {
+      const r = await vgApi("POST", "/viagens", { corpo: p.dados });
+      setId(r.viagem.id);
+      setSalvoEm(new Date());
+      return r.viagem.id;
+    }
+    await vgApi("POST", `/viagens/${encodeURIComponent(id)}/acoes/salvar_rascunho`, { corpo: p.dados });
+    setSalvoEm(new Date());
+    return id;
+  }
+  async function proximo() {
+    const e = vgValidarPasso(passo === 0 ? 1 : passo === 1 ? 2 : 3, form);
+    if (e) return setErro(e);
+    setErro(null); setOcupado(true);
+    try {
+      await salvarRascunho();
+      setPasso((p) => Math.min(3, p + 1));
+    } catch (err) { setErro(err.message); }
+    setOcupado(false);
+  }
+  async function salvarESair() {
+    setErro(null); setOcupado(true);
+    try { await salvarRascunho(); onNotify?.("Rascunho salvo.", "info"); onConcluido(null); }
+    catch (err) { setErro(err.message); setOcupado(false); }
+  }
+  async function enviar() {
+    const e = vgValidarPasso(3, form);
+    if (e) return setErro(e);
+    const p = vgFormParaPayload(form);
+    if (!p.ok) return setErro(p.erro);
+    setErro(null); setOcupado(true);
+    try {
+      const vid = await salvarRascunho();
+      await vgApi("POST", `/viagens/${encodeURIComponent(vid)}/acoes/enviar`, { corpo: p.dados });
+      onNotify?.("Solicitação enviada para aprovação do gestor.", "info");
+      onConcluido(vid);
+    } catch (err) { setErro(err.message); setOcupado(false); }
+  }
+  if (carregando) return vgEl("div", { className: "empty-state" }, "Carregando...");
+  const campo = (rotulo, el, dica) => vgEl(FinCampo, { rotulo, dica }, el);
+  return vgEl(
+    "div",
+    { className: "vg-wizard", "data-testid": "vg-wizard" },
+    vgEl("button", { type: "button", className: "link-btn vg-voltar", onClick: onCancelar }, vgEl(ArrowLeft, { size: 14 }), " Voltar"),
+    vgEl("h2", { className: "vg-h2" }, viagemId ? "Editar solicitação de viagem" : "Nova viagem"),
+    vgEl("ol", { className: "vg-steps" }, VG_PASSOS.map((n, i) => vgEl("li", { key: n, className: "vg-step" + (i === passo ? " ativo" : i < passo ? " feito" : "") }, vgEl("span", { className: "vg-step-n" }, i < passo ? vgEl(CheckCircle2, { size: 12 }) : i + 1), vgEl("span", { className: "vg-step-t" }, n)))),
+    motivoDevolucao && vgEl("div", { className: "vg-aviso-devolucao" }, vgEl(AlertTriangle, { size: 15 }), vgEl("div", null, vgEl("strong", null, "O gestor pediu ajustes: "), motivoDevolucao)),
+    vgEl(FinErro, { erro }),
+    passo === 0 && vgEl(
+      "div",
+      { className: "vg-form-grid" },
+      campo("Motivo da viagem", vgEl("input", { value: form.motivo, onChange: (e) => set("motivo", e.target.value), maxLength: 500, placeholder: "Ex.: Implantação, visita técnica, treinamento" })),
+      campo("Cliente / projeto", vgEl("input", { value: form.cliente, onChange: (e) => set("cliente", e.target.value), maxLength: 200 })),
+      campo("Cidade de destino", vgEl("input", { value: form.destinoCidade, onChange: (e) => set("destinoCidade", e.target.value), maxLength: 120 })),
+      campo("UF", vgEl("select", { value: form.destinoUF, onChange: (e) => set("destinoUF", e.target.value) }, vgEl("option", { value: "" }, "Selecione"), (me.ufs || []).map((u) => vgEl("option", { key: u, value: u }, u)))),
+      campo("Data de saída", vgEl("input", { type: "date", value: form.dataSaida, onChange: (e) => set("dataSaida", e.target.value) })),
+      campo("Data de retorno", vgEl("input", { type: "date", value: form.dataRetorno, min: form.dataSaida || undefined, onChange: (e) => set("dataRetorno", e.target.value) })),
+      campo("Quantidade de dias", vgEl("input", { value: dias ? `${dias} dia${dias > 1 ? "s" : ""}` : "—", readOnly: true, className: "vg-readonly", "data-testid": "vg-dias" }), " (calculado)"),
+      vgEl("div", { className: "vg-span2" }, campo("Roteiro", vgEl("textarea", { value: form.roteiro, onChange: (e) => set("roteiro", e.target.value), placeholder: "Trechos, horários, deslocamentos previstos" }), " (opcional)")),
+      vgEl("div", { className: "vg-span2" }, campo("Observações", vgEl("textarea", { value: form.observacoes, onChange: (e) => set("observacoes", e.target.value) }), " (opcional)")),
+    ),
+    passo === 1 && vgEl(
+      "div",
+      null,
+      vgEl("p", { className: "vg-muted" }, "Liste o que você prevê gastar na viagem. Esse é o orçamento que o gestor vai aprovar."),
+      vgEl("div", { className: "vg-orc-head" }, ["Item", "Categoria", "Descrição", "Valor estimado", "Observação", ""].map((t, i) => vgEl("span", { key: i }, t))),
+      form.orcamento.map((o, i) =>
+        vgEl(
+          "div",
+          { key: o.id, className: "vg-orc-row", "data-testid": "vg-orc-row" },
+          vgEl("span", { className: "vg-orc-n" }, i + 1),
+          vgEl("select", { value: o.categoria, onChange: (e) => setItem(i, "categoria", e.target.value), "aria-label": "Categoria" }, vgEl("option", { value: "" }, "Categoria"), (me.categorias || []).map((c) => vgEl("option", { key: c, value: c }, c))),
+          vgEl("input", { value: o.descricao, onChange: (e) => setItem(i, "descricao", e.target.value), placeholder: "Descrição", "aria-label": "Descrição", maxLength: 300 }),
+          vgEl(VgMoneyInput, { value: o.valor, onChange: (v) => setItem(i, "valor", v), "aria-label": "Valor estimado" }),
+          vgEl("input", { value: o.observacao, onChange: (e) => setItem(i, "observacao", e.target.value), placeholder: "Observação", "aria-label": "Observação", maxLength: 500 }),
+          vgEl("button", { type: "button", className: "vg-orc-x", "aria-label": "Remover item", disabled: form.orcamento.length === 1, onClick: () => setForm((f) => ({ ...f, orcamento: f.orcamento.filter((_, j) => j !== i) })) }, vgEl(Trash2, { size: 14 })),
+        ),
+      ),
+      vgEl("button", { type: "button", className: "mini-download-btn vg-add", onClick: () => setForm((f) => ({ ...f, orcamento: [...f.orcamento, { id: vgIdLocal("o"), categoria: "", descricao: "", valor: "", observacao: "" }] })), "data-testid": "vg-add-item" }, vgEl(Plus, { size: 13 }), " Adicionar item"),
+      vgEl("div", { className: "vg-total-linha" }, vgEl("span", null, "TOTAL ESTIMADO"), vgEl("strong", { "data-testid": "vg-total" }, vgBRL(total))),
+    ),
+    passo === 2 && vgEl(
+      "div",
+      null,
+      vgEl("div", { className: "vg-form-grid" },
+        campo("Valor total estimado", vgEl("input", { value: vgBRL(total), readOnly: true, className: "vg-readonly" })),
+        campo("Adiantamento solicitado", vgEl(VgMoneyInput, { value: form.adiantamento, onChange: (v) => set("adiantamento", v) }), " (opcional — é separado do total)"),
+        campo("Saldo anterior", vgEl(VgMoneyInput, { value: form.saldoAnterior, onChange: (v) => set("saldoAnterior", v) }), " (se houver valor pendente de outra viagem)"),
+      ),
+      vgEl("h4", { className: "vg-h4" }, "Documentos do orçamento (opcional)"),
+      vgEl("p", { className: "vg-muted" }, "Anexe cotações, propostas ou outros documentos que justifiquem o orçamento. PDF, JPG ou PNG, até 8 MB cada."),
+      id
+        ? vgEl(VgAnexos, { viagemId: id, tipo: "orcamento", anexos, editavel: true, onAnexado: (a) => setAnexos((l) => [...l, a]), onRemovido: (a) => setAnexos((l) => l.filter((x) => x.id !== a.id)), onView, onNotify })
+        : vgEl("p", { className: "vg-muted" }, "Os anexos ficam disponíveis assim que o rascunho for salvo."),
+    ),
+    passo === 3 && vgEl(
+      "div",
+      { className: "vg-revisao", "data-testid": "vg-revisao" },
+      vgEl("p", { className: "vg-muted" }, "Confira os dados antes de enviar. Depois de enviada, a solicitação só pode ser alterada se o gestor devolvê-la para ajuste."),
+      vgEl("dl", { className: "vg-dl" },
+        [["Motivo", form.motivo], ["Cliente / projeto", form.cliente], ["Destino", `${form.destinoCidade}/${form.destinoUF}`], ["Período", `${vgDataBR(form.dataSaida)} a ${vgDataBR(form.dataRetorno)} (${dias} dia${dias > 1 ? "s" : ""})`], ["Total estimado", vgBRL(total)], ["Adiantamento solicitado", vgBRL(vgParseMoney(form.adiantamento) || 0)], ["Anexos do orçamento", String(anexos.filter((a) => a.tipo === "orcamento").length)]]
+          .map(([k, v]) => vgEl(React.Fragment, { key: k }, vgEl("dt", null, k), vgEl("dd", null, v)))),
+      vgEl("table", { className: "company-table vg-mini-table" }, vgEl("thead", null, vgEl("tr", null, ["Item", "Categoria", "Descrição", "Valor"].map((t) => vgEl("th", { key: t }, t)))), vgEl("tbody", null, form.orcamento.filter((o) => o.categoria || o.valor).map((o, i) => vgEl("tr", { key: o.id }, vgEl("td", null, i + 1), vgEl("td", null, o.categoria), vgEl("td", null, o.descricao), vgEl("td", { className: "mono" }, vgBRL(vgParseMoney(o.valor) || 0)))))),
+    ),
+    vgEl(
+      "div",
+      { className: "vg-wizard-acoes" },
+      vgEl("button", { type: "button", className: "filters-clear-btn", style: { flex: "none" }, onClick: salvarESair, disabled: ocupado }, "Salvar rascunho e sair"),
+      salvoEm && vgEl("span", { className: "vg-muted" }, "Salvo às " + salvoEm.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })),
+      vgEl("span", { style: { flex: 1 } }),
+      passo > 0 && vgEl("button", { type: "button", className: "filters-clear-btn", style: { flex: "none" }, onClick: () => { setErro(null); setPasso(passo - 1); }, disabled: ocupado }, "Voltar"),
+      passo < 3 && vgEl("button", { type: "button", className: "doc-download-btn", onClick: proximo, disabled: ocupado, "data-testid": "vg-proximo" }, ocupado ? "Salvando..." : "Continuar"),
+      passo === 3 && vgEl("button", { type: "button", className: "doc-download-btn vg-enviar", onClick: enviar, disabled: ocupado, "data-testid": "vg-enviar" }, ocupado ? "Enviando..." : "Enviar para aprovação"),
+    ),
+  );
+}
+
+/* ---------- configuração dos modais de ação (compartilhada entre lista e detalhe) ---------- */
+function vgConfigModalAcao(v, acao) {
+  const sub = `${v.consultorNome} · ${vgDestino(v)}`;
+  const mapa = {
+    aprovar: { titulo: "Aprovar solicitação", rotuloOk: "Aprovar", aviso: v.adiantamentoSolicitado > 0 ? `O adiantamento de ${vgBRL(v.adiantamentoSolicitado)} será encaminhado ao Financeiro.` : undefined },
+    devolver: { titulo: "Devolver para ajuste", rotuloOk: "Devolver", motivo: true, motivoObrigatorio: true, motivoRotulo: "O que precisa ser ajustado?" },
+    reprovar: { titulo: "Reprovar solicitação", rotuloOk: "Reprovar", motivo: true, motivoObrigatorio: true },
+    aprovar_prestacao: { titulo: "Aprovar prestação de contas", rotuloOk: "Aprovar prestação" },
+    solicitar_ajuste: { titulo: "Solicitar ajuste na prestação", rotuloOk: "Solicitar ajuste", motivo: true, motivoObrigatorio: true, motivoRotulo: "O que precisa ser corrigido?" },
+    cancelar: { titulo: "Cancelar viagem", rotuloOk: "Cancelar viagem", motivo: true, motivoRotulo: "Motivo do cancelamento", aviso: "Esta ação não pode ser desfeita." },
+    registrar_adiantamento: { titulo: "Registrar adiantamento pago", rotuloOk: "Registrar", valor: true, valorRotulo: "Valor pago ao consultor", valorInicial: v.adiantamentoSolicitado, motivo: true, motivoRotulo: "Observação" },
+    registrar_acerto: { titulo: "Registrar acerto financeiro", rotuloOk: "Registrar acerto", motivo: true, motivoRotulo: "Observação (ex.: data do depósito/devolução)" },
+  };
+  return mapa[acao] ? { ...mapa[acao], subtitulo: sub } : null;
+}
+const VG_MSG_ACAO = {
+  aprovar: "Viagem aprovada.", devolver: "Solicitação devolvida para ajuste.", reprovar: "Solicitação reprovada.", aprovar_prestacao: "Prestação aprovada.",
+  solicitar_ajuste: "Ajuste solicitado ao consultor.", cancelar: "Viagem cancelada.", registrar_adiantamento: "Adiantamento registrado.", registrar_acerto: "Acerto financeiro registrado.",
+  enviar_prestacao: "Prestação de contas enviada para análise.", salvar_prestacao: "Prestação salva.",
+};
+
+/* ---------- Prestação de contas (dentro da mesma viagem) ---------- */
+function vgItensDaViagem(v) {
+  const base = v.prestacao && v.prestacao.itens ? v.prestacao.itens : (v.orcamento || []).map((o) => ({ id: vgIdLocal("p"), origemId: o.id, extra: false, categoria: o.categoria, descricao: o.descricao, valorEstimado: o.valorEstimado, valorRealizado: 0, observacao: "" }));
+  return base.map((i) => ({ id: i.id, origemId: i.origemId || null, extra: !!i.extra, categoria: i.categoria, descricao: i.descricao || "", estimado: i.valorEstimado || 0, realizado: vgMoneyInput(i.valorRealizado), observacao: i.observacao || "" }));
+}
+function vgPayloadPrestacao(itens, declaracao) {
+  const out = [];
+  for (let i = 0; i < itens.length; i++) {
+    const it = itens[i];
+    const v = vgParseMoney(it.realizado);
+    if (v === null) return { ok: false, erro: `Despesa ${i + 1} (${it.categoria || "sem categoria"}): valor realizado inválido.` };
+    if (!it.categoria) return { ok: false, erro: `Despesa ${i + 1}: escolha a categoria.` };
+    out.push({ id: it.id, origemId: it.origemId || undefined, categoria: it.categoria, descricao: it.descricao, valorRealizado: v, observacao: it.observacao });
+  }
+  return { ok: true, corpo: { itens: out, declaracao: !!declaracao } };
+}
+function VgPrestacao({ viagem, anexos, editavel, me, onAtualizou, onAnexosChange, onNotify, onView }) {
+  const [itens, setItens] = useState(() => vgItensDaViagem(viagem));
+  const [declaracao, setDeclaracao] = useState(!!(viagem.prestacao && viagem.prestacao.declaracao));
+  const [erro, setErro] = useState(null);
+  const [ocupado, setOcupado] = useState(false);
+  const [novaCat, setNovaCat] = useState("");
+  const [novaDesc, setNovaDesc] = useState("");
+  const setIt = (i, k, v) => setItens((l) => l.map((x, j) => (j === i ? { ...x, [k]: v } : x)));
+  const totais = editavel
+    ? vgCalcTotais(viagem.totalEstimado, itens.map((i) => ({ valorRealizado: vgParseMoney(i.realizado) || 0 })), viagem.adiantamentoRecebido)
+    : viagem.totais;
+  async function salvar(silencioso) {
+    const p = vgPayloadPrestacao(itens, declaracao);
+    if (!p.ok) throw new Error(p.erro);
+    const r = await vgApi("POST", `/viagens/${encodeURIComponent(viagem.id)}/acoes/salvar_prestacao`, { corpo: p.corpo });
+    if (!silencioso) onNotify?.(VG_MSG_ACAO.salvar_prestacao, "info");
+    onAtualizou?.(r.viagem);
+    return r.viagem;
+  }
+  async function clicarSalvar() {
+    setErro(null); setOcupado(true);
+    try { await salvar(false); } catch (e) { setErro(e.message); }
+    setOcupado(false);
+  }
+  async function enviar() {
+    if (!declaracao) return setErro("Marque a declaração para enviar a prestação de contas.");
+    const p = vgPayloadPrestacao(itens, declaracao);
+    if (!p.ok) return setErro(p.erro);
+    setErro(null); setOcupado(true);
+    try {
+      await vgApi("POST", `/viagens/${encodeURIComponent(viagem.id)}/acoes/enviar_prestacao`, { corpo: p.corpo });
+      onNotify?.(VG_MSG_ACAO.enviar_prestacao, "info");
+      onAtualizou?.(null);
+    } catch (e) { setErro(e.message); setOcupado(false); }
+  }
+  function adicionarExtra() {
+    if (!novaCat) return setErro("Escolha a categoria da despesa extra.");
+    setErro(null);
+    setItens((l) => [...l, { id: vgIdLocal("p"), origemId: null, extra: true, categoria: novaCat, descricao: novaDesc, estimado: 0, realizado: "", observacao: "" }]);
+    setNovaCat(""); setNovaDesc("");
+  }
+  const caixa = vgEl(
+    "div",
+    { className: "vg-resumo-fin", "data-testid": "vg-resumo-fin" },
+    [["Total estimado", vgBRL(totais.estimado)], ["Total realizado", vgBRL(totais.realizado)], ["Adiantamento recebido", vgBRL(totais.adiantamentoRecebido)], ["Saldo a devolver", vgBRL(totais.saldoDevolver), totais.saldoDevolver > 0 ? "vg-destaque-devolver" : ""], ["Valor adicional a reembolsar", vgBRL(totais.reembolsar), totais.reembolsar > 0 ? "vg-destaque-reembolso" : ""]]
+      .map(([k, v, c]) => vgEl("div", { key: k, className: "vg-resumo-item " + (c || "") }, vgEl("span", null, k), vgEl("strong", null, v))),
+  );
+  return vgEl(
+    "div",
+    { className: "vg-prestacao", "data-testid": "vg-prestacao" },
+    editavel && vgEl("p", { className: "vg-muted" }, "Informe o valor realizado de cada despesa e anexe o comprovante (PDF, JPG ou PNG). Se não houver comprovante, explique na observação. Os totais são calculados automaticamente."),
+    vgEl(FinErro, { erro }),
+    vgEl(
+      "div",
+      { className: "table-wrap vg-table-scroll" },
+      vgEl(
+        "table",
+        { className: "company-table vg-table vg-prest-table" },
+        vgEl("thead", null, vgEl("tr", null, ["Categoria", "Descrição", "Valor estimado", "Valor realizado", !editavel && "Diferença", "Comprovante", "Observação", editavel && ""].filter((x) => x !== false).map((t, i) => vgEl("th", { key: i }, t)))),
+        vgEl(
+          "tbody",
+          null,
+          itens.map((it, i) => {
+            const real = vgParseMoney(it.realizado) || 0;
+            return vgEl(
+              "tr",
+              { key: it.id, "data-testid": "vg-prest-row" },
+              vgEl("td", null, it.categoria, it.extra && vgEl("span", { className: "vg-tag-extra" }, "extra")),
+              vgEl("td", null, editavel && it.extra ? vgEl("input", { value: it.descricao, onChange: (e) => setIt(i, "descricao", e.target.value), maxLength: 300 }) : it.descricao || "—"),
+              vgEl("td", { className: "mono" }, vgBRL(it.estimado)),
+              vgEl("td", { className: "mono" }, editavel ? vgEl(VgMoneyInput, { value: it.realizado, onChange: (v) => setIt(i, "realizado", v), "aria-label": "Valor realizado" }) : vgBRL(real)),
+              !editavel && vgEl("td", { className: "mono " + (real > it.estimado ? "vg-neg" : "") }, vgBRL(real - it.estimado)),
+              vgEl("td", null, vgEl(VgAnexos, { viagemId: viagem.id, tipo: "comprovante", itemId: it.id, anexos, editavel, compacto: true, onView, onNotify, antesDeAnexar: () => salvar(true), onAnexado: (a) => { setErro(null); onAnexosChange?.((l) => [...l, a]); }, onRemovido: (a) => onAnexosChange?.((l) => l.filter((x) => x.id !== a.id)) })),
+              vgEl("td", null, editavel ? vgEl("input", { value: it.observacao, onChange: (e) => setIt(i, "observacao", e.target.value), maxLength: 500, placeholder: "Observação" }) : it.observacao || "—"),
+              editavel && vgEl("td", null, it.extra && vgEl("button", { type: "button", className: "vg-orc-x", "aria-label": "Remover despesa extra", onClick: () => setItens((l) => l.filter((_, j) => j !== i)) }, vgEl(Trash2, { size: 14 }))),
+            );
+          }),
+        ),
+      ),
+    ),
+    editavel && vgEl("div", { className: "vg-extra" }, vgEl("span", { className: "vg-muted" }, "Despesa não prevista:"), vgEl("select", { value: novaCat, onChange: (e) => setNovaCat(e.target.value), "aria-label": "Categoria da despesa extra" }, vgEl("option", { value: "" }, "Categoria"), (me.categorias || []).map((c) => vgEl("option", { key: c, value: c }, c))), vgEl("input", { value: novaDesc, onChange: (e) => setNovaDesc(e.target.value), placeholder: "Descrição", maxLength: 300 }), vgEl("button", { type: "button", className: "mini-download-btn", onClick: adicionarExtra }, vgEl(Plus, { size: 13 }), " Adicionar despesa")),
+    caixa,
+    editavel && vgEl(
+      "div",
+      { className: "vg-declaracao" },
+      vgEl("label", { className: "fin-check-field" }, vgEl("input", { type: "checkbox", checked: declaracao, onChange: (e) => setDeclaracao(e.target.checked), "data-testid": "vg-declaracao" }), vgEl("span", null, me.declaracao)),
+      vgEl("div", { className: "vg-wizard-acoes" },
+        vgEl("button", { type: "button", className: "filters-clear-btn", style: { flex: "none" }, onClick: clicarSalvar, disabled: ocupado }, "Salvar prestação"),
+        vgEl("span", { style: { flex: 1 } }),
+        vgEl("button", { type: "button", className: "doc-download-btn vg-enviar", onClick: enviar, disabled: ocupado, "data-testid": "vg-enviar-prestacao" }, ocupado ? "Enviando..." : "ENVIAR PRESTAÇÃO DE CONTAS")),
+    ),
+  );
+}
+
+/* ---------- Detalhe da viagem ---------- */
+function VgDetalhe({ id, me, onVoltar, onEditar, onNotify, onView, onMudou }) {
+  const [dados, setDados] = useState(null);
+  const [erro, setErro] = useState(null);
+  const [aba, setAba] = useState("resumo");
+  const [modal, setModal] = useState(null);
+  const carregar = React.useCallback(() => {
+    return vgApi("GET", "/viagens/" + encodeURIComponent(id))
+      .then((r) => { setDados(r); setErro(null); })
+      .catch((e) => setErro(e.message));
+  }, [id]);
+  useEffect(() => { setDados(null); setAba("resumo"); carregar(); }, [carregar]);
+  if (erro && !dados) return vgEl("div", null, vgEl("button", { type: "button", className: "link-btn vg-voltar", onClick: onVoltar }, vgEl(ArrowLeft, { size: 14 }), " Voltar"), vgEl("div", { className: "fin-banner" }, vgEl(AlertTriangle, { size: 15 }), " ", erro));
+  if (!dados) return vgEl("div", { className: "empty-state" }, "Carregando...");
+  const v = dados.viagem;
+  const acoes = v.acoes || [];
+  const temPrestacao = VG_STATUS_PRESTACAO.includes(v.status) || !!v.prestacao;
+  const motivoAtual = (() => {
+    const dec = { devolvida: "devolvida", ajuste_solicitado: "ajuste_solicitado", reprovada: "reprovada" }[v.status];
+    const m = dec && (dados.aprovacoes || []).filter((a) => a.decisao === dec).pop();
+    return m ? m.motivo : "";
+  })();
+  async function executar(acao, entrada) {
+    await vgApi("POST", `/viagens/${encodeURIComponent(v.id)}/acoes/${acao}`, { corpo: entrada || {} });
+    setModal(null);
+    onNotify?.(VG_MSG_ACAO[acao] || "Pronto.", "info");
+    onMudou?.();
+    await carregar();
+  }
+  function abrir(acao) {
+    const cfg = vgConfigModalAcao(v, acao);
+    if (cfg) setModal({ ...cfg, onClose: () => setModal(null), onConfirmar: (x) => executar(acao, x) });
+  }
+  const botoes = [
+    acoes.includes("salvar_rascunho") && ["editar", "Editar solicitação", "vg-btn-neutro", () => onEditar(v.id)],
+    acoes.includes("aprovar") && ["aprovar", "Aprovar", "vg-btn-ok", () => abrir("aprovar")],
+    acoes.includes("devolver") && ["devolver", "Devolver para ajuste", "vg-btn-neutro", () => abrir("devolver")],
+    acoes.includes("reprovar") && ["reprovar", "Reprovar", "vg-btn-perigo", () => abrir("reprovar")],
+    acoes.includes("registrar_adiantamento") && ["registrar_adiantamento", "Registrar adiantamento", "vg-btn-ok", () => abrir("registrar_adiantamento")],
+    acoes.includes("aprovar_prestacao") && ["aprovar_prestacao", "Aprovar prestação", "vg-btn-ok", () => abrir("aprovar_prestacao")],
+    acoes.includes("solicitar_ajuste") && ["solicitar_ajuste", "Solicitar ajuste", "vg-btn-neutro", () => abrir("solicitar_ajuste")],
+    acoes.includes("registrar_acerto") && ["registrar_acerto", "Registrar acerto financeiro", "vg-btn-ok", () => abrir("registrar_acerto")],
+    acoes.includes("cancelar") && ["cancelar", "Cancelar viagem", "vg-btn-perigo", () => abrir("cancelar")],
+  ].filter(Boolean);
+  const docDisponivel = ["prestacao_em_analise", "finalizada"].includes(v.status);
+  const tot = v.totais || {};
+  const abaBtn = (k, t) => vgEl("button", { type: "button", className: "vg-tab" + (aba === k ? " ativo" : ""), onClick: () => setAba(k), "data-testid": "vg-aba-" + k }, t);
+  return vgEl(
+    "div",
+    { className: "vg-detalhe", "data-testid": "vg-detalhe" },
+    vgEl("button", { type: "button", className: "link-btn vg-voltar", onClick: onVoltar }, vgEl(ArrowLeft, { size: 14 }), " Voltar"),
+    vgEl(
+      "div",
+      { className: "vg-detalhe-topo" },
+      vgEl("div", null,
+        vgEl("p", { className: "eyebrow-pill" }, `Viagem ${v.id}`),
+        vgEl("h2", { className: "vg-h2" }, `${vgDestino(v)} · ${v.cliente || "(sem cliente)"}`),
+        vgEl("p", { className: "vg-muted" }, `${v.consultorNome} · ${vgPeriodo(v)}${v.dias ? ` · ${v.dias} dia${v.dias > 1 ? "s" : ""}` : ""} · Gestor: ${v.gestorNome || "—"}`)),
+      vgEl("div", { className: "vg-detalhe-status" }, vgEl(VgStatusBadge, { status: v.status, label: v.statusLabel })),
+    ),
+    motivoAtual && ["devolvida", "ajuste_solicitado", "reprovada"].includes(v.status) && vgEl("div", { className: "vg-aviso-devolucao", "data-testid": "vg-motivo" }, vgEl(AlertTriangle, { size: 15 }), vgEl("div", null, vgEl("strong", null, v.status === "reprovada" ? "Motivo da reprovação: " : "Ajuste solicitado: "), motivoAtual)),
+    (botoes.length > 0 || docDisponivel) && vgEl(
+      "div",
+      { className: "vg-acoes-barra", "data-testid": "vg-acoes" },
+      botoes.map(([k, l, c, fn]) => vgEl("button", { key: k, type: "button", className: "vg-btn " + c, onClick: fn, "data-testid": "vg-acao-" + k }, l)),
+      docDisponivel && vgEl("button", { type: "button", className: "mini-download-btn", onClick: () => vgBaixarBlob(`/viagens/${encodeURIComponent(v.id)}/documento.pdf`, "prestacao-de-contas.pdf", onNotify) }, vgEl(Download, { size: 13 }), " Documento final (PDF)"),
+      docDisponivel && vgEl("button", { type: "button", className: "mini-download-btn", onClick: () => vgBaixarBlob(`/viagens/${encodeURIComponent(v.id)}/documento.xlsx`, "prestacao-de-contas.xlsx", onNotify) }, vgEl(Download, { size: 13 }), " Excel"),
+    ),
+    vgEl("div", { className: "vg-tabs" }, abaBtn("resumo", "Resumo"), temPrestacao && abaBtn("prestacao", "Prestação de contas"), abaBtn("historico", "Histórico")),
+    aba === "resumo" && vgEl(
+      "div",
+      { className: "vg-resumo" },
+      vgEl("dl", { className: "vg-dl" },
+        [["Motivo", v.motivo], ["Cliente / projeto", v.cliente], ["Destino", vgDestino(v)], ["Período", vgPeriodo(v)], ["Roteiro", v.roteiro || "—"], ["Observações", v.observacoes || "—"]].map(([k, val]) => vgEl(React.Fragment, { key: k }, vgEl("dt", null, k), vgEl("dd", null, val)))),
+      vgEl("h4", { className: "vg-h4" }, "Orçamento"),
+      vgEl("div", { className: "table-wrap vg-table-scroll" }, vgEl("table", { className: "company-table vg-mini-table" }, vgEl("thead", null, vgEl("tr", null, ["Item", "Categoria", "Descrição", "Valor estimado", "Observação"].map((t) => vgEl("th", { key: t }, t)))), vgEl("tbody", null, (v.orcamento || []).map((o, i) => vgEl("tr", { key: o.id }, vgEl("td", null, i + 1), vgEl("td", null, o.categoria), vgEl("td", null, o.descricao || "—"), vgEl("td", { className: "mono" }, vgBRL(o.valorEstimado)), vgEl("td", null, o.observacao || "—")))))),
+      vgEl("div", { className: "vg-total-linha" }, vgEl("span", null, "TOTAL ESTIMADO"), vgEl("strong", null, vgBRL(v.totalEstimado))),
+      vgEl("h4", { className: "vg-h4" }, "Adiantamento"),
+      vgEl("dl", { className: "vg-dl" },
+        [["Adiantamento solicitado", vgBRL(v.adiantamentoSolicitado)], ["Saldo anterior", vgBRL(v.saldoAnterior)], ["Adiantamento recebido", v.adiantamentoRecebido === null || v.adiantamentoRecebido === undefined ? (v.adiantamentoSolicitado > 0 ? "Aguardando o Financeiro" : "—") : vgBRL(v.adiantamentoRecebido)]].map(([k, val]) => vgEl(React.Fragment, { key: k }, vgEl("dt", null, k), vgEl("dd", null, val)))),
+      (dados.anexos || []).some((a) => a.tipo === "orcamento") && vgEl(React.Fragment, null, vgEl("h4", { className: "vg-h4" }, "Documentos do orçamento"), vgEl(VgAnexos, { viagemId: v.id, tipo: "orcamento", anexos: dados.anexos, editavel: false, onView, onNotify })),
+      v.acertoFinanceiro && vgEl("p", { className: "vg-info" }, `Acerto financeiro registrado por ${v.acertoFinanceiro.porNome} em ${vgDataHoraBR(v.acertoFinanceiro.em)}.`),
+    ),
+    aba === "prestacao" && vgEl(VgPrestacao, {
+      key: v.id + ":" + v.status,
+      viagem: v, anexos: dados.anexos || [], editavel: acoes.includes("salvar_prestacao"), me, onView, onNotify,
+      onAnexosChange: (fn) => setDados((d) => ({ ...d, anexos: fn(d.anexos || []) })),
+      onAtualizou: (nv) => { onMudou?.(); if (nv === null) carregar(); else setDados((d) => ({ ...d, viagem: nv })); },
+    }),
+    aba === "historico" && vgEl(
+      "ol",
+      { className: "vg-timeline", "data-testid": "vg-historico" },
+      (dados.historico || []).map((h, i) => vgEl("li", { key: i }, vgEl("span", { className: "vg-tl-dot" }), vgEl("div", null, vgEl("strong", null, VG_ACAO_ROTULO[h.acao] || h.acao), vgEl("span", { className: "vg-sub" }, ` · ${h.porNome} · ${vgDataHoraBR(h.em)}`), h.detalhe && h.acao !== "salvar_rascunho" && vgEl("div", { className: "vg-sub" }, h.detalhe)))),
+    ),
+    modal && vgEl(VgAcaoModal, modal),
+  );
+}
+
+/* ---------- Usuários do módulo (somente administrador) ---------- */
+function VgUsuarioModal({ usuario, administradores, onClose, onSalvo, onNotify }) {
+  const novo = !usuario;
+  const [nome, setNome] = useState(usuario ? usuario.nome : "");
+  const [email, setEmail] = useState(usuario ? usuario.email : "");
+  const [perfil, setPerfil] = useState(usuario ? usuario.perfil : "consultor");
+  const [gestorId, setGestorId] = useState(usuario ? usuario.gestorId || "" : "");
+  const [ativo, setAtivo] = useState(usuario ? usuario.ativo : true);
+  const [erro, setErro] = useState(null);
+  const [ocupado, setOcupado] = useState(false);
+  const [resultado, setResultado] = useState(null);
+  async function salvar(e) {
+    e.preventDefault();
+    if (ocupado) return;
+    if (nome.trim().length < 2) return setErro("Informe o nome.");
+    if (novo && !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email.trim())) return setErro("Informe um e-mail válido.");
+    if (perfil === "consultor" && !gestorId) return setErro("Escolha o gestor responsável por este consultor.");
+    setErro(null); setOcupado(true);
+    try {
+      const corpo = { nome: nome.trim(), perfil, gestorId: perfil === "consultor" ? gestorId : undefined, ...(novo ? { email: email.trim() } : { ativo }) };
+      const r = novo ? await vgApi("POST", "/usuarios", { corpo }) : await vgApi("POST", "/usuarios/" + encodeURIComponent(usuario.uid), { corpo });
+      onSalvo();
+      if (novo) setResultado(r);
+      else { onNotify?.("Usuário atualizado.", "info"); onClose(); }
+    } catch (err) { setErro(err.message); }
+    setOcupado(false);
+  }
+  if (resultado) {
+    return vgEl(FinModal, { titulo: "Usuário criado", icon: vgEl(UserPlus, { size: 16 }), onClose },
+      vgEl("p", null, resultado.emailEnviado ? "Enviamos um e-mail para o usuário definir a própria senha." : "O e-mail automático não pôde ser enviado. Envie o link abaixo ao usuário por um canal seguro (ele vale por pouco tempo e dá acesso à conta)."),
+      resultado.linkSenha && vgEl("textarea", { readOnly: true, value: resultado.linkSenha, onFocus: (e) => e.target.select(), style: { minHeight: 90 } }),
+      vgEl("div", { className: "homolog-form-actions" }, vgEl("button", { type: "button", className: "doc-download-btn", onClick: onClose }, "Concluir")));
+  }
+  return vgEl(FinModal, { titulo: novo ? "Novo usuário" : "Editar usuário", subtitulo: novo ? "O usuário recebe um e-mail para definir a senha." : usuario.email, icon: vgEl(UserPlus, { size: 16 }), onClose },
+    vgEl("form", { onSubmit: salvar },
+      vgEl(FinErro, { erro }),
+      vgEl(FinCampo, { rotulo: "Nome" }, vgEl("input", { value: nome, onChange: (e) => setNome(e.target.value), autoFocus: true })),
+      novo && vgEl(FinCampo, { rotulo: "E-mail corporativo" }, vgEl("input", { type: "email", value: email, onChange: (e) => setEmail(e.target.value), autoComplete: "off" })),
+      vgEl(FinCampo, { rotulo: "Perfil" }, vgEl("select", { value: perfil, onChange: (e) => setPerfil(e.target.value) }, Object.entries(VG_PERFIL_LABEL).map(([k, l]) => vgEl("option", { key: k, value: k }, l)))),
+      perfil === "consultor" && vgEl(FinCampo, { rotulo: "Gestor responsável" }, vgEl("select", { value: gestorId, onChange: (e) => setGestorId(e.target.value) }, vgEl("option", { value: "" }, "Selecione"), administradores.map((a) => vgEl("option", { key: a.uid, value: a.uid }, a.nome)))),
+      !novo && vgEl("label", { className: "fin-check-field" }, vgEl("input", { type: "checkbox", checked: ativo, onChange: (e) => setAtivo(e.target.checked) }), vgEl("span", null, "Acesso ativo")),
+      vgEl(FinAcoesForm, { onCancel: onClose, ocupado, rotuloOk: novo ? "Criar usuário" : "Salvar" })));
+}
+function VgUsuarios({ me, onNotify, onMudou }) {
+  const [lista, setLista] = useState(null);
+  const [erro, setErro] = useState(null);
+  const [modal, setModal] = useState(null);
+  const carregar = () => vgApi("GET", "/usuarios").then((r) => { setLista(r.usuarios); onMudou?.(r.usuarios); setErro(null); }).catch((e) => setErro(e.message));
+  useEffect(() => { carregar(); }, []);
+  const admins = (lista || []).filter((u) => u.perfil === "administrador" && u.ativo);
+  async function reenviar(u) {
+    try {
+      const r = await vgApi("POST", `/usuarios/${encodeURIComponent(u.uid)}/reenviar-senha`);
+      onNotify?.(r.emailEnviado ? "E-mail de redefinição enviado." : "E-mail não configurado: gere o link pelo cadastro.", r.emailEnviado ? "info" : "error");
+    } catch (e) { onNotify?.(e.message, "error"); }
+  }
+  return vgEl("div", { className: "vg-lista", "data-testid": "vg-usuarios" },
+    vgEl("div", { className: "vg-toolbar" }, vgEl("h2", { className: "vg-h2" }, "Usuários do módulo"), vgEl("button", { type: "button", className: "kpi-new-homolog-btn", onClick: () => setModal({ usuario: null }) }, vgEl(UserPlus, { size: 14 }), " Novo usuário")),
+    vgEl("p", { className: "vg-muted" }, "Cada pessoa tem acesso individual. O gestor responsável de cada consultor é quem recebe as solicitações de viagem dele."),
+    erro && vgEl("div", { className: "fin-banner" }, vgEl(AlertTriangle, { size: 15 }), " ", erro),
+    vgEl("div", { className: "table-wrap" },
+      vgEl("table", { className: "company-table vg-table" },
+        vgEl("thead", null, vgEl("tr", null, ["Nome", "E-mail corporativo", "Perfil", "Gestor responsável", "Situação", "Ação"].map((t) => vgEl("th", { key: t }, t)))),
+        vgEl("tbody", null, (lista || []).map((u) => vgEl("tr", { key: u.uid },
+          vgEl("td", null, u.nome), vgEl("td", null, u.email), vgEl("td", null, VG_PERFIL_LABEL[u.perfil] || u.perfil), vgEl("td", null, u.gestorNome || "—"),
+          vgEl("td", null, vgEl("span", { className: "status-badge " + (u.ativo ? "status-ok" : "status-cancelada") }, u.ativo ? "Ativo" : "Inativo")),
+          vgEl("td", { className: "vg-acoes-cell" },
+            vgEl("button", { type: "button", className: "link-btn", onClick: () => setModal({ usuario: u }) }, vgEl(Pencil, { size: 12 }), " Editar"),
+            vgEl("button", { type: "button", className: "link-btn", onClick: () => reenviar(u) }, "Reenviar senha")))))),
+      lista && lista.length === 0 && vgEl("div", { className: "empty-state" }, "Nenhum usuário cadastrado.")),
+    modal && vgEl(VgUsuarioModal, { usuario: modal.usuario, administradores: admins, onClose: () => setModal(null), onSalvo: carregar, onNotify }));
+}
+
+/* ---------- Notificações ---------- */
+function VgNotificacoes({ onAbrir, onLidas, onNotify }) {
+  const [lista, setLista] = useState(null);
+  const carregar = () => vgApi("GET", "/notificacoes").then((r) => setLista(r.notificacoes)).catch((e) => onNotify?.(e.message, "error"));
+  useEffect(() => { carregar(); }, []);
+  async function abrir(n) {
+    if (!n.lida) { vgApi("POST", `/notificacoes/${encodeURIComponent(n.id)}/lida`).then(() => onLidas?.()).catch(() => {}); }
+    if (n.viagemId) onAbrir(n.viagemId);
+  }
+  async function todas() {
+    try { await vgApi("POST", "/notificacoes/lidas"); await carregar(); onLidas?.(); } catch (e) { onNotify?.(e.message, "error"); }
+  }
+  return vgEl("div", { className: "vg-lista", "data-testid": "vg-notificacoes" },
+    vgEl("div", { className: "vg-toolbar" }, vgEl("h2", { className: "vg-h2" }, "Notificações"), vgEl("button", { type: "button", className: "mini-download-btn", onClick: todas }, "Marcar todas como lidas")),
+    vgEl("ul", { className: "vg-notifs" }, (lista || []).map((n) => vgEl("li", { key: n.id, className: "vg-notif" + (n.lida ? "" : " nova"), onClick: () => abrir(n) },
+      vgEl("span", { className: "vg-dot vg-dot-" + n.cor }), vgEl("div", null, vgEl("strong", null, n.titulo), vgEl("div", { className: "vg-sub" }, n.mensagem), vgEl("div", { className: "vg-sub" }, vgDataHoraBR(n.criadoEm)))))),
+    lista && lista.length === 0 && vgEl("div", { className: "empty-state" }, "Nenhuma notificação por enquanto."));
+}
+
+/* ---------- Módulo (raiz) ---------- */
+function ViagensView({ currentUser, onNotify, onView, deepLinkId, onDeepLinkConsumed }) {
+  const [fase, setFase] = useState(VG_FIREBASE_CONFIGURADO ? "carregando" : "sem_config");
+  const [me, setMe] = useState(null);
+  const [msgErro, setMsgErro] = useState("");
+  const [tela, setTela] = useState({ nome: "lista" });
+  const [refresh, setRefresh] = useState(0);
+  const [usuarios, setUsuarios] = useState([]);
+  async function carregarMe() {
+    try {
+      const m = await vgApi("GET", "/me");
+      setMe(m);
+      setFase("pronto");
+    } catch (e) {
+      if (e.status === 401) setFase("login");
+      else if (e.status === 403) { setMsgErro(e.message); setFase("sem_acesso"); }
+      else { setMsgErro(e.message); setFase("erro"); }
+    }
+  }
+  useEffect(() => {
+    if (!VG_FIREBASE_CONFIGURADO) return;
+    let vivo = true;
+    (async () => {
+      const ok = vgTemSessao() || (await vgRestaurarSessao());
+      if (!vivo) return;
+      if (ok) await carregarMe();
+      else setFase("login");
+    })();
+    return () => { vivo = false; };
+  }, []);
+  useEffect(() => {
+    if (fase !== "pronto") return;
+    const t = setInterval(() => { vgApi("GET", "/me").then((m) => setMe((a) => (a ? { ...a, notificacoesNaoLidas: m.notificacoesNaoLidas } : m))).catch(() => {}); }, 60000);
+    return () => clearInterval(t);
+  }, [fase]);
+  useEffect(() => {
+    if (fase === "pronto" && me && me.perfil === "administrador") {
+      vgApi("GET", "/usuarios").then((r) => setUsuarios(r.usuarios)).catch(() => {});
+    }
+  }, [fase, me && me.perfil]);
+  useEffect(() => {
+    if (fase === "pronto" && deepLinkId) {
+      setTela({ nome: "detalhe", id: deepLinkId });
+      onDeepLinkConsumed?.();
+    }
+  }, [fase, deepLinkId]);
+  function sair() {
+    vgSair();
+    setMe(null);
+    setFase("login");
+    setTela({ nome: "lista" });
+  }
+  const mudou = () => setRefresh((r) => r + 1);
+  const admin = me && me.perfil === "administrador";
+  const abas = !me ? [] : admin
+    ? [["lista", "Visão geral"], ["aprovacoes", "Aprovações"], ["minhas", "Minhas viagens"], ["usuarios", "Usuários"]]
+    : [["lista", me.perfil === "financeiro" ? "Viagens" : "Minhas viagens"]];
+  const naLista = ["lista", "aprovacoes", "minhas", "usuarios", "notificacoes"].includes(tela.nome);
+  let corpo = null;
+  if (fase === "sem_config") corpo = vgEl(VgNaoConfigurado);
+  else if (fase === "carregando") corpo = vgEl("div", { className: "empty-state" }, "Carregando...");
+  else if (fase === "login") corpo = vgEl(VgLogin, { onEntrou: carregarMe, processoAntigo: VG_PROCESSO_ANTIGO_URL, emailInicial: currentUser && currentUser.email });
+  else if (fase === "sem_acesso") corpo = vgEl("div", { className: "vg-setup" }, vgEl(Lock, { size: 20 }), vgEl("h2", null, "Acesso não liberado"), vgEl("p", null, msgErro), vgEl("button", { type: "button", className: "doc-download-btn", onClick: sair }, "Entrar com outra conta"));
+  else if (fase === "erro") corpo = vgEl("div", { className: "vg-setup" }, vgEl(AlertTriangle, { size: 20 }), vgEl("h2", null, "Não foi possível carregar o módulo"), vgEl("p", null, msgErro), vgEl("button", { type: "button", className: "doc-download-btn", onClick: () => { setFase("carregando"); carregarMe(); } }, "Tentar novamente"));
+  else if (fase === "pronto" && me) {
+    if (tela.nome === "detalhe") corpo = vgEl(VgDetalhe, { key: tela.id, id: tela.id, me, onVoltar: () => setTela({ nome: "lista" }), onEditar: (id) => setTela({ nome: "editar", id }), onNotify, onView, onMudou: mudou });
+    else if (tela.nome === "nova" || tela.nome === "editar") corpo = vgEl(VgWizard, { me, viagemId: tela.nome === "editar" ? tela.id : null, onNotify, onView, onCancelar: () => setTela(tela.id ? { nome: "detalhe", id: tela.id } : { nome: "lista" }), onConcluido: (vid) => { mudou(); setTela(vid ? { nome: "detalhe", id: vid } : { nome: "lista" }); } });
+    else if (tela.nome === "usuarios") corpo = vgEl(VgUsuarios, { me, onNotify, onMudou: setUsuarios });
+    else if (tela.nome === "notificacoes") corpo = vgEl(VgNotificacoes, { onAbrir: (id) => setTela({ nome: "detalhe", id }), onLidas: () => vgApi("GET", "/me").then((m) => setMe((a) => ({ ...a, notificacoesNaoLidas: m.notificacoesNaoLidas }))).catch(() => {}), onNotify });
+    else corpo = vgEl(VgLista, { key: tela.nome, me, escopo: tela.nome === "lista" ? (admin ? "todas" : "todas") : tela.nome, onAbrir: (id) => setTela({ nome: "detalhe", id }), onNova: () => setTela({ nome: "nova" }), onNotify, refreshKey: refresh, usuarios });
+  }
+  return vgEl(
+    "div",
+    { className: "view view-wide vg-view", "data-testid": "vg-view" },
+    vgEl("header", { className: "view-header view-header-compact" },
+      vgEl("div", null, vgEl("p", { className: "eyebrow-pill" }, "Comercial · Viagens"), vgEl("h1", null, "Viagens e Despesas"),
+        vgEl("p", { className: "lede" }, "Solicitação de viagem, adiantamento e prestação de contas em um único registro — do pedido à aprovação final.")),
+      fase === "pronto" && me && vgEl("div", { className: "vg-userchip" },
+        vgEl("button", { type: "button", className: "vg-bell", "aria-label": "Notificações", onClick: () => setTela({ nome: "notificacoes" }), "data-testid": "vg-bell" }, vgEl(BellIcon, { size: 17 }), me.notificacoesNaoLidas > 0 && vgEl("span", { className: "vg-bell-badge" }, me.notificacoesNaoLidas > 9 ? "9+" : me.notificacoesNaoLidas)),
+        vgEl("div", { className: "vg-userchip-txt" }, vgEl("strong", null, me.nome), vgEl("span", null, VG_PERFIL_LABEL[me.perfil])),
+        vgEl("button", { type: "button", className: "filters-clear-btn", style: { flex: "none", padding: "7px 12px" }, onClick: sair }, "Sair do módulo"))),
+    VG_PROCESSO_ANTIGO_URL && fase === "pronto" && vgEl("div", { className: "fin-banner vg-antigo-banner" }, "O processo antigo (Google Forms) continua disponível durante a transição: ", vgEl("a", { href: VG_PROCESSO_ANTIGO_URL, target: "_blank", rel: "noopener noreferrer" }, "abrir formulário"), "."),
+    fase === "pronto" && me && naLista && vgEl("nav", { className: "vg-tabs vg-tabs-main" }, abas.map(([k, t]) => vgEl("button", { key: k, type: "button", className: "vg-tab" + (tela.nome === k ? " ativo" : ""), onClick: () => setTela({ nome: k }), "data-testid": "vg-tab-" + k }, t))),
+    corpo,
+  );
+}
+/* VG_BLOCK_END */
+
 function GrupoprimaPortal() {
   // confirmedDocs: documentos classificados automaticamente na sincronização
   // ou confirmados manualmente na fila de conferência (capability "db",
@@ -27583,6 +28829,20 @@ function GrupoprimaPortal() {
     savePortalTheme(choice);
   }
   const [view, setView] = useState("dashboard");
+  // Link direto "?viagem=ID" (e-mail de nova solicitação): depois do login do
+  // portal, abre o módulo Viagens e Despesas já na viagem. O módulo ainda
+  // exige o login dele; nada é aberto sem o servidor autorizar.
+  const [vgDeepLink, setVgDeepLink] = useState(() => {
+    try {
+      const v = new URLSearchParams(window.location.search).get("viagem");
+      return v && /^[A-Za-z0-9_-]{1,40}$/.test(v) ? v : null;
+    } catch (e) {
+      return null;
+    }
+  });
+  useEffect(() => {
+    if (authenticated && vgDeepLink) setView("viagens");
+  }, [authenticated, vgDeepLink]);
   const [selectedId, setSelectedId] = useState(null);
   const [search, setSearch] = useState("");
   const [chatOpen, setChatOpen] = useState(false); // chatSeed: pergunta pronta enviada automaticamente quando o ChatDrawer é
@@ -27661,6 +28921,7 @@ function GrupoprimaPortal() {
   }
   function handleLogout(reason) {
     logDocumentAction("logout", reason ? { motivo: reason } : {});
+    vgSair();
     setAuditSessionUser(null);
     setAuthenticated(false);
     setCurrentUser(null);
@@ -28857,6 +30118,124 @@ function GrupoprimaPortal() {
           .chat-drawer, .viewer-modal { height: 96dvh; }
           .docs-modal, .homolog-form-modal { max-height: 92dvh; }
         }
+      
+        /* ---- VIAGENS E DESPESAS (2026-10) ---- */
+        .vg-view .view-header { align-items: flex-start; }
+        .vg-muted { color: var(--carvao); font-size: 13px; margin: 4px 0 10px; }
+        .vg-sub { color: var(--carvao); font-size: 11.5px; margin-top: 2px; }
+        .vg-h2 { font-size: 18px; margin: 0; color: var(--texto); }
+        .vg-h4 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--carvao); margin: 20px 0 8px; }
+        .vg-info { background: rgba(111,187,227,0.14); border: 1px solid rgba(111,187,227,0.4); color: var(--texto); border-radius: 8px; padding: 9px 12px; font-size: 12.5px; margin: 8px 0; }
+        .vg-userchip { display: flex; align-items: center; gap: 10px; }
+        .vg-userchip-txt { display: flex; flex-direction: column; line-height: 1.2; text-align: right; }
+        .vg-userchip-txt strong { font-size: 13px; color: var(--texto); }
+        .vg-userchip-txt span { font-size: 11px; color: var(--carvao); }
+        .vg-bell { position: relative; background: var(--card-bg); border: 1px solid var(--cinza-frio); border-radius: 8px; padding: 7px 9px; cursor: pointer; color: var(--texto); display: flex; }
+        .vg-bell-badge { position: absolute; top: -6px; right: -6px; background: #D64545; color: #fff; font-size: 10px; font-weight: 800; border-radius: 999px; padding: 1px 5px; min-width: 16px; text-align: center; }
+        .vg-tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--cinza-frio); margin: 14px 0 16px; flex-wrap: wrap; }
+        .vg-tab { background: none; border: none; border-bottom: 3px solid transparent; padding: 9px 14px; font-weight: 700; font-size: 13px; color: var(--carvao); cursor: pointer; }
+        .vg-tab.ativo { color: var(--texto); border-bottom-color: var(--verde); }
+        .vg-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 4px 0 12px; flex-wrap: wrap; }
+        .vg-toolbar-btns { display: flex; gap: 8px; align-items: center; }
+        .vg-kpis { margin-bottom: 12px; }
+        .vg-money-kpis { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin-bottom: 12px; }
+        .vg-money-kpi { background: var(--card-bg); border: 1px solid var(--cinza-frio); border-radius: 10px; padding: 10px 14px; display: flex; flex-direction: column; gap: 3px; }
+        .vg-money-kpi span { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--carvao); }
+        .vg-money-kpi strong { font-size: 15px; color: var(--texto); }
+        .vg-filtros { display: flex; gap: 8px; flex-wrap: wrap; align-items: flex-end; margin-bottom: 12px; }
+        .vg-filtros input, .vg-filtros select, .vg-form-grid input, .vg-form-grid select, .vg-form-grid textarea, .vg-extra input, .vg-extra select, .vg-prest-table input, .vg-orc-row input, .vg-orc-row select, .vg-login-card input { border: 1px solid var(--cinza-frio); background: var(--card-bg); color: var(--texto); border-radius: 8px; padding: 8px 10px; font-size: 13px; font-family: inherit; min-width: 0; }
+        .vg-filtro-busca { flex: 1 1 220px; }
+        .vg-filtro-data { display: flex; flex-direction: row; align-items: center; gap: 6px; font-size: 10.5px; text-transform: uppercase; color: var(--carvao); font-weight: 700; }
+        .vg-table td { vertical-align: middle; }
+        .vg-acoes-cell { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+        .vg-btn { border: 1px solid var(--cinza-frio); border-radius: 8px; padding: 7px 12px; font-weight: 800; font-size: 12px; cursor: pointer; background: var(--card-bg); color: var(--texto); }
+        .vg-btn-ok { background: var(--verde); color: var(--azul); border-color: transparent; }
+        .vg-btn-perigo { color: #B23A3A; border-color: rgba(214,69,69,0.5); }
+        .vg-btn-neutro { background: var(--branco-frio); }
+        .vg-btn:hover { filter: brightness(0.96); }
+        .vg-voltar { margin-bottom: 8px; }
+        .vg-detalhe-topo { display: flex; justify-content: space-between; gap: 14px; align-items: flex-start; margin-bottom: 12px; }
+        .vg-acoes-barra { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; background: var(--card-bg); border: 1px solid var(--cinza-frio); border-radius: 10px; padding: 10px 12px; margin-bottom: 4px; }
+        .vg-aviso-devolucao { display: flex; gap: 10px; align-items: flex-start; background: rgba(255,214,10,0.14); border: 1px solid rgba(214,170,10,0.5); border-radius: 8px; padding: 10px 12px; font-size: 13px; margin: 8px 0 12px; }
+        .vg-dl { display: grid; grid-template-columns: 190px 1fr; gap: 6px 14px; font-size: 13px; margin: 0; }
+        .vg-dl dt { color: var(--carvao); font-weight: 700; font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.03em; padding-top: 2px; }
+        .vg-dl dd { margin: 0; color: var(--texto); }
+        .vg-total-linha { display: flex; justify-content: flex-end; gap: 16px; align-items: baseline; padding: 10px 4px; font-size: 12px; color: var(--carvao); font-weight: 800; letter-spacing: 0.05em; }
+        .vg-total-linha strong { font-size: 18px; color: var(--texto); }
+        .vg-table-scroll { overflow-x: auto; }
+        .vg-mini-table td, .vg-mini-table th { padding: 8px 12px; }
+        .vg-steps { list-style: none; display: flex; gap: 8px; padding: 0; margin: 12px 0 18px; flex-wrap: wrap; }
+        .vg-step { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 999px; border: 1px solid var(--cinza-frio); font-size: 12.5px; font-weight: 700; color: var(--carvao); background: var(--card-bg); }
+        .vg-step.ativo { border-color: var(--verde); color: var(--texto); box-shadow: 0 0 0 2px rgba(107,254,156,0.35); }
+        .vg-step.feito { color: var(--texto); }
+        .vg-step-n { width: 20px; height: 20px; border-radius: 50%; background: var(--branco-frio); display: inline-flex; align-items: center; justify-content: center; font-size: 11px; }
+        .vg-step.ativo .vg-step-n, .vg-step.feito .vg-step-n { background: var(--verde); color: var(--azul); }
+        .vg-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 16px; }
+        .vg-form-grid .homolog-field input, .vg-form-grid .homolog-field select, .vg-form-grid .homolog-field textarea { width: 100%; box-sizing: border-box; }
+        .vg-span2 { grid-column: 1 / -1; }
+        .vg-readonly { background: var(--branco-frio) !important; color: var(--carvao) !important; }
+        .vg-orc-head, .vg-orc-row { display: grid; grid-template-columns: 34px 190px 1.4fr 140px 1.2fr 34px; gap: 8px; align-items: center; }
+        .vg-orc-head { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--carvao); font-weight: 700; padding: 0 0 6px; }
+        .vg-orc-row { margin-bottom: 8px; }
+        .vg-orc-n { color: var(--carvao); font-weight: 700; text-align: center; }
+        .vg-orc-x { background: none; border: none; cursor: pointer; color: var(--carvao); padding: 6px; border-radius: 6px; display: inline-flex; }
+        .vg-orc-x:hover:not(:disabled) { color: #B23A3A; background: rgba(214,69,69,0.1); }
+        .vg-orc-x:disabled { opacity: 0.35; cursor: not-allowed; }
+        .vg-input-money { text-align: right; }
+        .vg-add { margin: 4px 0 8px; }
+        .vg-wizard-acoes { display: flex; gap: 10px; align-items: center; margin-top: 20px; padding-top: 14px; border-top: 1px solid var(--cinza-frio); flex-wrap: wrap; }
+        .vg-enviar { padding: 10px 18px; font-size: 12.5px; }
+        .vg-anexos { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+        .vg-anexo { display: inline-flex; align-items: center; gap: 4px; background: var(--branco-frio); border: 1px solid var(--cinza-frio); border-radius: 6px; padding: 2px 4px 2px 8px; max-width: 220px; }
+        .vg-anexo-nome { background: none; border: none; cursor: pointer; font-size: 12px; color: var(--texto); display: inline-flex; align-items: center; gap: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 190px; padding: 2px 0; }
+        .vg-anexo-x { background: none; border: none; cursor: pointer; color: var(--carvao); padding: 3px; display: inline-flex; border-radius: 4px; }
+        .vg-anexar { cursor: pointer; }
+        .vg-desabilitado { opacity: 0.6; pointer-events: none; }
+        .vg-vazio { color: var(--carvao); }
+        .vg-resumo-fin { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin: 16px 0; }
+        .vg-resumo-item { background: var(--card-bg); border: 1px solid var(--cinza-frio); border-radius: 10px; padding: 10px 14px; display: flex; flex-direction: column; gap: 3px; }
+        .vg-resumo-item span { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--carvao); }
+        .vg-resumo-item strong { font-size: 16px; color: var(--texto); }
+        .vg-destaque-devolver { border-color: rgba(214,69,69,0.5); background: rgba(214,69,69,0.07); }
+        .vg-destaque-reembolso { border-color: rgba(60,170,110,0.6); background: rgba(107,254,156,0.12); }
+        .vg-extra { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 10px 0; }
+        .vg-tag-extra { margin-left: 6px; font-size: 10px; background: rgba(111,187,227,0.2); border-radius: 999px; padding: 2px 7px; font-weight: 800; }
+        .vg-neg { color: #B23A3A; }
+        .vg-prest-table td { padding: 8px 10px; }
+        .vg-prest-table td input { width: 100%; box-sizing: border-box; }
+        .vg-declaracao { margin-top: 12px; }
+        .vg-timeline { list-style: none; margin: 0; padding: 0 0 0 6px; border-left: 2px solid var(--cinza-frio); }
+        .vg-timeline li { position: relative; padding: 0 0 16px 18px; font-size: 13px; }
+        .vg-tl-dot { position: absolute; left: -8px; top: 3px; width: 10px; height: 10px; border-radius: 50%; background: var(--verde); border: 2px solid var(--card-bg); }
+        .vg-notifs { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 8px; }
+        .vg-notif { display: flex; gap: 12px; align-items: flex-start; background: var(--card-bg); border: 1px solid var(--cinza-frio); border-radius: 10px; padding: 12px 14px; cursor: pointer; font-size: 13px; }
+        .vg-notif.nova { border-color: var(--verde); box-shadow: 0 0 0 2px rgba(107,254,156,0.25); }
+        .vg-dot { width: 11px; height: 11px; border-radius: 50%; margin-top: 4px; flex: none; background: #999; }
+        .vg-dot-azul { background: #3D8BFD; } .vg-dot-amarelo { background: #F5C400; } .vg-dot-verde { background: #2FB46D; }
+        .vg-dot-vermelho { background: #D64545; } .vg-dot-laranja { background: #F0883E; } .vg-dot-roxo { background: #8A5CF5; }
+        .vg-login-wrap { display: flex; justify-content: center; padding: 20px 0; }
+        .vg-login-card { background: var(--card-bg); border: 1px solid var(--cinza-frio); border-radius: 14px; padding: 26px; width: min(420px, 100%); box-sizing: border-box; }
+        .vg-login-card h2 { margin: 8px 0 4px; font-size: 18px; }
+        .vg-login-card .homolog-field input { width: 100%; box-sizing: border-box; }
+        .vg-login-icon { width: 38px; height: 38px; border-radius: 10px; background: var(--verde); color: var(--azul); display: flex; align-items: center; justify-content: center; }
+        .vg-btn-block { width: 100%; justify-content: center; padding: 11px; font-size: 13px; }
+        .vg-esqueci { margin: 12px auto 0; }
+        .vg-antigo { display: block; margin-top: 14px; font-size: 12px; color: var(--carvao); text-align: center; }
+        .vg-setup { background: var(--card-bg); border: 1px dashed var(--cinza-frio); border-radius: 12px; padding: 26px; max-width: 640px; }
+        .vg-setup h2 { margin: 8px 0; font-size: 17px; }
+        .vg-antigo-banner a { color: inherit; font-weight: 800; }
+        .vg-revisao .vg-mini-table { margin-top: 14px; }
+        @media (max-width: 900px) {
+          .vg-money-kpis, .vg-resumo-fin { grid-template-columns: repeat(2, 1fr); }
+          .vg-form-grid { grid-template-columns: 1fr; }
+          .vg-dl { grid-template-columns: 1fr; gap: 0; }
+          .vg-dl dd { margin-bottom: 8px; }
+          .vg-orc-head { display: none; }
+          .vg-orc-row { grid-template-columns: 28px 1fr 34px; background: var(--card-bg); border: 1px solid var(--cinza-frio); border-radius: 10px; padding: 10px; }
+          .vg-orc-row > :nth-child(n+3):not(:last-child) { grid-column: 2 / 3; }
+          .vg-userchip-txt { display: none; }
+          .vg-detalhe-topo { flex-direction: column; }
+        }
       `,
     ),
     /*#__PURE__*/ React.createElement("link", {
@@ -28952,6 +30331,17 @@ function GrupoprimaPortal() {
           /*#__PURE__*/ React.createElement(Banknote, { size: 16 }),
           " ",
           /*#__PURE__*/ React.createElement("span", null, "Informações Financeiras"),
+        ),
+      can(currentUser, "viagensDespesas") &&
+        /*#__PURE__*/ React.createElement(
+          "button",
+          {
+            className: "nav-item" + (view === "viagens" ? " active" : ""),
+            onClick: () => goTo("viagens"),
+          },
+          /*#__PURE__*/ React.createElement(Plane, { size: 16 }),
+          " ",
+          /*#__PURE__*/ React.createElement("span", null, "Viagens e Despesas"),
         ),
       // "Assistente" tinha saído do painel lateral em 2026-09-28 (pedido
       // explícito da Iasmin), ficando acessível só pelo botão "Perguntar ao
@@ -29071,7 +30461,7 @@ function GrupoprimaPortal() {
           },
           /*#__PURE__*/ React.createElement(Menu, { size: 18 }),
         ),
-        view === "homologacao" || view === "financeiro"
+        view === "homologacao" || view === "financeiro" || view === "viagens"
           ? /*#__PURE__*/ React.createElement("div", {
               className: "search-box-spacer",
               style: { flex: 1 },
@@ -29215,6 +30605,22 @@ function GrupoprimaPortal() {
             currentUser: currentUser,
             onNotify: notify,
             onView: setViewer,
+          }),
+        view === "viagens" &&
+          can(currentUser, "viagensDespesas") &&
+          /*#__PURE__*/ React.createElement(ViagensView, {
+            currentUser: currentUser,
+            onNotify: notify,
+            onView: setViewer,
+            deepLinkId: vgDeepLink,
+            onDeepLinkConsumed: () => {
+              setVgDeepLink(null);
+              try {
+                const u = new URL(window.location.href);
+                u.searchParams.delete("viagem");
+                window.history.replaceState({}, "", u.pathname + (u.search || "") + u.hash);
+              } catch (e) {}
+            },
           }),
         view === "auditoria" &&
           can(currentUser, "auditoria") &&
