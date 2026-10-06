@@ -26662,6 +26662,20 @@ function FinModeloCard({ podeBaixar, onBaixar }) {
     ),
   );
 }
+// Retorno do cliente na tabela: a resposta mais recente (versão mais alta) com
+// "Ver" e "Baixar" direto na linha — sem precisar abrir a solicitação.
+function finRetornoCliente(it, { onView, onNotify } = {}) {
+  const respostas = it.respostas || [];
+  if (respostas.length === 0) return finEl("span", { className: "fin-retorno-vazio" }, "—");
+  const r = respostas[respostas.length - 1];
+  return finEl(
+    "div",
+    { className: "fin-retorno" },
+    finEl("span", { className: "fin-retorno-nome", title: `${r.arquivo.nome} (versão ${r.versao}${respostas.length > 1 ? ` de ${respostas.length}` : ""})` }, `v${r.versao}`),
+    finEl("button", { type: "button", className: "mini-download-btn", title: `Ver ${r.arquivo.nome}`, "aria-label": "Ver retorno do cliente", onClick: () => finVerArquivo(r.arquivo, it, { onView, onNotify }) }, finEl(Eye, { size: 13 }), " Ver"),
+    finEl("button", { type: "button", className: "mini-download-btn", title: `Baixar ${r.arquivo.nome}`, "aria-label": "Baixar retorno do cliente", onClick: () => finBaixarArquivo(r.arquivo, it, { onNotify }) }, finEl(Download, { size: 13 }), " Baixar"),
+  );
+}
 function FinDetalheView({ item, currentUser, onBack, onExecutar, onExcluir, onView, onNotify }) {
   const [modal, setModal] = useState(null);
   const [novoStatus, setNovoStatus] = useState("");
@@ -26690,8 +26704,11 @@ function FinDetalheView({ item, currentUser, onBack, onExecutar, onExcluir, onVi
   const modeloAtualVersao = finModeloAtual().versao;
   return finEl(
     "div",
-    { className: "view" },
+    { className: "view view-wide" },
     finEl("button", { className: "back-btn", onClick: onBack }, finEl(ArrowLeft, { size: 15 }), " Voltar às informações financeiras"),
+    finEl(
+      "div",
+      { className: "fin-detalhe-topo" },
     finEl(
       "header",
       { className: "company-header" },
@@ -26757,6 +26774,97 @@ function FinDetalheView({ item, currentUser, onBack, onExecutar, onExcluir, onVi
             finEl("button", { className: "filters-clear-btn filters-clear-inline", onClick: () => setConfirmandoExclusao(false) }, "Cancelar"),
           ),
         ),
+    ),
+    (operar || admin) &&
+      finEl(
+        "section",
+        { className: "fin-passos", "data-testid": "fin-passos" },
+        finEl("h3", null, "Concluir o registro"),
+        finEl("p", { className: "fin-passos-sub" }, "Siga as etapas abaixo, na ordem, para concluir esta solicitação."),
+        finEl(
+          "div",
+          { className: "fin-passos-lista" },
+          // Etapa 1 — anexar resposta
+          finEl(
+            "div",
+            { className: "fin-passo" },
+            finEl("span", { className: "fin-passo-num" }, "1"),
+            finEl(
+              "div",
+              { className: "fin-passo-corpo" },
+              finEl("div", { className: "fin-passo-titulo" }, respostas.length ? "Anexar nova versão da resposta" : "Anexar resposta do cliente"),
+              finEl("div", { className: "fin-passo-dica" }, respostas.length ? `Já existem ${respostas.length} versão(ões) anexada(s). Anexe outra se o cliente reenviar o modelo.` : "Anexe o modelo preenchido devolvido pelo cliente."),
+            ),
+            operar &&
+              finEl("button", { className: "fin-passo-btn", disabled: concluido, onClick: () => setModal("resposta") }, finEl(UploadCloud, { size: 14 }), respostas.length ? " Anexar nova versão da resposta" : " Anexar resposta do cliente"),
+          ),
+          // Etapa 2 — encaminhar ao Financeiro
+          finEl(
+            "div",
+            { className: "fin-passo" },
+            finEl("span", { className: "fin-passo-num" }, "2"),
+            finEl(
+              "div",
+              { className: "fin-passo-corpo" },
+              finEl("div", { className: "fin-passo-titulo" }, "Encaminhar ao Financeiro"),
+              finEl(
+                "div",
+                { className: "fin-passo-dica" },
+                respostas.length === 0 ? "Disponível depois que a resposta do cliente for anexada." : emPendencia ? "Resolva a pendência aberta para poder encaminhar." : encaminhamentos.length ? `Já encaminhado ${encaminhamentos.length} vez(es). Encaminhe de novo se houver nova versão.` : "Registre o encaminhamento da resposta ao e-mail do Financeiro.",
+              ),
+            ),
+            operar &&
+              finEl(
+                "button",
+                { className: "fin-passo-btn", disabled: concluido || emPendencia || respostas.length === 0, onClick: () => setModal("encaminhar") },
+                finEl(Send, { size: 14 }),
+                " Encaminhar ao Financeiro",
+              ),
+          ),
+          // Etapa 3 — status
+          finEl(
+            "div",
+            { className: "fin-passo" },
+            finEl("span", { className: "fin-passo-num" }, "3"),
+            finEl(
+              "div",
+              { className: "fin-passo-corpo" },
+              finEl("div", { className: "fin-passo-titulo" }, "Status do registro"),
+              finEl(
+                "div",
+                { className: "fin-passo-dica" },
+                admin ? "Atualize o status para concluir o registro." : "O status é atualizado automaticamente a cada etapa; a conclusão final é feita pela administração.",
+              ),
+              !admin && finEl("div", { className: "fin-passo-status-atual" }, "Status atual: ", finEl(FinStatusBadge, { status: item.status })),
+            ),
+            admin &&
+              finEl(
+                "div",
+                { className: "fin-passo-status" },
+                finEl(
+                  "select",
+                  { className: "fin-status-select fin-passo-select", value: novoStatus, onChange: (e) => setNovoStatus(e.target.value), "aria-label": "Alterar status" },
+                  finEl("option", { value: "" }, "Alterar status…"),
+                  opcoesStatus.map((k) => finEl("option", { key: k, value: k }, FIN_STATUS_META[k].label)),
+                ),
+                finEl(
+                  "button",
+                  {
+                    className: "fin-passo-btn",
+                    disabled: !novoStatus,
+                    onClick: () => {
+                      const res = executar("alterarStatus", { status: novoStatus });
+                      if (res.ok) setNovoStatus("");
+                      else onNotify?.(res.erro, "error");
+                    },
+                  },
+                  finEl(CheckCircle2, { size: 14 }),
+                  " Aplicar status",
+                ),
+              ),
+          ),
+        ),
+      ),
     ),
     finEl(
       "section",
@@ -26856,96 +26964,6 @@ function FinDetalheView({ item, currentUser, onBack, onExecutar, onExcluir, onVi
         }),
       ),
     ),
-    (operar || admin) &&
-      finEl(
-        "section",
-        { className: "section-block fin-passos", "data-testid": "fin-passos" },
-        finEl("h3", null, "Concluir o registro"),
-        finEl("p", { className: "fin-passos-sub" }, "Siga as etapas abaixo, na ordem, para concluir esta solicitação."),
-        finEl(
-          "div",
-          { className: "fin-passos-lista" },
-          // Etapa 1 — anexar resposta
-          finEl(
-            "div",
-            { className: "fin-passo" },
-            finEl("span", { className: "fin-passo-num" }, "1"),
-            finEl(
-              "div",
-              { className: "fin-passo-corpo" },
-              finEl("div", { className: "fin-passo-titulo" }, respostas.length ? "Anexar nova versão da resposta" : "Anexar resposta do cliente"),
-              finEl("div", { className: "fin-passo-dica" }, respostas.length ? `Já existem ${respostas.length} versão(ões) anexada(s). Anexe outra se o cliente reenviar o modelo.` : "Anexe o modelo preenchido devolvido pelo cliente."),
-            ),
-            operar &&
-              finEl("button", { className: "fin-passo-btn", disabled: concluido, onClick: () => setModal("resposta") }, finEl(UploadCloud, { size: 14 }), respostas.length ? " Anexar nova versão da resposta" : " Anexar resposta do cliente"),
-          ),
-          // Etapa 2 — encaminhar ao Financeiro
-          finEl(
-            "div",
-            { className: "fin-passo" },
-            finEl("span", { className: "fin-passo-num" }, "2"),
-            finEl(
-              "div",
-              { className: "fin-passo-corpo" },
-              finEl("div", { className: "fin-passo-titulo" }, "Encaminhar ao Financeiro"),
-              finEl(
-                "div",
-                { className: "fin-passo-dica" },
-                respostas.length === 0 ? "Disponível depois que a resposta do cliente for anexada." : emPendencia ? "Resolva a pendência aberta para poder encaminhar." : encaminhamentos.length ? `Já encaminhado ${encaminhamentos.length} vez(es). Encaminhe de novo se houver nova versão.` : "Registre o encaminhamento da resposta ao e-mail do Financeiro.",
-              ),
-            ),
-            operar &&
-              finEl(
-                "button",
-                { className: "fin-passo-btn", disabled: concluido || emPendencia || respostas.length === 0, onClick: () => setModal("encaminhar") },
-                finEl(Send, { size: 14 }),
-                " Encaminhar ao Financeiro",
-              ),
-          ),
-          // Etapa 3 — status
-          finEl(
-            "div",
-            { className: "fin-passo" },
-            finEl("span", { className: "fin-passo-num" }, "3"),
-            finEl(
-              "div",
-              { className: "fin-passo-corpo" },
-              finEl("div", { className: "fin-passo-titulo" }, "Status do registro"),
-              finEl(
-                "div",
-                { className: "fin-passo-dica" },
-                admin ? "Atualize o status para concluir o registro." : "O status é atualizado automaticamente a cada etapa; a conclusão final é feita pela administração.",
-              ),
-              !admin && finEl("div", { className: "fin-passo-status-atual" }, "Status atual: ", finEl(FinStatusBadge, { status: item.status })),
-            ),
-            admin &&
-              finEl(
-                "div",
-                { className: "fin-passo-status" },
-                finEl(
-                  "select",
-                  { className: "fin-status-select fin-passo-select", value: novoStatus, onChange: (e) => setNovoStatus(e.target.value), "aria-label": "Alterar status" },
-                  finEl("option", { value: "" }, "Alterar status…"),
-                  opcoesStatus.map((k) => finEl("option", { key: k, value: k }, FIN_STATUS_META[k].label)),
-                ),
-                finEl(
-                  "button",
-                  {
-                    className: "fin-passo-btn",
-                    disabled: !novoStatus,
-                    onClick: () => {
-                      const res = executar("alterarStatus", { status: novoStatus });
-                      if (res.ok) setNovoStatus("");
-                      else onNotify?.(res.erro, "error");
-                    },
-                  },
-                  finEl(CheckCircle2, { size: 14 }),
-                  " Aplicar status",
-                ),
-              ),
-          ),
-        ),
-      ),
     modal === "envio" && finEl(FinRegistrarEnvioModal, { item, onClose: () => setModal(null), onConfirmar: (v) => executar("registrarEnvio", v) }),
     modal === "resposta" && finEl(FinAnexarRespostaModal, { item, onClose: () => setModal(null), onConfirmar: (v) => executar("anexarResposta", v) }),
     modal === "encaminhar" && finEl(FinEncaminharModal, { item, onClose: () => setModal(null), onConfirmar: (v) => executar("encaminhar", v) }),
@@ -27130,7 +27148,7 @@ function FinanceiroView({ currentUser, onNotify, onView }) {
   const admin = can(currentUser, "financeiroAdmin");
   return finEl(
     "div",
-    { className: "view" },
+    { className: "view view-wide" },
     finEl(
       "header",
       { className: "view-header view-header-compact" },
@@ -27188,9 +27206,9 @@ function FinanceiroView({ currentUser, onNotify, onView }) {
         finEl("label", { className: "filter-field" }, finEl("span", null, "E-mail do Financeiro"), finEl("input", { placeholder: "Filtrar por e-mail...", value: filtroFinanceiro, onChange: (e) => setFiltroFinanceiro(e.target.value) })),
         finEl("label", { className: "filter-field filter-field-date" }, finEl("span", null, "Solicitada de"), finEl("input", { type: "date", value: filtroInicio, onChange: (e) => setFiltroInicio(e.target.value) })),
         finEl("label", { className: "filter-field filter-field-date" }, finEl("span", null, "até"), finEl("input", { type: "date", value: filtroFim, onChange: (e) => setFiltroFim(e.target.value) })),
-        finEl("label", { className: "fin-check-field" }, finEl("input", { type: "checkbox", checked: soPendencias, onChange: (e) => setSoPendencias(e.target.checked) }), finEl("span", null, "Somente pendências")),
+        finEl("label", { className: "fin-check-field" }, finEl("input", { type: "checkbox", checked: soPendencias, onChange: (e) => setSoPendencias(e.target.checked) }), finEl("span", null, "Só pendências")),
       ),
-      finEl("button", { className: "filters-clear-btn filters-clear-inline", onClick: limparFiltros }, "Limpar filtros"),
+      finEl("button", { className: "filters-clear-btn filters-clear-inline", onClick: limparFiltros }, "Limpar"),
     ),
     finEl(
       "div",
@@ -27201,7 +27219,7 @@ function FinanceiroView({ currentUser, onNotify, onView }) {
         finEl(
           "thead",
           null,
-          finEl("tr", null, ["Data", "Cliente", "Consultor", "E-mail do cliente", "Status", "Financeiro", "Última atualização", "Ação"].map((t) => finEl("th", { key: t }, t))),
+          finEl("tr", null, ["Data", "Cliente", "Consultor", "E-mail do cliente", "Status", "Retorno do cliente", "Financeiro", "Última atualização", "Ação"].map((t) => finEl("th", { key: t }, t))),
         ),
         finEl(
           "tbody",
@@ -27215,6 +27233,7 @@ function FinanceiroView({ currentUser, onNotify, onView }) {
               finEl("td", null, it.consultor?.nome),
               finEl("td", { className: "fin-cell-email", title: it.emailCliente }, it.emailCliente),
               finEl("td", null, finEl(FinStatusBadge, { status: it.status })),
+              finEl("td", { className: "fin-cell-retorno", onClick: (e) => e.stopPropagation() }, finRetornoCliente(it, { onView, onNotify })),
               finEl("td", { className: "fin-cell-email", title: it.emailFinanceiro || "" }, it.emailFinanceiro || "—"),
               finEl("td", { className: "mono" }, formatAuditWhen(new Date(finUltimaAtualizacao(it)))),
               finEl("td", { onClick: (e) => e.stopPropagation() }, finEl("button", { type: "button", className: "link-btn", onClick: () => setSelectedId(it.id) }, "Ver solicitação ", finEl(ChevronRight, { size: 13 }))),
@@ -27235,6 +27254,7 @@ function FinanceiroView({ currentUser, onNotify, onView }) {
           finEl("div", { className: "company-card-mobile-top" }, finEl("span", { className: "company-mini-tag" }, it.cliente), finEl(FinStatusBadge, { status: it.status })),
           finEl("div", { className: "company-card-mobile-row" }, finEl("span", null, "Consultor"), finEl("span", null, it.consultor?.nome)),
           finEl("div", { className: "company-card-mobile-row" }, finEl("span", null, "E-mail do cliente"), finEl("span", { className: "fin-cell-email" }, it.emailCliente)),
+          finEl("div", { className: "company-card-mobile-row", onClick: (e) => e.stopPropagation() }, finEl("span", null, "Retorno do cliente"), finEl("span", { className: "fin-cell-retorno" }, finRetornoCliente(it, { onView, onNotify }))),
           finEl("div", { className: "company-card-mobile-row" }, finEl("span", null, "Financeiro"), finEl("span", { className: "fin-cell-email" }, it.emailFinanceiro || "—")),
           finEl("div", { className: "company-card-mobile-row" }, finEl("span", null, "Atualizada"), finEl("span", null, formatAuditWhen(new Date(finUltimaAtualizacao(it))))),
           finEl("div", { className: "company-card-mobile-cta" }, "Ver solicitação ", finEl(ChevronRight, { size: 13 })),
@@ -28370,24 +28390,47 @@ function GrupoprimaPortal() {
         .fin-pendencia-box svg { flex-shrink: 0; margin-top: 2px; color: #D64545; }
         .fin-admin-actions { padding-top: 12px; border-top: 1px solid var(--cinza-frio); }
         .fin-status-select { border: 1px solid var(--cinza-frio); border-radius: 7px; background: var(--card-bg); color: var(--texto); padding: 7px 10px; font-size: 11.5px; font-weight: 700; }
-        .fin-passos { margin-top: 18px; padding: 18px 20px; border: 2px solid #1FA85A; border-radius: 14px; background: var(--card-bg); box-shadow: 0 0 0 4px rgba(107,254,156,0.22); }
-        .fin-passos h3 { margin-top: 0; }
-        .fin-passos-sub { font-size: 12px; color: var(--carvao); margin: 2px 0 14px; }
-        .fin-passos-lista { display: flex; flex-direction: column; gap: 10px; }
-        .fin-passo { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; border: 1.5px solid #1FA85A; border-radius: 11px; padding: 12px 14px; background: rgba(107,254,156,0.07); }
-        .fin-passo-num { flex-shrink: 0; width: 26px; height: 26px; border-radius: 50%; background: #1FA85A; color: #fff; font-weight: 800; font-size: 13px; display: inline-flex; align-items: center; justify-content: center; }
-        .fin-passo-corpo { flex: 1; min-width: 200px; }
-        .fin-passo-titulo { font-weight: 800; font-size: 13.5px; color: var(--texto); }
-        .fin-passo-dica { font-size: 11.5px; color: var(--carvao); margin-top: 2px; }
+        .fin-detalhe-topo { display: grid; grid-template-columns: minmax(0, 1fr) 390px; gap: 18px; align-items: stretch; margin-bottom: 0; }
+        .fin-detalhe-topo .company-header { margin-bottom: 0; }
+        .fin-passos { background: var(--card-bg); border: 1px solid var(--cinza-frio); border-radius: 12px; padding: 18px 18px 16px; display: flex; flex-direction: column; }
+        .fin-passos h3 { margin: 0; font-size: 15px; }
+        .fin-passos-sub { font-size: 11.5px; color: var(--carvao); margin: 3px 0 12px; }
+        .fin-passos-lista { display: flex; flex-direction: column; gap: 9px; }
+        .fin-passo { display: grid; grid-template-columns: 26px minmax(0, 1fr); column-gap: 10px; row-gap: 8px; align-items: start; border: 1.5px solid #1FA85A; border-radius: 10px; padding: 10px 12px; background: transparent; }
+        .fin-passo-num { grid-row: 1; width: 24px; height: 24px; border-radius: 50%; background: #1FA85A; color: #fff; font-weight: 800; font-size: 12px; display: inline-flex; align-items: center; justify-content: center; }
+        .fin-passo-corpo { min-width: 0; }
+        .fin-passo-titulo { font-weight: 800; font-size: 13px; color: var(--texto); }
+        .fin-passo-dica { font-size: 11px; color: var(--carvao); margin-top: 2px; line-height: 1.4; }
         .fin-passo-status-atual { margin-top: 6px; font-size: 11.5px; color: var(--carvao); display: flex; align-items: center; gap: 6px; }
-        .fin-passo-status { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-        .fin-passo-select { border: 1.5px solid #1FA85A; }
-        .fin-passo-btn { display: inline-flex; align-items: center; gap: 6px; background: var(--card-bg); color: #0b6b38; border: 2px solid #1FA85A; border-radius: 8px; padding: 8px 14px; font-size: 12.5px; font-weight: 800; cursor: pointer; transition: background 0.15s, color 0.15s; }
+        .fin-passo > .fin-passo-btn, .fin-passo > .fin-passo-status { grid-column: 2; }
+        .fin-passo-status { display: flex; gap: 8px; align-items: center; }
+        .fin-passo-select { flex: 1; min-width: 0; border: 1.5px solid #1FA85A; }
+        .fin-passo-btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; background: transparent; color: #0b6b38; border: 1.5px solid #1FA85A; border-radius: 8px; padding: 7px 12px; font-size: 12px; font-weight: 800; cursor: pointer; transition: background 0.15s, color 0.15s; }
+        .fin-passo > .fin-passo-btn { width: 100%; }
         .fin-passo-btn:hover:not(:disabled) { background: #1FA85A; color: #fff; }
         .fin-passo-btn:disabled { opacity: 0.45; cursor: not-allowed; border-color: var(--cinza-frio); color: var(--carvao); }
         .portal-root[data-theme="dark"] .fin-passo-btn { color: #7FE6A0; }
         .portal-root[data-theme="dark"] .fin-passo-btn:hover:not(:disabled) { color: #fff; }
-        @media (max-width: 720px) { .fin-passo-btn, .fin-passo-status { width: 100%; justify-content: center; } }
+        .fin-detalhe-topo + .homolog-detail-card { margin-top: 18px; }
+        @media (max-width: 1000px) { .fin-detalhe-topo { grid-template-columns: 1fr; } .fin-detalhe-topo .company-header { margin-bottom: 0; } }
+        /* Filtros da lista numa linha só (telas largas) + coluna "Retorno do cliente" */
+        .fin-filters-bar { padding: 8px 12px; margin: 14px 0 14px; gap: 10px; }
+        .fin-filters-bar .filter-field input, .fin-filters-bar .filter-field select { padding: 6px 8px; font-size: 12px; }
+        .fin-filters-bar .fin-check-field { padding-bottom: 6px; white-space: nowrap; }
+        .fin-filters-bar .filters-clear-inline { margin-left: 0; }
+        @media (min-width: 1200px) {
+          .fin-filters-bar { flex-wrap: nowrap; }
+          .fin-filters-bar .filters-bar-head { display: none; }
+          .fin-filters-bar .filters-bar-fields { flex: 1 1 auto; flex-wrap: nowrap; min-width: 0; }
+          .fin-filters-bar .filter-field { min-width: 0; flex: 1 1 0; }
+          .fin-filters-bar .filter-field-date { flex: 0.9 1 0; min-width: 0; }
+        }
+        .fin-table th, .fin-table td { padding-left: 12px; padding-right: 12px; }
+        .fin-cell-retorno { white-space: nowrap; }
+        .fin-retorno { display: inline-flex; align-items: center; gap: 6px; }
+        .fin-retorno-nome { font-size: 10.5px; font-weight: 800; padding: 2px 7px; border-radius: 999px; background: rgba(107,254,156,0.18); border: 1px solid rgba(107,254,156,0.65); color: #0b4a2c; }
+        .portal-root[data-theme="dark"] .fin-retorno-nome { color: #7FE6A0; }
+        .fin-retorno-vazio { color: var(--carvao); }
         @media (max-width: 1100px) { .fin-kpi-grid { grid-template-columns: repeat(3, 1fr); } }
         @media (max-width: 720px) { .fin-kpi-grid { grid-template-columns: repeat(2, 1fr); gap: 8px; } .fin-dados-grid { grid-template-columns: 1fr; } .fin-modelo-acoes { width: 100%; } .fin-cell-email { max-width: 140px; } }
 
