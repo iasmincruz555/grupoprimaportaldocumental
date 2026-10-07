@@ -1238,6 +1238,24 @@ const companiesRaw = [
     situacao: "ATIVA",
     documentos: [],
   },
+  {
+    // Filial da Bahia (2026-10-07, pedido da Iasmin) — dados do Cartão CNPJ
+    // emitido em 07/10/2026 (CNPJ 30.668.797/0013-02).
+    id: "0013",
+    tipo: "Filial",
+    cnpj: "30.668.797/0013-02",
+    razaoSocial: "GPRIMA LOGISTICA LTDA",
+    nomeFantasia: "GRUPOPRIMA LOGISTICA",
+    municipio: "Feira de Santana",
+    uf: "BA",
+    endereco: "Av. Professor Fernando São Paulo, 76 — Ponto Central",
+    cep: "44.075-045",
+    email: "dte@bwa.global",
+    telefone: "(84) 3204-6500",
+    abertura: "07/10/2026",
+    situacao: "ATIVA",
+    documentos: [],
+  },
 ];
 /* =========================================================================
    ENDEREÇOS DAS BASES — lista fixa fornecida diretamente pela Iasmin
@@ -1311,6 +1329,13 @@ const BASE_ENDERECOS = [
     municipio: "Cabedelo",
     uf: "PB",
     endereco: "Rua Antônio Francisco de Araújo, nº 29, Box 1101, Parque Esperança, Cabedelo/PB – CEP 58108-646",
+  },
+  {
+    id: "0013",
+    tipo: "Filial",
+    municipio: "Feira de Santana",
+    uf: "BA",
+    endereco: "Av. Professor Fernando São Paulo, nº 76, Ponto Central, Feira de Santana/BA – CEP 44075-045",
   },
 ];
 /** baseEnderecoLabelFor: mesmo padrão de `companyLabelFor`, mas também
@@ -7749,64 +7774,9 @@ function DashboardView({
             ),
           ),
         ),
-        // Acesso rápido às "Documentações de abrangência empresarial" (pedido
-        // explícito da Iasmin, 2026-09-18: "inclui nesse espaço em branco...
-        // um acesso rápido") — mesma estrutura visual dos cards de base, no
-        // espaço que sobra na grade (4 colunas × 2 linhas com 7 bases).
-        // Nunca uma base/CNPJ novo: leva pra Empresas. `onGoCompaniesCorporate`
-        // (nunca o `onGoCompanies` genérico usado pelos outros cards/KPIs
-        // desta tela) também liga a semente `companiesOpenCorporate` — só
-        // clicando ESTE card específico é que a tela de Empresas chega com o
-        // bloco "Documentações de abrangência empresarial" já aberto (pedido
-        // explícito da Iasmin, 2026-09-23; ver CompaniesView abaixo).
-        /*#__PURE__*/ React.createElement(
-          "div",
-          {
-            key: "corporate-quick-access",
-            className: "company-mini company-mini-corporate",
-            role: "button",
-            tabIndex: 0,
-            onClick: onGoCompaniesCorporate,
-            onKeyDown: (e) => e.key === "Enter" && onGoCompaniesCorporate(),
-          },
-          /*#__PURE__*/ React.createElement(
-            "div",
-            { className: "company-mini-top" },
-            /*#__PURE__*/ React.createElement(
-              "span",
-              { className: "company-mini-tag" },
-              "Grupoprima Logística",
-            ),
-          ),
-          /*#__PURE__*/ React.createElement(
-            "div",
-            { className: "company-mini-city" },
-            /*#__PURE__*/ React.createElement(FolderArchive, { size: 13 }),
-            " Documentações de abrangência empresarial",
-          ),
-          /*#__PURE__*/ React.createElement(
-            "div",
-            { className: "company-mini-foot-row" },
-            /*#__PURE__*/ React.createElement(
-              "span",
-              { className: "company-mini-foot" },
-              computeCorporateDocs(companies).length,
-              " doc(s)",
-            ),
-            /*#__PURE__*/ React.createElement(
-              "button",
-              {
-                className: "company-mini-docs-btn",
-                onClick: (e) => {
-                  e.stopPropagation();
-                  onGoCompaniesCorporate();
-                },
-              },
-              /*#__PURE__*/ React.createElement(FileSearch, { size: 12 }),
-              " Documentos",
-            ),
-          ),
-        ),
+        // (2026-10-07, pedido da Iasmin) O card de acesso rápido às "Documentações de
+        // abrangência empresarial" saiu desta grade — a grade agora mostra só as 8 bases.
+        // Os documentos de abrangência empresarial continuam em Empresas.
       ),
     ),
     /*#__PURE__*/ React.createElement(
@@ -10737,7 +10707,26 @@ function CompanyDetailView({
       /*#__PURE__*/ React.createElement("span", null, "Emitido em"),
       /*#__PURE__*/ React.createElement("span", null, doc.emissao),
       /*#__PURE__*/ React.createElement("span", null, "Validade"),
-      /*#__PURE__*/ React.createElement("span", null, formatValidadeResumo(doc)),
+      // Documento vencido (2026-10-07, pedido da Iasmin): selo vermelho
+      // "Vencido" (mesmo estilo dos demais status) + a frase de sempre, com
+      // a data e há quantos dias venceu.
+      doc.status === "vencido"
+        ? /*#__PURE__*/ React.createElement(
+            "span",
+            { className: "doc-validade-vencida" },
+            /*#__PURE__*/ React.createElement(
+              "span",
+              { className: "status-badge status-vencido", "data-testid": "doc-selo-vencido" },
+              "Vencido",
+            ),
+            " ",
+            /*#__PURE__*/ React.createElement(
+              "span",
+              { className: "doc-validade-vencida-txt" },
+              formatValidadeResumo(doc),
+            ),
+          )
+        : /*#__PURE__*/ React.createElement("span", null, formatValidadeResumo(doc)),
       /*#__PURE__*/ React.createElement("span", null, "Versão"),
       /*#__PURE__*/ React.createElement("span", null, doc.versao),
       /*#__PURE__*/ React.createElement("span", null, "Tamanho"),
@@ -12948,6 +12937,7 @@ function ViewerModal({ viewer, onClose }) {
     "Pernambuco (Filial 0004)",
     "Paraná (Filial 0005)",
     "Paraíba (Filial 0012)",
+    "Bahia (Filial 0013)",
     "São Paulo (Filial 0007)",
     "Espírito Santo (Filial 0010)",
     "Nextflow",
@@ -29690,6 +29680,9 @@ function GrupoprimaPortal() {
         .status-badge { display: inline-block; padding: 4px 9px; border-radius: 999px; font-size: 11px; font-weight: 700; }
         .status-ok { background: rgba(107,254,156,0.18); color: #0b4a2c; }
         .status-vencido { background: rgba(214,69,69,0.14); color: #a13333; }
+        .doc-validade-vencida { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+        .doc-validade-vencida-txt { color: #a13333; font-weight: 600; }
+        .portal-root[data-theme="dark"] .doc-validade-vencida-txt { color: #FF9B9B; }
         .status-proximo { background: rgba(255,214,10,0.20); color: #7a5400; }
         .status-conferencia { background: rgba(201,138,0,0.14); color: #7a5400; }
         .status-nova { background: rgba(46,125,166,0.14); color: #1d5a7a; }
