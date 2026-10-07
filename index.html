@@ -6138,7 +6138,15 @@ function matchChecklistItemToCompany(item, company) {
       if (bateram.length === 1)
         return { status: "encontrado", doc: bateram[0], candidatos: atuais };
     }
-    return { status: "ambiguo", candidatos: atuais };
+    // Pedido de um TIPO (ex.: "IBAMA") que resultou em vários documentos do
+    // mesmo tipo e que nenhuma pista do texto distingue: mesma regra do chat
+    // (searchDocuments) — vale a versão mais recente (sortDocumentsByVersion),
+    // as outras são versões antigas do mesmo documento. Pedido explícito da
+    // Iasmin (2026-10-07, caso IBAMA: 4.1/4.2/4.3 iam todos pro ZIP): "enviar
+    // apenas a versão vigente". Antes devolvia "ambiguo", e o ZIP incluía TODOS
+    // os candidatos. `candidatos` continua trazendo todos (a tela pode listar).
+    const maisRecente = sortDocumentsByVersion(atuais)[0];
+    return { status: "encontrado", doc: maisRecente, candidatos: atuais };
   }
   if (item.categoriaSugerida) {
     let brutos = docs.filter((d) => d.categoria === item.categoriaSugerida);
@@ -23287,7 +23295,12 @@ function EnvioLoteDetailView({ item, companies, onBack, onNotify, onView, onUpda
                   React.createElement(
                     "div",
                     { className: "lote-previa-meta" },
-                    [l.baseLabel, l.itemNome ? `pedido como "${l.itemNome}"` : null].filter(Boolean).join(" · "),
+                    [
+                      l.baseLabel,
+                      l.itemNome ? `pedido como "${l.itemNome}"` : null,
+                      l.doc.emissao ? `emissão ${l.doc.emissao}` : null,
+                      l.doc.validade ? `validade ${l.doc.validade}` : l.doc.__anexoManualLote ? null : "sem validade cadastrada",
+                    ].filter(Boolean).join(" · "),
                   ),
                   vencido
                     ? React.createElement(
@@ -27932,11 +27945,38 @@ class VgErro extends Error {
   }
 }
 let vgSessao = { idToken: null, expira: 0, refreshToken: null };
-function vgGuardarRefresh(rt) {
+/* "Manter conectado neste computador" (2026-10-07, pedido da Iasmin: o
+   segundo login do módulo era "perda de tempo"): o refresh token passa a
+   ficar no localStorage (um login por computador) — a menos que a pessoa
+   desmarque a opção, caso em que fica só na aba (sessionStorage). Fica
+   amarrado ao e-mail do usuário do portal que fez o login: se outra pessoa
+   entrar no portal neste computador, a sessão guardada NÃO é reaproveitada
+   (ver vgRestaurarSessao). Sair do portal ou "Sair do módulo" apaga tudo. */
+const VG_LEMBRAR_KEY = "vg_lembrar_v1";
+let vgDonoPortal = "";
+function vgNormEmail(e) { return String(e || "").trim().toLowerCase(); }
+function vgLerGuardado() {
+  for (const st of [() => localStorage, () => sessionStorage]) {
+    try {
+      const raw = st().getItem(VG_SESSION_KEY);
+      if (!raw) continue;
+      if (raw.charAt(0) === "{") { const o = JSON.parse(raw); if (o && o.rt) return { rt: o.rt, dono: vgNormEmail(o.dono) }; }
+      else return { rt: raw, dono: "" };
+    } catch (e) {}
+  }
+  return null;
+}
+function vgGuardarRefresh(rt, lembrar) {
+  try { sessionStorage.removeItem(VG_SESSION_KEY); } catch (e) {}
+  try { localStorage.removeItem(VG_SESSION_KEY); } catch (e) {}
+  if (!rt) return;
+  let usarLocal = true;
   try {
-    if (rt) sessionStorage.setItem(VG_SESSION_KEY, rt);
-    else sessionStorage.removeItem(VG_SESSION_KEY);
+    if (lembrar === undefined) usarLocal = localStorage.getItem(VG_LEMBRAR_KEY) !== "0";
+    else { usarLocal = !!lembrar; localStorage.setItem(VG_LEMBRAR_KEY, usarLocal ? "1" : "0"); }
   } catch (e) {}
+  const valor = JSON.stringify({ rt, dono: vgDonoPortal });
+  try { (usarLocal ? localStorage : sessionStorage).setItem(VG_SESSION_KEY, valor); } catch (e) {}
 }
 function vgTemSessao() {
   return !!vgSessao.refreshToken;
@@ -27944,6 +27984,7 @@ function vgTemSessao() {
 function vgSair() {
   vgSessao = { idToken: null, expira: 0, refreshToken: null };
   vgGuardarRefresh(null);
+  vgDonoPortal = "";
 }
 const VG_ERROS_FIREBASE = {
   EMAIL_NOT_FOUND: "E-mail ou senha incorretos.",
@@ -27972,14 +28013,15 @@ async function vgFirebasePost(url, corpo, tipo) {
   }
   return j;
 }
-async function vgLogin(email, senha) {
+async function vgLogin(email, senha, lembrar, donoPortal) {
   if (!VG_FIREBASE_CONFIGURADO) throw new VgErro(0, "O módulo ainda não foi configurado.");
   const j = await vgFirebasePost(
     `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${VG_FIREBASE_API_KEY}`,
     { email: String(email || "").trim(), password: senha, returnSecureToken: true },
   );
   vgSessao = { idToken: j.idToken, expira: Date.now() + Number(j.expiresIn || 3600) * 1000, refreshToken: j.refreshToken };
-  vgGuardarRefresh(j.refreshToken);
+  if (donoPortal !== undefined) vgDonoPortal = vgNormEmail(donoPortal);
+  vgGuardarRefresh(j.refreshToken, lembrar);
 }
 async function vgRenovar() {
   if (!vgSessao.refreshToken) throw new VgErro(401, "Entre novamente.");
@@ -27996,13 +28038,14 @@ async function vgRenovar() {
     throw new VgErro(e.status === 0 ? 0 : 401, e.status === 0 ? e.message : "Sua sessão expirou. Entre novamente.");
   }
 }
-async function vgRestaurarSessao() {
-  let rt = null;
-  try {
-    rt = sessionStorage.getItem(VG_SESSION_KEY);
-  } catch (e) {}
-  if (!rt || !VG_FIREBASE_CONFIGURADO) return false;
-  vgSessao = { idToken: null, expira: 0, refreshToken: rt };
+async function vgRestaurarSessao(donoPortal) {
+  const g = vgLerGuardado();
+  if (!g || !g.rt || !VG_FIREBASE_CONFIGURADO) return false;
+  // Sessão guardada por OUTRA pessoa do portal (ou sem dono conhecido):
+  // nunca reaproveita — apaga e pede o login.
+  vgDonoPortal = vgNormEmail(donoPortal);
+  if (!vgDonoPortal || g.dono !== vgDonoPortal) { vgGuardarRefresh(null); return false; }
+  vgSessao = { idToken: null, expira: 0, refreshToken: g.rt };
   try {
     await vgRenovar();
     return true;
@@ -28253,19 +28296,20 @@ function VgAnexos({ viagemId, tipo, itemId, anexos, editavel, onAnexado, onRemov
 }
 
 /* ---------- entrada (login) e estados do módulo ---------- */
-function VgLogin({ onEntrou, processoAntigo, emailInicial }) {
+function VgLogin({ onEntrou, processoAntigo, emailInicial, donoPortal }) {
   const [email, setEmail] = useState(emailInicial || "");
   const [senha, setSenha] = useState("");
   const [erro, setErro] = useState(null);
   const [info, setInfo] = useState(null);
   const [ocupado, setOcupado] = useState(false);
+  const [lembrar, setLembrar] = useState(() => { try { return localStorage.getItem(VG_LEMBRAR_KEY) !== "0"; } catch (e) { return true; } });
   async function entrar(e) {
     e.preventDefault();
     if (ocupado) return;
     if (!email.trim() || !senha) return setErro("Informe e-mail e senha.");
     setErro(null); setInfo(null); setOcupado(true);
     try {
-      await vgLogin(email, senha);
+      await vgLogin(email, senha, lembrar, donoPortal);
       await onEntrou();
     } catch (err) {
       setErro(err.message || "Não foi possível entrar.");
@@ -28295,6 +28339,9 @@ function VgLogin({ onEntrou, processoAntigo, emailInicial }) {
       info && vgEl("div", { className: "vg-info" }, info),
       vgEl(FinCampo, { rotulo: "E-mail corporativo" }, vgEl("input", { type: "email", value: email, onChange: (e) => setEmail(e.target.value), autoComplete: "username", autoFocus: true })),
       vgEl(FinCampo, { rotulo: "Senha" }, vgEl("input", { type: "password", value: senha, onChange: (e) => setSenha(e.target.value), autoComplete: "current-password" })),
+      vgEl("label", { className: "vg-lembrar", style: { display: "flex", alignItems: "center", gap: 8, fontSize: 13, margin: "4px 0 10px", cursor: "pointer" } },
+        vgEl("input", { type: "checkbox", checked: lembrar, onChange: (e) => setLembrar(e.target.checked), "data-testid": "vg-lembrar" }),
+        "Manter conectado neste computador (só peço a senha uma vez)"),
       vgEl("button", { type: "submit", className: "doc-download-btn vg-btn-block", disabled: ocupado }, ocupado ? "Entrando..." : "Entrar"),
       vgEl("button", { type: "button", className: "link-btn vg-esqueci", onClick: esqueci }, "Esqueci minha senha"),
       processoAntigo && vgEl("a", { className: "vg-antigo", href: processoAntigo, target: "_blank", rel: "noopener noreferrer" }, "Precisa usar o processo antigo (Google Forms)? Clique aqui."),
@@ -28330,7 +28377,7 @@ function vgFiltrarLista(lista, { escopo, grupo, busca }) {
   if (q) l = l.filter((v) => `${v.consultorNome} ${v.cliente} ${v.destinoCidade} ${v.destinoUF} ${v.motivo}`.toLowerCase().includes(q));
   return l;
 }
-function VgLista({ me, escopo, onAbrir, onNova, onNotify, refreshKey, usuarios }) {
+function VgLista({ me, escopo, onAbrir, onNova, onNotify, refreshKey, usuarios, tituloFixo }) {
   const admin = me.perfil === "administrador";
   const [lista, setLista] = useState(null);
   const [resumo, setResumo] = useState(null);
@@ -28344,7 +28391,8 @@ function VgLista({ me, escopo, onAbrir, onNova, onNotify, refreshKey, usuarios }
   const [erro, setErro] = useState(null);
   const [modal, setModal] = useState(null);
   const [tick, setTick] = useState(0);
-  const filtrosServidor = { consultorId: admin ? fConsultor : "", destino: fDestino, de: fDe, ate: fAte, status: fStatus };
+  // Escopo "minhas" (inclui a Visão geral): o servidor já devolve — e o painel já soma — só as viagens da própria pessoa.
+  const filtrosServidor = { consultorId: escopo === "minhas" ? me.uid : (admin ? fConsultor : ""), destino: fDestino, de: fDe, ate: fAte, status: fStatus };
   const chave = JSON.stringify(filtrosServidor);
   useEffect(() => {
     let vivo = true;
@@ -28356,7 +28404,7 @@ function VgLista({ me, escopo, onAbrir, onNova, onNotify, refreshKey, usuarios }
     return () => { vivo = false; clearTimeout(t); };
   }, [chave, refreshKey, tick]);
   const visiveis = lista ? vgFiltrarLista(lista, { escopo, grupo, busca }) : [];
-  const titulo = escopo === "aprovacoes" ? "Aprovações" : escopo === "minhas" ? "Minhas viagens" : admin ? "Visão geral" : me.perfil === "financeiro" ? "Viagens na etapa financeira" : "Minhas viagens";
+  const titulo = tituloFixo || (escopo === "aprovacoes" ? "Aprovações" : escopo === "minhas" ? "Minhas viagens" : admin ? "Visão geral" : me.perfil === "financeiro" ? "Viagens na etapa financeira" : "Minhas viagens");
   const R = resumo || {};
   const cards = admin && escopo !== "minhas"
     ? [
@@ -28969,7 +29017,7 @@ function ViagensView({ currentUser, onNotify, onView, deepLinkId, onDeepLinkCons
     if (!VG_FIREBASE_CONFIGURADO) return;
     let vivo = true;
     (async () => {
-      const ok = vgTemSessao() || (await vgRestaurarSessao());
+      const ok = (vgTemSessao() && vgDonoPortal === vgNormEmail(currentUser && currentUser.email)) || (await vgRestaurarSessao(currentUser && currentUser.email));
       if (!vivo) return;
       if (ok) await carregarMe();
       else setFase("login");
@@ -29007,7 +29055,7 @@ function ViagensView({ currentUser, onNotify, onView, deepLinkId, onDeepLinkCons
   let corpo = null;
   if (fase === "sem_config") corpo = vgEl(VgNaoConfigurado);
   else if (fase === "carregando") corpo = vgEl("div", { className: "empty-state" }, "Carregando...");
-  else if (fase === "login") corpo = vgEl(VgLogin, { onEntrou: carregarMe, processoAntigo: VG_PROCESSO_ANTIGO_URL, emailInicial: currentUser && currentUser.email });
+  else if (fase === "login") corpo = vgEl(VgLogin, { onEntrou: carregarMe, processoAntigo: VG_PROCESSO_ANTIGO_URL, emailInicial: currentUser && currentUser.email, donoPortal: currentUser && currentUser.email });
   else if (fase === "sem_acesso") corpo = vgEl("div", { className: "vg-setup" }, vgEl(Lock, { size: 20 }), vgEl("h2", null, "Acesso não liberado"), vgEl("p", null, msgErro), vgEl("button", { type: "button", className: "doc-download-btn", onClick: sair }, "Entrar com outra conta"));
   else if (fase === "erro") corpo = vgEl("div", { className: "vg-setup" }, vgEl(AlertTriangle, { size: 20 }), vgEl("h2", null, "Não foi possível carregar o módulo"), vgEl("p", null, msgErro), vgEl("button", { type: "button", className: "doc-download-btn", onClick: () => { setFase("carregando"); carregarMe(); } }, "Tentar novamente"));
   else if (fase === "pronto" && me) {
@@ -29015,7 +29063,7 @@ function ViagensView({ currentUser, onNotify, onView, deepLinkId, onDeepLinkCons
     else if (tela.nome === "nova" || tela.nome === "editar") corpo = vgEl(VgWizard, { me, viagemId: tela.nome === "editar" ? tela.id : null, onNotify, onView, onCancelar: () => setTela(tela.id ? { nome: "detalhe", id: tela.id } : { nome: "lista" }), onConcluido: (vid) => { mudou(); setTela(vid ? { nome: "detalhe", id: vid } : { nome: "lista" }); } });
     else if (tela.nome === "usuarios") corpo = vgEl(VgUsuarios, { me, onNotify, onMudou: setUsuarios });
     else if (tela.nome === "notificacoes") corpo = vgEl(VgNotificacoes, { onAbrir: (id) => setTela({ nome: "detalhe", id }), onLidas: () => vgApi("GET", "/me").then((m) => setMe((a) => ({ ...a, notificacoesNaoLidas: m.notificacoesNaoLidas }))).catch(() => {}), onNotify });
-    else corpo = vgEl(VgLista, { key: tela.nome, me, escopo: tela.nome === "lista" ? (admin ? "todas" : "todas") : tela.nome, onAbrir: (id) => setTela({ nome: "detalhe", id }), onNova: () => setTela({ nome: "nova" }), onNotify, refreshKey: refresh, usuarios });
+    else corpo = vgEl(VgLista, { key: tela.nome, me, escopo: tela.nome === "lista" ? "todas" : tela.nome, onAbrir: (id) => setTela({ nome: "detalhe", id }), onNova: () => setTela({ nome: "nova" }), onNotify, refreshKey: refresh, usuarios });
   }
   return vgEl(
     "div",
