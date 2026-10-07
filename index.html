@@ -5929,7 +5929,39 @@ function currentDocsFor(docsFiltrados) {
   if (docsFiltrados.length > 0 && docsFiltrados[0].categoria === "contratos_sociais") {
     return groupDocumentsByFamily(docsFiltrados).map((f) => f.versions[0]);
   }
-  return docsFiltrados.filter((d) => d.flag !== "versao_anterior");
+  return soVigentesPorFamilia(docsFiltrados.filter((d) => d.flag !== "versao_anterior"));
+}
+/** soVigentesPorFamilia: pedido explícito da Iasmin (2026-10-07, caso IBAMA
+ *  no Envio em Lote: vieram junto as versões vencidas) — quando um documento
+ *  tem versões vencidas E ao menos uma versão não vencida na MESMA família
+ *  (`docFamily`), as vencidas ficam de fora; só a vigente é enviada.
+ *  Salvaguardas: (1) só descarta o que está vencido, nunca outra versão
+ *  vigente (famílias genéricas podem cobrir documentos realmente diferentes —
+ *  ver comentário de currentDocsFor); (2) se TODAS as versões da família
+ *  estão vencidas, mantém só a mais recente (nunca devolve "nada" por causa
+ *  de validade); (3) documento sem validade conta como vigente; (4) a ordem
+ *  original da lista é preservada. Tipos SEM_SUBSTITUICAO (cada documento é a
+ *  própria família) e contratos sociais não são afetados. */
+function soVigentesPorFamilia(docs) {
+  const porFamilia = new Map();
+  docs.forEach((d) => {
+    const key = d.docFamily || d.id;
+    if (!porFamilia.has(key)) porFamilia.set(key, []);
+    porFamilia.get(key).push(d);
+  });
+  const descartar = new Set();
+  porFamilia.forEach((versoes) => {
+    if (versoes.length < 2) return;
+    const vencidas = versoes.filter((d) => computeDocStatus(d.validade) === "vencido");
+    if (vencidas.length === 0) return;
+    if (vencidas.length < versoes.length) {
+      vencidas.forEach((d) => descartar.add(d));
+    } else {
+      const maisRecente = sortDocumentsByVersion(versoes)[0];
+      vencidas.forEach((d) => { if (d !== maisRecente) descartar.add(d); });
+    }
+  });
+  return descartar.size === 0 ? docs : docs.filter((d) => !descartar.has(d));
 }
 /** refinarMatchesPorRegraDeTipoEspecifico: mesma regra de refinamento usada
  *  tanto pela busca do chat (`searchDocuments`) quanto pelo "Envio de
@@ -21824,6 +21856,17 @@ function EnvioLoteStyles() {
       .lote-delete-btn { color: var(--vermelho, #b3261e); border-color: rgba(179,38,30,0.35); }
       .lote-delete-btn:hover { border-color: var(--vermelho, #b3261e); }
       .lote-delete-confirm { max-width: 420px; text-align: left; margin-top: 10px; }
+      .lote-previa-modal .docs-modal-body { max-height: 60vh; overflow-y: auto; }
+      .lote-previa-toolbar { display:flex; align-items:center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+      .lote-previa-contador { font-size: 12.5px; font-weight: 600; margin-right: auto; }
+      .lote-previa-linha { display:flex; align-items:flex-start; gap: 10px; padding: 8px 4px; border-bottom: 1px solid var(--cinza-frio); }
+      .lote-previa-linha.desmarcado { opacity: 0.5; }
+      .lote-previa-linha.desmarcado .homolog-anexo-nome { text-decoration: line-through; }
+      .lote-previa-linha input[type="checkbox"] { margin-top: 3px; }
+      .lote-previa-num { min-width: 34px; font-size: 12px; font-weight: 700; color: var(--carvao); padding-top: 2px; }
+      .lote-previa-info { flex: 1; min-width: 0; }
+      .lote-previa-meta { font-size: 12px; color: var(--carvao); }
+      .lote-previa-vencido { font-size: 12px; color: var(--vermelho-alerta, #c0392b); display:flex; align-items:center; gap: 4px; margin-top: 2px; }
     `,
   );
 }
@@ -21860,6 +21903,156 @@ function listarDocumentosVencidosParaProcessar(solicitacao, companies) {
   });
   return [...vistos.values()];
 }
+/** analisarLote: parte SÍNCRONA e sem efeitos colaterais de processarLote —
+ *  decide, AO VIVO, quais documentos entram no ZIP e com que numeração
+ *  (casamento item×base). Usada por processarLote (que gera o ZIP) e pela
+ *  PRÉ-VISUALIZAÇÃO do ZIP na tela (pedido da Iasmin, 2026-10-07: "permitir
+ *  pré-visualizar os arquivos que irão para a pasta em zip, podendo
+ *  desmarcar algum arquivo") — as duas nunca divergem porque é o MESMO
+ *  código. `excluirDocIds`: Set de `doc.id` (ou id de anexo manual)
+ *  desmarcados pela pessoa; esses nunca entram, e a numeração já sai
+ *  recalculada sem eles. `permitirVencidos`: ver processarLote. Cada entrada
+ *  traz `itemNome`/`baseLabel` só para exibição. */
+function analisarLote(solicitacao, { companies, permitirVencidos, excluirDocIds } = {}) {
+  const companiesPorId = new Map((companies || []).map((c) => [c.id, c]));
+  function vencidoPermitido(doc) {
+    return !doc || doc.status !== "vencido" || permitirVencidos == null || permitirVencidos.has(doc.id);
+  }
+  function docPermitido(doc) {
+    return vencidoPermitido(doc) && !(doc && excluirDocIds && excluirDocIds.has(doc.id));
+  }
+  const entradasNumeradas = [];
+  const anexosConsumidos = new Set();
+  let itemContador = 0;
+  let algumRecebivel = false;
+  const itensAtualizados = (solicitacao.documentacoesSolicitadas || []).map((item) => {
+    const statusPorBase = { ...(item.statusPorBase || {}) };
+    const resolvidosDoItem = [];
+    // Documento de abrangência empresarial (Contratos Sociais, Contabilidade,
+    // Seguros gerais, Planos/Procedimentos/Manuais, e qualquer outro marcado
+    // "empresa"/"corporativa") é o MESMO arquivo físico repetido em
+    // `company.documentos` de cada base a que se aplica (mesmo `id` — ver
+    // useDerived/confirmados acima), nunca um documento diferente por base.
+    // Sem esta deduplicação, pedir esse documento pra "Matriz e Filial 0004"
+    // casava com ele 2x (uma vez por base) e ele entrava 2x no ZIP com
+    // números diferentes, como se fossem arquivos distintos — bug real
+    // relatado pela Iasmin, 2026-09-28 ("documentos abrangentes de toda
+    // empresa [...] não precisam ser repetidos, só basta enviar uma vez pra
+    // as filiais selecionadas"). `statusPorBase` continua sendo marcado pra
+    // CADA base normalmente logo abaixo (cada base realmente "tem" esse
+    // documento) — só a entrada no ZIP é que nunca duplica o mesmo `id`.
+    const idsCorporativosJaIncluidos = new Set();
+    function pushResolvido(doc, baseLabel) {
+      const ehCorporativo = doc.abrangencia === "empresa" || doc.abrangencia === "corporativa";
+      if (ehCorporativo) {
+        if (idsCorporativosJaIncluidos.has(doc.id)) return;
+        idsCorporativosJaIncluidos.add(doc.id);
+      }
+      resolvidosDoItem.push({ doc, baseLabel });
+    }
+    Object.keys(statusPorBase).forEach((baseId) => {
+      const stAtual = statusPorBase[baseId];
+      if (stAtual === "nao_aplicavel") return;
+      const company = companiesPorId.get(baseId);
+      const anexo = (solicitacao.anexosRecebidos || []).find(
+        (a) => a.itemAssociadoId === item.id && a.baseId === baseId,
+      );
+      if (anexo) {
+        algumRecebivel = true;
+        anexosConsumidos.add(anexo.id);
+        // Desmarcado na pré-visualização do ZIP: não entra no pacote, mas o
+        // anexo continua registrado na solicitação (nada é apagado).
+        if (excluirDocIds && excluirDocIds.has(anexo.id)) return;
+        resolvidosDoItem.push({
+          baseLabel: company ? companyLabelFor(company) : "",
+          doc: {
+            id: anexo.id,
+            categoria: null,
+            tipo: anexo.nome,
+            titulo: anexo.nome,
+            arquivo: {
+              driveFileId: anexo.driveFileId || null,
+              assetId: anexo.assetId || null,
+              mimeType: anexo.tipo || null,
+              nomeOriginal: anexo.nome,
+            },
+            __anexoManualLote: true,
+          },
+        });
+        return;
+      }
+      const r = company
+        ? matchChecklistItemToCompany(loteItemParaMatch(item), company)
+        : { status: "sem_base", candidatos: [] };
+      if (r.status === "encontrado") {
+        if (docPermitido(r.doc)) {
+          algumRecebivel = true;
+          pushResolvido(r.doc, company ? companyLabelFor(company) : "");
+          statusPorBase[baseId] = stAtual === "conferido" ? "conferido" : "recebido";
+        } else {
+          statusPorBase[baseId] = "pendente";
+        }
+      } else if (r.status === "grupo" || r.status === "ambiguo") {
+        const candidatosPermitidos = r.candidatos.filter(docPermitido);
+        if (candidatosPermitidos.length > 0) {
+          algumRecebivel = true;
+          candidatosPermitidos.forEach((doc) => pushResolvido(doc, company ? companyLabelFor(company) : ""));
+          statusPorBase[baseId] = stAtual === "conferido" ? "conferido" : "recebido";
+        } else {
+          statusPorBase[baseId] = "pendente";
+        }
+      } else if (stAtual === "recebido" || stAtual === "conferido") {
+        algumRecebivel = true; // não é mais localizável agora, mas confia na confirmação anterior
+      } else {
+        statusPorBase[baseId] = "pendente";
+      }
+    });
+    if (resolvidosDoItem.length === 1) {
+      itemContador++;
+      entradasNumeradas.push({ numero: String(itemContador), doc: resolvidosDoItem[0].doc, itemNome: item.nome, baseLabel: resolvidosDoItem[0].baseLabel || "" });
+    } else if (resolvidosDoItem.length > 1) {
+      itemContador++;
+      resolvidosDoItem.forEach((r, i) => {
+        entradasNumeradas.push({ numero: `${itemContador}.${i + 1}`, doc: r.doc, itemNome: item.nome, baseLabel: r.baseLabel || "" });
+      });
+    }
+    return { ...item, statusPorBase };
+  });
+
+  // Rede de segurança: um anexo cujo item/base não bateu com nenhuma chave
+  // de `statusPorBase` (não deveria acontecer no fluxo normal, já que todo
+  // anexo é criado a partir de um item×base existente — mas nunca some um
+  // arquivo já enviado por causa de uma inconsistência de dados) ainda
+  // entra no ZIP, como uma entrada numerada própria.
+  (solicitacao.anexosRecebidos || []).forEach((anexo) => {
+    if (anexosConsumidos.has(anexo.id)) return;
+    const company = companiesPorId.get(anexo.baseId);
+    if (!company) return;
+    algumRecebivel = true;
+    if (excluirDocIds && excluirDocIds.has(anexo.id)) return;
+    itemContador++;
+    entradasNumeradas.push({
+      itemNome: anexo.nome,
+      baseLabel: companyLabelFor(company),
+      numero: String(itemContador),
+      doc: {
+        id: anexo.id,
+        categoria: null,
+        tipo: anexo.nome,
+        titulo: anexo.nome,
+        arquivo: {
+          driveFileId: anexo.driveFileId || null,
+          assetId: anexo.assetId || null,
+          mimeType: anexo.tipo || null,
+          nomeOriginal: anexo.nome,
+        },
+        __anexoManualLote: true,
+      },
+    });
+  });
+
+  return { entradasNumeradas, itensAtualizados, algumRecebivel };
+}
 /** processarLote: pipeline REAL de processamento — 7 etapas
  *  (recebimento/upload/validação/organização-classificação/compactação/
  *  armazenamento/concluído), cada uma só marcada "ok" depois de
@@ -21882,7 +22075,7 @@ function listarDocumentosVencidosParaProcessar(solicitacao, companies) {
  *  nunca entra no ZIP — a base correspondente fica "pendente" em vez de
  *  "recebido", já que o documento foi localizado mas, por decisão de
  *  quem processou, não foi incluído. */
-async function processarLote(solicitacao, { companies, usuarioProcessamento, deps, permitirVencidos } = {}) {
+async function processarLote(solicitacao, { companies, usuarioProcessamento, deps, permitirVencidos, excluirDocIds } = {}) {
   const _tryPersistUploadedFile = (deps && deps.tryPersistUploadedFile) || tryPersistUploadedFile;
   const _createDocumentPackageMultiBase =
     (deps && deps.createDocumentPackageMultiBase) || createDocumentPackageMultiBase;
@@ -21941,129 +22134,11 @@ async function processarLote(solicitacao, { companies, usuarioProcessamento, dep
   // pacote — sem nenhuma pasta por base — pedido explícito da Iasmin:
   // pastas "Matriz"/"Filial X" atrapalhavam mais do que ajudavam, mesmo
   // quando a solicitação tinha só 2 documentações.
-  const entradasNumeradas = [];
-  const anexosConsumidos = new Set();
-  let itemContador = 0;
-  let algumRecebivel = false;
-  const itensAtualizados = (solicitacao.documentacoesSolicitadas || []).map((item) => {
-    const statusPorBase = { ...(item.statusPorBase || {}) };
-    const resolvidosDoItem = [];
-    // Documento de abrangência empresarial (Contratos Sociais, Contabilidade,
-    // Seguros gerais, Planos/Procedimentos/Manuais, e qualquer outro marcado
-    // "empresa"/"corporativa") é o MESMO arquivo físico repetido em
-    // `company.documentos` de cada base a que se aplica (mesmo `id` — ver
-    // useDerived/confirmados acima), nunca um documento diferente por base.
-    // Sem esta deduplicação, pedir esse documento pra "Matriz e Filial 0004"
-    // casava com ele 2x (uma vez por base) e ele entrava 2x no ZIP com
-    // números diferentes, como se fossem arquivos distintos — bug real
-    // relatado pela Iasmin, 2026-09-28 ("documentos abrangentes de toda
-    // empresa [...] não precisam ser repetidos, só basta enviar uma vez pra
-    // as filiais selecionadas"). `statusPorBase` continua sendo marcado pra
-    // CADA base normalmente logo abaixo (cada base realmente "tem" esse
-    // documento) — só a entrada no ZIP é que nunca duplica o mesmo `id`.
-    const idsCorporativosJaIncluidos = new Set();
-    function pushResolvido(doc) {
-      const ehCorporativo = doc.abrangencia === "empresa" || doc.abrangencia === "corporativa";
-      if (ehCorporativo) {
-        if (idsCorporativosJaIncluidos.has(doc.id)) return;
-        idsCorporativosJaIncluidos.add(doc.id);
-      }
-      resolvidosDoItem.push({ doc });
-    }
-    Object.keys(statusPorBase).forEach((baseId) => {
-      const stAtual = statusPorBase[baseId];
-      if (stAtual === "nao_aplicavel") return;
-      const company = companiesPorId.get(baseId);
-      const anexo = (solicitacao.anexosRecebidos || []).find(
-        (a) => a.itemAssociadoId === item.id && a.baseId === baseId,
-      );
-      if (anexo) {
-        algumRecebivel = true;
-        anexosConsumidos.add(anexo.id);
-        resolvidosDoItem.push({
-          doc: {
-            id: anexo.id,
-            categoria: null,
-            tipo: anexo.nome,
-            titulo: anexo.nome,
-            arquivo: {
-              driveFileId: anexo.driveFileId || null,
-              assetId: anexo.assetId || null,
-              mimeType: anexo.tipo || null,
-              nomeOriginal: anexo.nome,
-            },
-            __anexoManualLote: true,
-          },
-        });
-        return;
-      }
-      const r = company
-        ? matchChecklistItemToCompany(loteItemParaMatch(item), company)
-        : { status: "sem_base", candidatos: [] };
-      if (r.status === "encontrado") {
-        if (vencidoPermitido(r.doc)) {
-          algumRecebivel = true;
-          pushResolvido(r.doc);
-          statusPorBase[baseId] = stAtual === "conferido" ? "conferido" : "recebido";
-        } else {
-          statusPorBase[baseId] = "pendente";
-        }
-      } else if (r.status === "grupo" || r.status === "ambiguo") {
-        const candidatosPermitidos = r.candidatos.filter(vencidoPermitido);
-        if (candidatosPermitidos.length > 0) {
-          algumRecebivel = true;
-          candidatosPermitidos.forEach((doc) => pushResolvido(doc));
-          statusPorBase[baseId] = stAtual === "conferido" ? "conferido" : "recebido";
-        } else {
-          statusPorBase[baseId] = "pendente";
-        }
-      } else if (stAtual === "recebido" || stAtual === "conferido") {
-        algumRecebivel = true; // não é mais localizável agora, mas confia na confirmação anterior
-      } else {
-        statusPorBase[baseId] = "pendente";
-      }
-    });
-    if (resolvidosDoItem.length === 1) {
-      itemContador++;
-      entradasNumeradas.push({ numero: String(itemContador), doc: resolvidosDoItem[0].doc });
-    } else if (resolvidosDoItem.length > 1) {
-      itemContador++;
-      resolvidosDoItem.forEach((r, i) => {
-        entradasNumeradas.push({ numero: `${itemContador}.${i + 1}`, doc: r.doc });
-      });
-    }
-    return { ...item, statusPorBase };
+  const { entradasNumeradas, itensAtualizados, algumRecebivel } = analisarLote(solicitacao, {
+    companies,
+    permitirVencidos,
+    excluirDocIds,
   });
-
-  // Rede de segurança: um anexo cujo item/base não bateu com nenhuma chave
-  // de `statusPorBase` (não deveria acontecer no fluxo normal, já que todo
-  // anexo é criado a partir de um item×base existente — mas nunca some um
-  // arquivo já enviado por causa de uma inconsistência de dados) ainda
-  // entra no ZIP, como uma entrada numerada própria.
-  (solicitacao.anexosRecebidos || []).forEach((anexo) => {
-    if (anexosConsumidos.has(anexo.id)) return;
-    const company = companiesPorId.get(anexo.baseId);
-    if (!company) return;
-    algumRecebivel = true;
-    itemContador++;
-    entradasNumeradas.push({
-      numero: String(itemContador),
-      doc: {
-        id: anexo.id,
-        categoria: null,
-        tipo: anexo.nome,
-        titulo: anexo.nome,
-        arquivo: {
-          driveFileId: anexo.driveFileId || null,
-          assetId: anexo.assetId || null,
-          mimeType: anexo.tipo || null,
-          nomeOriginal: anexo.nome,
-        },
-        __anexoManualLote: true,
-      },
-    });
-  });
-
   if (!algumRecebivel) {
     return falhar(
       "recebimento",
@@ -22616,6 +22691,11 @@ function EnvioLoteDetailView({ item, companies, onBack, onNotify, onView, onUpda
   // comportamento de sempre, só que agora com aviso explícito).
   const [vencidosPendentes, setVencidosPendentes] = useState(null);
   const [vencidosSelecionados, setVencidosSelecionados] = useState(new Set());
+  // Pré-visualização do ZIP (2026-10-07, pedido da Iasmin): `previaAberta`
+  // abre o modal com TODOS os arquivos que entrariam no pacote;
+  // `previaDesmarcados` guarda os `doc.id` que a pessoa tirou da seleção.
+  const [previaAberta, setPreviaAberta] = useState(false);
+  const [previaDesmarcados, setPreviaDesmarcados] = useState(new Set());
   // isAdmin: exclusão da solicitação restrita a Administrador (pedido
   // explícito da Iasmin, 2026-09-28), mesmo gate já usado pra excluir um
   // documento do catálogo (DocRowActions) — nunca aberto pros perfis
@@ -22715,10 +22795,10 @@ function EnvioLoteDetailView({ item, companies, onBack, onNotify, onView, onUpda
     setNovoItemNome("");
     onNotify?.(`"${novoItem.nome}" adicionado à solicitação.`, "info");
   }
-  async function executarProcessamento(permitirVencidos) {
+  async function executarProcessamento(permitirVencidos, excluirDocIds) {
     setProcessando(true);
     const usuarioProcessamento = { nome: currentUser?.nome || "Usuário do portal", email: currentUser?.email || "" };
-    const atualizado = await processarLote(item, { companies, usuarioProcessamento, permitirVencidos });
+    const atualizado = await processarLote(item, { companies, usuarioProcessamento, permitirVencidos, excluirDocIds });
     persistPatch(atualizado);
     setProcessando(false);
     logDocumentAction("processou_lote", { cliente: item.cliente, status: atualizado.status });
@@ -22747,13 +22827,38 @@ function EnvioLoteDetailView({ item, companies, onBack, onNotify, onView, onUpda
   // modal) é que o processamento acontece de verdade via
   // executarProcessamento.
   function handleProcessar() {
-    const vencidos = listarDocumentosVencidosParaProcessar(item, companies);
-    if (vencidos.length > 0) {
-      setVencidosSelecionados(new Set(vencidos.map((v) => v.doc.id)));
-      setVencidosPendentes(vencidos);
+    // Pré-visualização (2026-10-07): sempre que houver ao menos um arquivo
+    // para o ZIP, a pessoa confere/desmarca antes de gerar. Vencidos já
+    // aparecem sinalizados na própria lista (substitui o modal separado de
+    // vencidos neste fluxo). Sem nenhum arquivo, segue direto pra
+    // processarLote, que devolve a mensagem de erro de sempre.
+    const previa = analisarLote(item, { companies }).entradasNumeradas;
+    if (previa.length === 0) {
+      executarProcessamento(null, null);
       return;
     }
-    executarProcessamento(null);
+    setPreviaDesmarcados(new Set());
+    setPreviaAberta(true);
+  }
+  function handleCancelarPrevia() {
+    setPreviaAberta(false);
+  }
+  function togglePreviaDoc(docId) {
+    setPreviaDesmarcados((prev) => {
+      const next = new Set(prev);
+      if (next.has(docId)) next.delete(docId);
+      else next.add(docId);
+      return next;
+    });
+  }
+  function handleConfirmarPrevia() {
+    const todas = analisarLote(item, { companies }).entradasNumeradas;
+    const excluir = new Set(previaDesmarcados);
+    const permitirVencidos = new Set(
+      todas.filter((e) => e.doc && e.doc.status === "vencido" && !excluir.has(e.doc.id)).map((e) => e.doc.id),
+    );
+    setPreviaAberta(false);
+    executarProcessamento(permitirVencidos, excluir);
   }
   function handleCancelarVencidos() {
     setVencidosPendentes(null);
@@ -22796,6 +22901,16 @@ function EnvioLoteDetailView({ item, companies, onBack, onNotify, onView, onUpda
     await downloadDocument(null, doc, { onNotify });
   }
 
+  // Linhas da pré-visualização do ZIP: lista COMPLETA (nada desmarcado) +
+  // a numeração que cada arquivo terá DEPOIS das exclusões (mesma função que
+  // gera o ZIP — ver analisarLote).
+  const previaLinhas = useMemo(() => {
+    if (!previaAberta) return [];
+    const todas = analisarLote(item, { companies }).entradasNumeradas;
+    const finais = analisarLote(item, { companies, excluirDocIds: previaDesmarcados }).entradasNumeradas;
+    const numeroFinal = new Map(finais.map((e) => [e.doc.id, e.numero]));
+    return todas.map((e) => ({ ...e, numeroFinal: numeroFinal.get(e.doc.id) || null }));
+  }, [previaAberta, previaDesmarcados, item, companies]);
   const compilado = useMemo(() => {
     let solicitados = 0,
       recebidos = 0,
@@ -23080,6 +23195,146 @@ function EnvioLoteDetailView({ item, companies, onBack, onNotify, onView, onUpda
               "button",
               { type: "button", className: "doc-download-btn", onClick: handleConfirmarVencidos },
               "Confirmar e processar",
+            ),
+          ),
+        ),
+      ),
+    // Modal "Pré-visualização do ZIP" (2026-10-07, pedido da Iasmin): lista
+    // todos os arquivos que irão para o ZIP, com checkbox (todos marcados),
+    // botão de visualizar e aviso de vencido; desmarcar tira o arquivo do
+    // pacote (a documentação correspondente fica "pendente").
+    previaAberta &&
+      React.createElement(
+        "div",
+        { className: "docs-modal-overlay", onClick: handleCancelarPrevia },
+        React.createElement(
+          "div",
+          { className: "docs-modal homolog-form-modal lote-previa-modal", onClick: (e) => e.stopPropagation() },
+          React.createElement(
+            "div",
+            { className: "docs-modal-head" },
+            React.createElement(
+              "div",
+              null,
+              React.createElement(
+                "div",
+                { className: "docs-modal-title" },
+                React.createElement(FolderArchive, { size: 16 }),
+                " Pré-visualização do ZIP",
+              ),
+              React.createElement(
+                "div",
+                { className: "docs-modal-sub" },
+                `Confira os arquivos que serão incluídos no ZIP de "${item.cliente}". Desmarque o que não deve ir.`,
+              ),
+            ),
+            React.createElement(
+              "button",
+              { className: "icon-btn-dark", onClick: handleCancelarPrevia, "aria-label": "Fechar" },
+              React.createElement(X, { size: 18 }),
+            ),
+          ),
+          React.createElement(
+            "div",
+            { className: "docs-modal-body" },
+            React.createElement(
+              "div",
+              { className: "lote-previa-toolbar" },
+              React.createElement(
+                "span",
+                { className: "lote-previa-contador" },
+                `${previaLinhas.filter((l) => !previaDesmarcados.has(l.doc.id)).length} de ${previaLinhas.length} arquivo(s) selecionado(s)`,
+              ),
+              React.createElement(
+                "button",
+                {
+                  type: "button",
+                  className: "mini-download-btn",
+                  onClick: () => setPreviaDesmarcados(new Set()),
+                },
+                "Marcar todos",
+              ),
+              React.createElement(
+                "button",
+                {
+                  type: "button",
+                  className: "mini-download-btn",
+                  onClick: () => setPreviaDesmarcados(new Set(previaLinhas.map((l) => l.doc.id))),
+                },
+                "Desmarcar todos",
+              ),
+            ),
+            previaLinhas.map((l, idx) => {
+              const marcado = !previaDesmarcados.has(l.doc.id);
+              const vencido = l.doc.status === "vencido";
+              return React.createElement(
+                "div",
+                {
+                  key: `${l.numero}-${l.doc.id}-${idx}`,
+                  className: "lote-previa-linha" + (marcado ? "" : " desmarcado"),
+                },
+                React.createElement("input", {
+                  type: "checkbox",
+                  checked: marcado,
+                  onChange: () => togglePreviaDoc(l.doc.id),
+                  "aria-label": `Incluir ${docTituloExibido(l.doc)} no ZIP`,
+                }),
+                React.createElement("span", { className: "lote-previa-num" }, marcado && l.numeroFinal ? l.numeroFinal : "—"),
+                React.createElement(
+                  "div",
+                  { className: "lote-previa-info" },
+                  React.createElement("span", { className: "homolog-anexo-nome" }, docTituloExibido(l.doc)),
+                  React.createElement(
+                    "div",
+                    { className: "lote-previa-meta" },
+                    [l.baseLabel, l.itemNome ? `pedido como "${l.itemNome}"` : null].filter(Boolean).join(" · "),
+                  ),
+                  vencido
+                    ? React.createElement(
+                        "div",
+                        { className: "lote-previa-vencido" },
+                        React.createElement(AlertTriangle, { size: 12 }),
+                        " ",
+                        formatValidadeResumo(l.doc),
+                      )
+                    : null,
+                ),
+                React.createElement(
+                  "button",
+                  {
+                    type: "button",
+                    className: "mini-download-btn",
+                    onClick: () => handleVer(l.doc),
+                    title: "Visualizar arquivo",
+                  },
+                  React.createElement(Eye, { size: 13 }),
+                  " Ver",
+                ),
+              );
+            }),
+            React.createElement(
+              "p",
+              { className: "homolog-bases-hint", style: { marginTop: 8 } },
+              "Arquivos desmarcados não entram no ZIP e a documentação correspondente fica com pendência. A numeração dos arquivos é refeita sem eles.",
+            ),
+          ),
+          React.createElement(
+            "div",
+            { className: "homolog-form-actions" },
+            React.createElement(
+              "button",
+              { type: "button", className: "filters-clear-btn", onClick: handleCancelarPrevia, style: { flex: "none" } },
+              "Cancelar",
+            ),
+            React.createElement(
+              "button",
+              {
+                type: "button",
+                className: "doc-download-btn",
+                onClick: handleConfirmarPrevia,
+                disabled: previaLinhas.every((l) => previaDesmarcados.has(l.doc.id)),
+              },
+              `Gerar ZIP com ${previaLinhas.filter((l) => !previaDesmarcados.has(l.doc.id)).length} arquivo(s)`,
             ),
           ),
         ),
