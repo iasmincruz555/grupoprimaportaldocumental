@@ -940,6 +940,34 @@ const CONTABILIDADE_SUBGRUPOS = [
   { key: "dres", label: "DREs", tipos: ["DRE"] },
   { key: "faturamento", label: "Faturamento", tipos: ["Faturamento"] },
 ];
+/* PLANOS_PROCEDIMENTOS_SUBGRUPOS: agrupamento visual pedido pela Iasmin em
+   2026-10-07 dentro de "Planos, Procedimentos e Manuais" — uma área própria
+   "Manuais Comerciais" (manuais para o time comercial, como o "Manual
+   Grupoprima Pricing"), no MESMO estilo de CONTABILIDADE_SUBGRUPOS: NÃO é um
+   campo gravado no documento nem uma categoria nova (a categoria do
+   documento continua sendo planos_procedimentos_manuais); é só de EXIBIÇÃO,
+   calculado na hora de renderizar. Todo documento que não é manual cai no
+   grupo "Planos, procedimentos e demais documentos", então nada some. */
+function ehManualComercial(doc) {
+  const tipo = normalize(doc?.tipo);
+  if (tipo === "manual") return true;
+  const titulo = normalize(doc?.titulo);
+  // mesmo critério do tipo "Manual" em DOC_TYPE_KEYWORDS: a palavra manual,
+  // exceto manual de conduta/ética (esses são o tipo Código de Conduta).
+  return /\bmanual\b/.test(titulo) && !/manual de (conduta|etica)/.test(titulo);
+}
+const PLANOS_PROCEDIMENTOS_SUBGRUPOS = [
+  {
+    key: "manuais_comerciais",
+    label: "Manuais Comerciais",
+    pertence: ehManualComercial,
+  },
+  {
+    key: "planos_e_demais",
+    label: "Planos, procedimentos e demais documentos",
+    pertence: (doc) => !ehManualComercial(doc),
+  },
+];
 const EMPRESA_CATEGORIES = [
   {
     key: "contratos_sociais",
@@ -5489,12 +5517,20 @@ function buscarDocsPorTituloLivre(docs, texto) {
     return toks.every((w) => base.includes(w) || (sigla.length >= 3 && w === sigla));
   });
 }
+/** dobrarPluralDeSiglas: "AFEs", "AFE's", "PGRs", "CNDs"... passam a valer como
+ *  a sigla no singular (pedido da Iasmin, 2026-10-07: "afes" não era
+ *  reconhecido, só "afe"). Só siglas de documentos conhecidas — nunca mexe em
+ *  palavras comuns. Texto já normalizado (minúsculo, sem acento). */
+const SIGLAS_PLURALIZAVEIS = /\b(afe|pgr|pae|pcmso|cnd|cndt|crf|ctf|rntrc|sassmaq|ltcat|pcmat)(?:'s|s)\b/g;
+function dobrarPluralDeSiglas(t) {
+  return t.replace(SIGLAS_PLURALIZAVEIS, "$1");
+}
 function detectRequestedTypes(text) {
-  const t = normalize(text);
+  const t = dobrarPluralDeSiglas(normalize(text));
   return DOC_TYPE_KEYWORDS.filter((k) => k.match.test(t));
 }
 function detectRequestedCategories(text) {
-  const t = normalize(text);
+  const t = dobrarPluralDeSiglas(normalize(text));
   const base = CATEGORY_ALIASES.filter((k) => k.match.test(t)).map(
     (k) => k.key,
   );
@@ -8642,6 +8678,16 @@ function CompaniesView({
               ? rows.filter((r) => r.doc.subcategoria === "clientes_especificos")
               : [];
             const isContabilidade = cat.key === "contabilidade";
+            // Ver PLANOS_PROCEDIMENTOS_SUBGRUPOS: agrupamento só de exibição
+            // ("Manuais Comerciais" separado do resto), pelo tipo/título.
+            const isPlanos =
+              cat.key === "planos_procedimentos_manuais" && rows.length > 0;
+            const planosGrupos = isPlanos
+              ? PLANOS_PROCEDIMENTOS_SUBGRUPOS.map((g) => ({
+                  ...g,
+                  rows: rows.filter((r) => g.pertence(r.doc)),
+                }))
+              : [];
             // Ver CONTABILIDADE_SUBGRUPOS: agrupamento só de exibição, pelo
             // `tipo` de cada documento — "resto" cobre qualquer tipo que não
             // esteja nomeado em nenhum dos 3 grupos (hoje nenhum; mantido só
@@ -8797,7 +8843,32 @@ function CompaniesView({
                       { className: "empty-note" },
                       "Nenhum documento nesta categoria ainda.",
                     ),
-                  !isSeguros && !isContabilidade && renderDocRows(rows),
+                  !isSeguros &&
+                    !isContabilidade &&
+                    !isPlanos &&
+                    renderDocRows(rows),
+                  isPlanos &&
+                    planosGrupos.flatMap((g) => [
+                      /*#__PURE__*/ React.createElement(
+                        "h4",
+                        {
+                          key: `h-${g.key}`,
+                          className: "category-subgroup-title",
+                        },
+                        g.label,
+                      ),
+                      g.rows.length === 0
+                        ? /*#__PURE__*/ React.createElement(
+                            "p",
+                            { key: `e-${g.key}`, className: "empty-note" },
+                            "Nenhum documento nesta subcategoria ainda.",
+                          )
+                        : /*#__PURE__*/ React.createElement(
+                            "div",
+                            { key: `b-${g.key}` },
+                            renderDocRows(g.rows),
+                          ),
+                    ]),
                   isSeguros && [
                     /*#__PURE__*/ React.createElement(
                       "h4",
@@ -27493,7 +27564,7 @@ const Plane = (p) =>
    - Valores, comprovantes e dados pessoais NUNCA são gravados no GitHub nem
      nesta página: ficam no Firestore e no bucket privado, via API.
    ========================================================================= */
-const VG_FIREBASE_API_KEY = "COLE_AQUI_A_WEB_API_KEY_DO_FIREBASE";
+const VG_FIREBASE_API_KEY = "AIzaSyCih0bBKyIPFzXnxSxfdwRZDc35VjS1i4g";
 const VG_FIREBASE_CONFIGURADO = !!VG_FIREBASE_API_KEY && !VG_FIREBASE_API_KEY.startsWith("COLE_AQUI");
 /** Link do processo antigo (Google Forms), mantido em paralelo durante a transição. Deixe "" para ocultar. */
 const VG_PROCESSO_ANTIGO_URL = "";
