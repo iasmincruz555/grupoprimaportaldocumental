@@ -939,6 +939,15 @@ const CONTABILIDADE_SUBGRUPOS = [
   },
   { key: "dres", label: "DREs", tipos: ["DRE"] },
   { key: "faturamento", label: "Faturamento", tipos: ["Faturamento"] },
+  // Pedido da Iasmin, 2026-10-08: subcategoria "Dados Bancários" em
+  // Contabilidade — Carta de Titularidade Bancária (e sinônimos: dados
+  // bancários, informações bancárias, dados do banco...) e os comprovantes
+  // de pagamento que ficam anexados junto.
+  {
+    key: "dados_bancarios",
+    label: "Dados Bancários",
+    tipos: ["Carta de Titularidade Bancária", "Comprovante de Pagamento"],
+  },
 ];
 /* PLANOS_PROCEDIMENTOS_SUBGRUPOS: agrupamento visual pedido pela Iasmin em
    2026-10-07 dentro de "Planos, Procedimentos e Manuais" — uma área própria
@@ -4598,6 +4607,23 @@ async function createDocumentPackageMultiBase(numerados, opts = {}) {
       label: "Política Corporativa",
       match: /pol[i]tica (corporativa|interna|de)/,
     },
+    {
+      // Pedido da Iasmin, 2026-10-08 — Contabilidade > Dados Bancários.
+      // Sinônimos aceitos: carta de titularidade, titularidade bancária,
+      // dados/informações bancárias, dados do banco, dados de conta.
+      // Fica no FIM da lista (primeiro match vence) para nunca roubar o
+      // tipo de um documento que cite "dados bancários" no corpo.
+      key: "contabilidade",
+      label: "Carta de Titularidade Bancária",
+      match:
+        /titularidade|carta (de |do )?banco|(dados?|informa[c]oes|informa[c]ao) (do |de |da )?(banc|banco|conta banc)|dados da conta|comprovante de (conta|dados) banc/,
+    },
+    {
+      key: "contabilidade",
+      label: "Comprovante de Pagamento",
+      match:
+        /comprovantes? (de |do |dos )?(pagamentos?|pagto|transferencia|pix|deposito|ted|doc)\b|recibos? de pagamento/,
+    },
     { key: "outros", label: "Outro documento", match: /outros documentos/ },
   ];
 /** TIPO_LABEL_SINONIMOS_LEGADOS: quando o rótulo CANÔNICO de um tipo (o que
@@ -4692,7 +4718,7 @@ function tipoLabelsAceitos(label) {
     {
       key: "contabilidade",
       match:
-        /contab[i]|balan[cç]o patrimonial|\bdre\b|demonstra[cç][aã]o (do resultado|cont[aá]bel)|relat[oó]rio cont[aá]bil|declara[cç][aã]o de faturamento/,
+        /contab[i]|balan[cç]o patrimonial|\bdre\b|demonstra[cç][aã]o (do resultado|cont[aá]bel)|relat[oó]rio cont[aá]bil|declara[cç][aã]o de faturamento|titularidade banc|dados? banc|informa[cç][oõ]es banc|dados do banco|comprovantes? de pagamento/,
     },
     {
       key: "seguros",
@@ -5535,7 +5561,7 @@ function DocTituloEditable({ doc, onNotify, className, isAdmin }) {
  * SIGLA formada pelas iniciais do título, ex.: PCMSO = Programa de Controle
  * Médico de Saúde Ocupacional) nos títulos dos documentos reais. */
 const TITULO_STOPWORDS = new Set(["de", "da", "do", "das", "dos", "e", "a", "o", "as", "os", "para", "por", "em", "no", "na", "nos", "nas", "com", "um", "uma", "me", "manda", "mande", "envia", "enviar", "quero", "preciso", "queria", "pode", "voce", "documento", "documentos", "arquivo", "arquivos", "da", "tem", "ter", "mostra", "mostrar", "favor", "por favor", "pfv", "pf", "matriz", "filial", "base", "mais", "recente", "atual", "ultimo", "ultima"]);
-const DIGITACAO_VOCAB_EXTRA = ["pcmso", "sassmaq", "avcb", "cnpj", "ibama", "rctr", "cndt", "fgts", "alvara", "licenca", "sanitaria", "ambiental", "certidao", "negativa", "apolice", "contrato", "social", "alteracao", "contratual", "balanco", "balancete", "faturamento", "inscricao", "estadual", "municipal", "federal", "trabalhista", "falencia", "seguro", "matriz", "filial", "funcionamento", "bombeiros", "qualidade", "gerenciamento", "emergencia", "procuracao", "regularidade"];
+const DIGITACAO_VOCAB_EXTRA = ["pcmso", "sassmaq", "avcb", "cnpj", "ibama", "rctr", "cndt", "fgts", "alvara", "licenca", "sanitaria", "ambiental", "certidao", "negativa", "apolice", "contrato", "social", "alteracao", "contratual", "balanco", "balancete", "faturamento", "inscricao", "estadual", "municipal", "federal", "trabalhista", "falencia", "seguro", "matriz", "filial", "funcionamento", "bombeiros", "qualidade", "gerenciamento", "emergencia", "procuracao", "regularidade", "titularidade", "bancaria", "bancarias", "bancario", "bancarios", "comprovante", "pagamento"];
 let _vocabDigitacaoBase = null;
 function vocabularioDigitacaoBase() {
   if (_vocabDigitacaoBase) return _vocabDigitacaoBase;
@@ -17793,6 +17819,8 @@ const TIPO_LABEL_TO_DOC_FAMILY = {
     "Demonstração Contábil",
     "Balancete",
     "Faturamento",
+    "Carta de Titularidade Bancária",
+    "Comprovante de Pagamento",
     "Apólice RCTR-C",
     "Apólice RC-DC",
   ]);
@@ -26632,6 +26660,38 @@ function finIdCurto(prefixo) {
 function finEmailValido(s) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(s || "").trim());
 }
+/** finNormalizarEmails: aceita UM ou VÁRIOS e-mails no mesmo campo, separados
+ *  por ponto e vírgula, vírgula, espaço ou quebra de linha (pedido da
+ *  Iasmin, 2026-10-08: mais de um e-mail do Financeiro e do cliente).
+ *  Devolve { lista, texto, invalido }: `texto` fica padronizado como
+ *  "a@x.com; b@y.com" (sem repetidos, sem diferenciar maiúsculas) e
+ *  `invalido` traz o primeiro endereço que não parece válido. Registros
+ *  antigos, com um e-mail só, continuam valendo sem nenhuma migração. */
+function finNormalizarEmails(entrada) {
+  const partes = String(entrada || "")
+    .split(/[;,\s]+/)
+    .map((x) => x.trim())
+    .filter(Boolean);
+  const vistos = new Set();
+  const lista = [];
+  let invalido = null;
+  for (const e of partes) {
+    const k = e.toLowerCase();
+    if (vistos.has(k)) continue;
+    vistos.add(k);
+    lista.push(e);
+    if (!invalido && !finEmailValido(e)) invalido = e;
+  }
+  return { lista, texto: lista.join("; "), invalido };
+}
+/** finEmailsEl: mostra cada e-mail numa linha própria (vários e-mails no
+ *  mesmo campo), com reticências só se um endereço sozinho for longo demais. */
+function finEmailsEl(texto, vazio = "—") {
+  const lista = finNormalizarEmails(texto).lista;
+  if (lista.length === 0) return vazio;
+  if (lista.length === 1) return lista[0];
+  return lista.map((e) => finEl("span", { key: e, className: "fin-email-linha", title: e }, e));
+}
 function finHojeIso() {
   const d = new Date();
   const p = (n) => String(n).padStart(2, "0");
@@ -26679,12 +26739,13 @@ function finPodeVerRegistro(user, reg) {
 }
 function finCriarSolicitacao(campos, user, modeloVersao) {
   const cliente = String(campos?.cliente || "").trim();
-  const emailCliente = String(campos?.emailCliente || "").trim();
+  const emailsClienteN = finNormalizarEmails(campos?.emailCliente);
+  const emailCliente = emailsClienteN.texto;
   const dataEnvio = String(campos?.dataEnvio || "").trim();
   const observacoes = String(campos?.observacoes || "").trim();
   if (!cliente) return { ok: false, erro: "Informe o cliente." };
   if (!emailCliente) return { ok: false, erro: "Informe o e-mail do cliente para o qual o modelo foi enviado." };
-  if (!finEmailValido(emailCliente)) return { ok: false, erro: "O e-mail do cliente não parece válido." };
+  if (emailsClienteN.invalido) return { ok: false, erro: `O e-mail do cliente "${emailsClienteN.invalido}" não parece válido.` };
   if (dataEnvio) {
     if (!finDataIsoValida(dataEnvio)) return { ok: false, erro: "Data do envio inválida." };
     if (dataEnvio > finHojeIso()) return { ok: false, erro: "A data do envio não pode ser futura." };
@@ -26788,9 +26849,10 @@ function finEncaminhar(item, campos, usuarioNome) {
   if (respostas.length === 0) return { ok: false, erro: "Anexe a resposta do cliente antes de encaminhar ao Financeiro." };
   if (item.status === "pendencia") return { ok: false, erro: "Resolva a pendência antes de encaminhar ao Financeiro." };
   if (item.status === "concluido") return { ok: false, erro: "Esta solicitação já foi concluída." };
-  const email = String(campos?.emailFinanceiro || "").trim();
+  const emailsFinN = finNormalizarEmails(campos?.emailFinanceiro);
+  const email = emailsFinN.texto;
   if (!email) return { ok: false, erro: "Informe o e-mail do Financeiro para o qual a resposta foi encaminhada." };
-  if (!finEmailValido(email)) return { ok: false, erro: "O e-mail do Financeiro não parece válido." };
+  if (emailsFinN.invalido) return { ok: false, erro: `O e-mail do Financeiro "${emailsFinN.invalido}" não parece válido.` };
   const data = String(campos?.dataEncaminhamento || "").trim();
   if (!finDataIsoValida(data)) return { ok: false, erro: "Informe a data do encaminhamento." };
   if (data > finHojeIso()) return { ok: false, erro: "A data do encaminhamento não pode ser futura." };
@@ -26888,9 +26950,9 @@ function finEditarDados(item, campos, usuarioNome) {
     cliente: String(campos?.cliente ?? item.cliente ?? "").trim(),
     consultorNome: String(campos?.consultorNome ?? item.consultor?.nome ?? "").trim(),
     consultorEmail: String(campos?.consultorEmail ?? item.consultor?.email ?? "").trim(),
-    emailCliente: String(campos?.emailCliente ?? item.emailCliente ?? "").trim(),
+    emailCliente: finNormalizarEmails(campos?.emailCliente ?? item.emailCliente ?? "").texto,
     dataEnvio: String(campos?.dataEnvio ?? item.dataEnvio ?? "").trim(),
-    emailFinanceiro: String(campos?.emailFinanceiro ?? item.emailFinanceiro ?? "").trim(),
+    emailFinanceiro: finNormalizarEmails(campos?.emailFinanceiro ?? item.emailFinanceiro ?? "").texto,
     observacoes: String(campos?.observacoes ?? item.observacoes ?? "").trim(),
   };
   const temEncaminhamento = (item.encaminhamentos || []).length > 0;
@@ -26898,7 +26960,7 @@ function finEditarDados(item, campos, usuarioNome) {
   if (!novo.consultorNome) return { ok: false, erro: "Informe o consultor responsável." };
   if (novo.consultorEmail && !finEmailValido(novo.consultorEmail)) return { ok: false, erro: "O e-mail do consultor não parece válido." };
   if (!novo.emailCliente) return { ok: false, erro: "O e-mail do cliente é obrigatório." };
-  if (!finEmailValido(novo.emailCliente)) return { ok: false, erro: "O e-mail do cliente não parece válido." };
+  { const inv = finNormalizarEmails(novo.emailCliente).invalido; if (inv) return { ok: false, erro: `O e-mail do cliente "${inv}" não parece válido.` }; }
   if (novo.dataEnvio) {
     if (!finDataIsoValida(novo.dataEnvio)) return { ok: false, erro: "Data do envio inválida." };
     if (novo.dataEnvio > finHojeIso()) return { ok: false, erro: "A data do envio não pode ser futura." };
@@ -26907,7 +26969,7 @@ function finEditarDados(item, campos, usuarioNome) {
   }
   if (temEncaminhamento) {
     if (!novo.emailFinanceiro) return { ok: false, erro: "O e-mail do Financeiro é obrigatório (já há um encaminhamento registrado)." };
-    if (!finEmailValido(novo.emailFinanceiro)) return { ok: false, erro: "O e-mail do Financeiro não parece válido." };
+    { const inv = finNormalizarEmails(novo.emailFinanceiro).invalido; if (inv) return { ok: false, erro: `O e-mail do Financeiro "${inv}" não parece válido.` }; }
   } else {
     novo.emailFinanceiro = "";
   }
@@ -27251,8 +27313,8 @@ function FinNovaSolicitacaoModal({ currentUser, modeloVersao, onClose, onCriar }
       finEl(FinCampo, { rotulo: "Cliente" }, finEl("input", { type: "text", value: cliente, onChange: (e) => setCliente(e.target.value), placeholder: "Razão social ou nome fantasia do cliente", autoFocus: true })),
       finEl(
         FinCampo,
-        { rotulo: "E-mail do cliente", dica: " (obrigatório)" },
-        finEl("input", { type: "text", inputMode: "email", value: emailCliente, onChange: (e) => setEmailCliente(e.target.value), placeholder: "E-mail para o qual o modelo foi enviado", autoComplete: "off" }),
+        { rotulo: "E-mail(s) do cliente", dica: " (obrigatório — para mais de um, separe com ponto e vírgula)" },
+        finEl("input", { type: "text", inputMode: "email", value: emailCliente, onChange: (e) => setEmailCliente(e.target.value), placeholder: "E-mail(s) para o qual o modelo foi enviado", autoComplete: "off" }),
       ),
       finEl(
         FinCampo,
@@ -27367,7 +27429,7 @@ function FinEncaminharModal({ item, onClose, onConfirmar }) {
       "form",
       { onSubmit: handleSubmit },
       finEl(FinErro, { erro }),
-      finEl(FinCampo, { rotulo: "E-mail do Financeiro", dica: " (obrigatório)" }, finEl("input", { type: "text", inputMode: "email", value: emailFinanceiro, onChange: (e) => setEmailFinanceiro(e.target.value), placeholder: "E-mail interno para o qual a resposta foi encaminhada", autoComplete: "off", autoFocus: true })),
+      finEl(FinCampo, { rotulo: "E-mail(s) do Financeiro", dica: " (obrigatório — para mais de um, separe com ponto e vírgula)" }, finEl("input", { type: "text", inputMode: "email", value: emailFinanceiro, onChange: (e) => setEmailFinanceiro(e.target.value), placeholder: "E-mail(s) interno(s) para o qual a resposta foi encaminhada", autoComplete: "off", autoFocus: true })),
       finEl(FinCampo, { rotulo: "Data do encaminhamento" }, finEl("input", { type: "date", value: dataEncaminhamento, max: finHojeIso(), onChange: (e) => setDataEncaminhamento(e.target.value) })),
       respostas.length > 1 &&
         finEl(
@@ -27432,9 +27494,9 @@ function FinEditarModal({ item, onClose, onConfirmar }) {
       finEl(FinCampo, { rotulo: "Cliente" }, finEl("input", { type: "text", value: v.cliente, onChange: set("cliente") })),
       finEl(FinCampo, { rotulo: "Consultor responsável" }, finEl("input", { type: "text", value: v.consultorNome, onChange: set("consultorNome") })),
       finEl(FinCampo, { rotulo: "E-mail do consultor", dica: " (opcional)" }, finEl("input", { type: "text", value: v.consultorEmail, onChange: set("consultorEmail") })),
-      finEl(FinCampo, { rotulo: "E-mail do cliente" }, finEl("input", { type: "text", value: v.emailCliente, onChange: set("emailCliente") })),
+      finEl(FinCampo, { rotulo: "E-mail(s) do cliente", dica: " (separe com ponto e vírgula)" }, finEl("input", { type: "text", value: v.emailCliente, onChange: set("emailCliente") })),
       finEl(FinCampo, { rotulo: "Data do envio" }, finEl("input", { type: "date", value: v.dataEnvio, max: finHojeIso(), onChange: set("dataEnvio") })),
-      temEncaminhamento && finEl(FinCampo, { rotulo: "E-mail do Financeiro (último encaminhamento)" }, finEl("input", { type: "text", value: v.emailFinanceiro, onChange: set("emailFinanceiro") })),
+      temEncaminhamento && finEl(FinCampo, { rotulo: "E-mail(s) do Financeiro (último encaminhamento)", dica: " (separe com ponto e vírgula)" }, finEl("input", { type: "text", value: v.emailFinanceiro, onChange: set("emailFinanceiro") })),
       finEl(FinCampo, { rotulo: "Observações" }, finEl("textarea", { value: v.observacoes, onChange: set("observacoes") })),
       finEl(FinAcoesForm, { onCancel: onClose, rotuloOk: "Salvar correções" }),
     ),
@@ -27513,7 +27575,7 @@ function FinDetalheView({ item, currentUser, onBack, onExecutar, onExcluir, onVi
       "div",
       { className: "fin-dado" + (larga ? " fin-dado-larga" : ""), key: rotulo },
       finEl("span", { className: "fin-dado-rotulo" }, rotulo),
-      finEl("span", { className: "fin-dado-valor" }, valor || "—"),
+      finEl("span", { className: "fin-dado-valor" }, typeof valor === "string" ? finEmailsEl(valor) : valor || "—"),
     );
   }
   const modeloUsado = item.modeloVersao ? `Versão ${item.modeloVersao}` : null;
@@ -28041,10 +28103,10 @@ function FinanceiroView({ currentUser, onNotify, onView }) {
               finEl("td", { className: "mono" }, isoDateToBR((it.criadoEm || "").slice(0, 10))),
               finEl("td", null, it.cliente),
               finEl("td", null, it.consultor?.nome),
-              finEl("td", { className: "fin-cell-email", title: it.emailCliente }, it.emailCliente),
+              finEl("td", { className: "fin-cell-email", title: it.emailCliente }, finEmailsEl(it.emailCliente)),
               finEl("td", null, finEl(FinStatusBadge, { status: it.status })),
               finEl("td", { className: "fin-cell-retorno", onClick: (e) => e.stopPropagation() }, finRetornoCliente(it, { onView, onNotify })),
-              finEl("td", { className: "fin-cell-email", title: it.emailFinanceiro || "" }, it.emailFinanceiro || "—"),
+              finEl("td", { className: "fin-cell-email", title: it.emailFinanceiro || "" }, finEmailsEl(it.emailFinanceiro)),
               finEl("td", { className: "mono" }, formatAuditWhen(new Date(finUltimaAtualizacao(it)))),
               finEl("td", { onClick: (e) => e.stopPropagation() }, finEl("button", { type: "button", className: "link-btn", onClick: () => setSelectedId(it.id) }, "Ver solicitação ", finEl(ChevronRight, { size: 13 }))),
             ),
@@ -28063,9 +28125,9 @@ function FinanceiroView({ currentUser, onNotify, onView }) {
           { key: it.id, className: "company-card-mobile", onClick: () => setSelectedId(it.id) },
           finEl("div", { className: "company-card-mobile-top" }, finEl("span", { className: "company-mini-tag" }, it.cliente), finEl(FinStatusBadge, { status: it.status })),
           finEl("div", { className: "company-card-mobile-row" }, finEl("span", null, "Consultor"), finEl("span", null, it.consultor?.nome)),
-          finEl("div", { className: "company-card-mobile-row" }, finEl("span", null, "E-mail do cliente"), finEl("span", { className: "fin-cell-email" }, it.emailCliente)),
+          finEl("div", { className: "company-card-mobile-row" }, finEl("span", null, "E-mail do cliente"), finEl("span", { className: "fin-cell-email" }, finEmailsEl(it.emailCliente))),
           finEl("div", { className: "company-card-mobile-row", onClick: (e) => e.stopPropagation() }, finEl("span", null, "Retorno do cliente"), finEl("span", { className: "fin-cell-retorno" }, finRetornoCliente(it, { onView, onNotify }))),
-          finEl("div", { className: "company-card-mobile-row" }, finEl("span", null, "Financeiro"), finEl("span", { className: "fin-cell-email" }, it.emailFinanceiro || "—")),
+          finEl("div", { className: "company-card-mobile-row" }, finEl("span", null, "Financeiro"), finEl("span", { className: "fin-cell-email" }, finEmailsEl(it.emailFinanceiro))),
           finEl("div", { className: "company-card-mobile-row" }, finEl("span", null, "Atualizada"), finEl("span", null, formatAuditWhen(new Date(finUltimaAtualizacao(it))))),
           finEl("div", { className: "company-card-mobile-cta" }, "Ver solicitação ", finEl(ChevronRight, { size: 13 })),
         ),
@@ -30546,6 +30608,8 @@ function GrupoprimaPortal() {
         .portal-root[data-theme="dark"] .fin-versao-atual { color: #7FE6A0; }
         .fin-check-field { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; color: var(--texto); padding-bottom: 8px; cursor: pointer; }
         .fin-cell-email { max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .fin-email-linha { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .fin-dado-valor .fin-email-linha { white-space: normal; overflow-wrap: anywhere; }
         .fin-dados-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 24px; }
         .fin-dados-compacto { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--cinza-frio); }
         .fin-detalhe-topo .fin-dados-compacto { border-top: 1px solid var(--cinza-frio); }
