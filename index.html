@@ -5627,9 +5627,22 @@ const SIGLAS_PLURALIZAVEIS = /\b(afe|pgr|pae|pcmso|cnd|cndt|crf|ctf|rntrc|sassma
 function dobrarPluralDeSiglas(t) {
   return t.replace(SIGLAS_PLURALIZAVEIS, "$1");
 }
+/** PEDE_ARQUIVO_NO_TEXTO: palavras que mostram que a pessoa quer o ARQUIVO
+ *  (e não só o número) — "arquivo cnpj ba", "me manda o cnpj de PE",
+ *  "baixar cnpj", "cnpj em pdf". Pedido da Iasmin, 2026-10-08: "arquivo
+ *  cnpj ba" respondia só o número do CNPJ, sem entregar o documento. */
+const PEDE_ARQUIVO_NO_TEXTO =
+  /\b(arquivos?|documentos?|pdf|copia|via|anexo|mand\w*|envi\w*|baix\w*|download|visualiz\w*|abr(e|ir)|mostr\w*|ver|cartao|comprovante)\b/;
 function detectRequestedTypes(text) {
   const t = dobrarPluralDeSiglas(normalize(text));
-  return DOC_TYPE_KEYWORDS.filter((k) => k.match.test(t));
+  const tipos = DOC_TYPE_KEYWORDS.filter((k) => k.match.test(t));
+  // "cnpj" sozinho nunca é tipo (quase todo documento imprime um CNPJ), mas
+  // "cnpj" + palavra de pedir arquivo/enviar é o Cartão CNPJ.
+  if (tipos.length === 0 && /\bcnpjs?\b/.test(t) && PEDE_ARQUIVO_NO_TEXTO.test(t)) {
+    const cartao = DOC_TYPE_KEYWORDS.find((k) => k.label === "Cartão CNPJ");
+    if (cartao) return [cartao];
+  }
+  return tipos;
 }
 function detectRequestedCategories(text) {
   const t = dobrarPluralDeSiglas(normalize(text));
@@ -12250,6 +12263,27 @@ function ChatDrawer({
           type: "text",
           text: formatCnpjsResposta(empresasCnpj),
         });
+        // Uma base só ("cnpj ba"): além do número, já entrega o Cartão CNPJ
+        // (visualizar/baixar), se ele existir — sem pedir de novo.
+        if (empresasCnpj.length === 1) {
+          const tiposCartao = DOC_TYPE_KEYWORDS.filter((k) => k.label === "Cartão CNPJ");
+          const achou = searchDocuments({
+            company: empresasCnpj[0],
+            wantedTypeKeys: tiposCartao,
+            wantedCategoryKeys: [],
+            seguroCliente: null,
+            afeAtividade: null,
+            anoDocumento: null,
+            selecaoAlteracao: null,
+          });
+          if (achou.found.length > 0) {
+            handleDocumentIntent(
+              text,
+              { intent: "DOWNLOAD_DOCUMENT", types: tiposCartao, categories: [] },
+              empresasCnpj[0],
+            );
+          }
+        }
         return;
       }
     }
