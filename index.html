@@ -2177,6 +2177,34 @@ const GOOGLE_OAUTH_CONFIGURADO =
   if (docs.length === 0) return null;
   return sortDocumentsByVersion(docs)[0];
 }
+/** computeExpiredDocsAllBases: documentos VENCIDOS de todas as bases de uma
+ *  vez (sem versões antigas já substituídas — só a vigente de cada família —
+ *  e sem duplicar documento corporativo), ordenados por base (Empresa, Matriz,
+ *  filiais na ordem cadastrada) e, dentro de cada uma, do vencido há mais
+ *  tempo para o mais recente. */ function computeExpiredDocsAllBases(
+  companies,
+) {
+  const rows = [];
+  companies.forEach((c) => {
+    const docs = soVigentesPorFamilia(
+      (c.documentos || []).filter((d) => d.flag !== "versao_anterior"),
+    );
+    docs.forEach((d) => {
+      if (d.status === "vencido") rows.push({ company: c, doc: d, days: daysUntil(d.validade) });
+    });
+  });
+  const unicos = dedupeDocRows(rows, (r) => r.doc.id);
+  const ordemBase = (r) => {
+    const ab = r.doc.abrangencia;
+    if (ab === "empresa" || ab === "corporativa") return -1;
+    const i = companies.findIndex((x) => x.id === r.doc.companyId);
+    return i >= 0 ? i : companies.indexOf(r.company);
+  };
+  return unicos
+    .map((r, i) => ({ r, i }))
+    .sort((a, b) => ordemBase(a.r) - ordemBase(b.r) || (a.r.days ?? 0) - (b.r.days ?? 0) || a.i - b.i)
+    .map((x) => x.r);
+}
 /** Empresas com pelo menos um documento vencido. */ function computeExpiredCompanies(
   companies,
 ) {
@@ -6225,6 +6253,16 @@ function refinarMatchesPorRegraDeTipoEspecifico(
 function matchChecklistItemToCompany(item, company) {
   if (!company) return { status: "sem_base", candidatos: [] };
   const docs = company.documentos || [];
+  // Pedido da Iasmin, 2026-10-08 (print: "apólice de seguro" no Envio em Lote
+  // trazia só 1 apólice; "é importante que envie as duas, assim como
+  // acontece no assistente"). "Apólice" solta (sem RCTR-C/RC-DC) é o rótulo
+  // genérico — nenhum documento real tem esse `tipo`; no chat ele cai na
+  // categoria Seguros (só RCTR-C + RC-DC, gerais da empresa). Aqui tratamos
+  // igual: vira pedido da categoria "seguros" (ramo mais abaixo), em vez de
+  // achar as apólices pelo título e escolher só a mais recente.
+  if (item.tipoSugerido === "Apólice") {
+    item = { ...item, tipoSugerido: null, categoriaSugerida: "seguros" };
+  }
   if (item.tipoSugerido) {
     // "Contrato Social" é o rótulo GENÉRICO que a checklist reconhece a
     // partir do texto do pedido (ex.: "Contrato social mais recente") — mas
@@ -11391,7 +11429,14 @@ function ChatMessage({
         /*#__PURE__*/ React.createElement(
           "div",
           { className: "analytic-rows" },
-          msg.rows.map((r) =>
+          msg.rows.map((r, idx) => [
+            r.group && (idx === 0 || msg.rows[idx - 1].group !== r.group)
+              ? /*#__PURE__*/ React.createElement(
+                  "div",
+                  { key: "g-" + idx + r.group, className: "analytic-group-title" },
+                  r.group,
+                )
+              : null,
             /*#__PURE__*/ React.createElement(
               "div",
               { key: r.id, className: "analytic-row" },
@@ -11457,6 +11502,7 @@ function ChatMessage({
                   ),
               ),
             ),
+          ],
           ),
         ),
     );
@@ -11915,6 +11961,7 @@ function ChatDrawer({
    *  resultado, informa isso explicitamente. */ function tryAnalyticQuery(
     text,
     company,
+    explicitCompany = null,
   ) {
     const t = normalize(text);
     if (
@@ -11982,7 +12029,43 @@ function ChatDrawer({
     } // Item 23: "quais documentos estão vencidos?" dentro do contexto de uma
     // empresa (explícita ou da tela atual) responde só por ELA — a variante
     // sem empresa (abaixo) continua cruzando todas as empresas da base.
-    if (company && /vencid/.test(t)) {
+    // Pedido da Iasmin, 2026-10-08: "quando pergunto documentos vencidos no
+    // assistente, ele só fornece os da filial da aba aberta — diga de TODAS
+    // ao mesmo tempo ao perguntar generalizado; só se for da matriz (ou outra
+    // base citada), aí filtra". A base da tela/conversa (`company`) NÃO
+    // restringe mais uma pergunta genérica de vencidos: só uma base CITADA no
+    // texto (`explicitCompany`) restringe. Pedido de um tipo/categoria
+    // específico ("apólice vencida?") mantém o comportamento antigo.
+    if (
+      /vencid/.test(t) &&
+      !explicitCompany &&
+      detectRequestedTypes(text).length === 0 &&
+      detectRequestedCategories(text).length === 0
+    ) {
+      const rows = computeExpiredDocsAllBases(companies);
+      const nBases = new Set(rows.map((r) => docScopeLabel(r.doc, companies))).size;
+      pushMessage({
+        role: "assistant",
+        type: "analytic-list",
+        text:
+          rows.length > 0
+            ? `Encontrei ${rows.length} documento(s) vencido(s) em ${nBases} ${nBases === 1 ? "base" : "bases"} (todas as bases consideradas):`
+            : "Não encontrei documentos vencidos em nenhuma base no sistema atual.",
+        rows: rows.map((r) => ({
+          id: r.doc.id,
+          group: docScopeLabel(r.doc, companies),
+          label: r.doc.tipo,
+          sub: `Vencido${r.doc.validade ? ` em ${r.doc.validade}` : ""}${r.days !== null && r.days < 0 ? ` (há ${-r.days} dia(s))` : ""}`,
+          tone: "danger",
+          companyId: r.company.id,
+          doc: r.doc,
+          company: r.company,
+        })),
+      });
+      return true;
+    }
+    if ((explicitCompany || company) && /vencid/.test(t)) {
+      company = explicitCompany || company;
       const vencidos = company.documentos.filter((d) => d.status === "vencido");
       const proximos = company.documentos.filter((d) => d.status === "proximo");
       const rows = [...vencidos, ...proximos];
@@ -12337,7 +12420,7 @@ function ChatDrawer({
     if (isHomologacaoQuery(text)) {
       if (await tryHomologacaoQuery(text, pushMessage)) return;
     }
-    if (tryAnalyticQuery(text, company)) return;
+    if (tryAnalyticQuery(text, company, explicitCompany)) return;
     const parsed = parseIntent(text);
     // Reconhecimento de MÚLTIPLAS bases na mesma pergunta (pedido explícito
     // da Iasmin, 2026-09-22: "Cnpj matriz e filiais também deve causar
@@ -30363,6 +30446,8 @@ function GrupoprimaPortal() {
         .analytic-row-label { font-size: 11.5px; font-weight: 700; color: var(--texto); }
         .analytic-row-sub { font-size: 10.5px; color: var(--carvao); margin-top: 1px; }
         .analytic-row-actions { display: flex; gap: 5px; flex-shrink: 0; }
+        .analytic-group-title { font-size: 10.5px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; color: var(--carvao); margin: 8px 0 2px; }
+        .analytic-group-title:first-child { margin-top: 0; }
 
         /* ---- Filtros (Empresas) ---- */
         .filters-btn { display: flex; align-items: center; gap: 6px; background: var(--card-bg); border: 1px solid var(--cinza-frio); color: var(--texto); font-weight: 700; font-size: 12.5px; padding: 8px 13px; border-radius: 8px; cursor: pointer; flex-shrink: 0; }
