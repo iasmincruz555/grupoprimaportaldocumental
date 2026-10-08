@@ -949,6 +949,12 @@ const CONTABILIDADE_SUBGRUPOS = [
     tipos: ["Carta de Titularidade Bancária", "Comprovante de Pagamento"],
   },
 ];
+/** tipoNoGrupoContabil: o `tipo` gravado pertence ao grupo — aceita também
+ *  os rótulos antigos/sinônimos (TIPO_LABEL_SINONIMOS_LEGADOS), ex.: um
+ *  documento gravado como "Carta Bancária" cai em "Dados Bancários". */
+function tipoNoGrupoContabil(g, tipo) {
+  return g.tipos.some((t) => tipoLabelsAceitos(t).includes(tipo));
+}
 /* PLANOS_PROCEDIMENTOS_SUBGRUPOS: agrupamento visual pedido pela Iasmin em
    2026-10-07 dentro de "Planos, Procedimentos e Manuais" — uma área própria
    "Manuais Comerciais" (manuais para o time comercial, como o "Manual
@@ -4616,7 +4622,7 @@ async function createDocumentPackageMultiBase(numerados, opts = {}) {
       key: "contabilidade",
       label: "Carta de Titularidade Bancária",
       match:
-        /titularidade|carta (de |do )?banco|(dados?|informa[c]oes|informa[c]ao) (do |de |da )?(banc|banco|conta banc)|dados da conta|comprovante de (conta|dados) banc/,
+        /titularidade|carta (de |do |da )?(banco|banc|conta)|(dados?|informa[c]oes|informa[c]ao) (do |de |da |para )?(banc|banco|conta|pagamento|deposito)|dados da conta|declaracao banc|ficha banc|domicilio banc|conta corrente|comprovante de (conta|dados) banc/,
     },
     {
       key: "contabilidade",
@@ -4643,10 +4649,25 @@ async function createDocumentPackageMultiBase(numerados, opts = {}) {
  *  `matchChecklistItemToCompany` (envio em lote) usam
  *  `tipoLabelsAceitos` para aceitar o rótulo antigo como sinônimo do
  *  atual, nunca só o mais recente. */
-const TIPO_LABEL_SINONIMOS_LEGADOS = [{ atual: "CND Trabalhista", legado: "CNDT" }];
+const TIPO_LABEL_SINONIMOS_LEGADOS = [
+  { atual: "CND Trabalhista", legado: "CNDT" },
+  // 2026-10-08: o documento real já cadastrado ficou com `tipo` "Carta
+  // Bancária" (ver print da Iasmin); todas as variações de nome da carta de
+  // titularidade valem como o MESMO tipo, tanto na busca quanto no
+  // agrupamento "Dados Bancários" de Contabilidade.
+  ...[
+    "Carta Bancária",
+    "Carta de Titularidade",
+    "Titularidade Bancária",
+    "Dados Bancários",
+    "Informações Bancárias",
+    "Dados do Banco",
+    "Dados da Conta",
+  ].map((legado) => ({ atual: "Carta de Titularidade Bancária", legado })),
+];
 function tipoLabelsAceitos(label) {
-  const sinonimo = TIPO_LABEL_SINONIMOS_LEGADOS.find((s) => s.atual === label);
-  return sinonimo ? [label, sinonimo.legado] : [label];
+  const legados = TIPO_LABEL_SINONIMOS_LEGADOS.filter((s) => s.atual === label).map((s) => s.legado);
+  return [label, ...legados];
 }
 /* CATEGORY_ALIASES — reconhecimento de categoria por nome de arquivo/pasta/
  * conteúdo. Além da própria palavra da categoria, inclui sinônimos REAIS já
@@ -4718,7 +4739,7 @@ function tipoLabelsAceitos(label) {
     {
       key: "contabilidade",
       match:
-        /contab[i]|balan[cç]o patrimonial|\bdre\b|demonstra[cç][aã]o (do resultado|cont[aá]bel)|relat[oó]rio cont[aá]bil|declara[cç][aã]o de faturamento|titularidade banc|dados? banc|informa[cç][oõ]es banc|dados do banco|comprovantes? de pagamento/,
+        /contab[i]|balan[cç]o patrimonial|\bdre\b|demonstra[cç][aã]o (do resultado|cont[aá]bel)|relat[oó]rio cont[aá]bil|declara[cç][aã]o de faturamento|titularidade|carta (de |do |da )?banc|dados? (banc|do banco|da conta)|informa[cç](?:[aã]o|[oõ]es) banc|conta corrente|comprovantes? de pagamento/,
     },
     {
       key: "seguros",
@@ -8847,14 +8868,14 @@ function CompaniesView({
             const contabilidadeGrupos = isContabilidade
               ? CONTABILIDADE_SUBGRUPOS.map((g) => ({
                   ...g,
-                  rows: rows.filter((r) => g.tipos.includes(r.doc.tipo)),
+                  rows: rows.filter((r) => tipoNoGrupoContabil(g, r.doc.tipo)),
                 }))
               : [];
             const contabilidadeResto = isContabilidade
               ? rows.filter(
                   (r) =>
                     !CONTABILIDADE_SUBGRUPOS.some((g) =>
-                      g.tipos.includes(r.doc.tipo),
+                      tipoNoGrupoContabil(g, r.doc.tipo),
                     ),
                 )
               : [];
@@ -17820,6 +17841,13 @@ const TIPO_LABEL_TO_DOC_FAMILY = {
     "Balancete",
     "Faturamento",
     "Carta de Titularidade Bancária",
+    "Carta Bancária",
+    "Carta de Titularidade",
+    "Titularidade Bancária",
+    "Dados Bancários",
+    "Informações Bancárias",
+    "Dados do Banco",
+    "Dados da Conta",
     "Comprovante de Pagamento",
     "Apólice RCTR-C",
     "Apólice RC-DC",
