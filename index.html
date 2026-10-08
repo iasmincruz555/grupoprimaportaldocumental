@@ -13249,7 +13249,7 @@ const HOMOLOGACAO_STATUS_META = {
   cancelada: { label: "Cancelada", className: "status-cancelada" },
 };
 /* Transições de status permitidas — só a equipe responsável (perfil
-   "admin") pode acioná-las. concluída/cancelada são estados finais. */ const HOMOLOGACAO_TRANSICOES =
+   "admin") pode acioná-las. concluída é estado final; cancelada só sai via "Reabrir homologação" (handleReabrir). */ const HOMOLOGACAO_TRANSICOES =
   {
     nova: ["andamento", "cancelada"],
     andamento: ["concluida", "cancelada"],
@@ -14167,6 +14167,37 @@ function avisoFonteExterna(descricao) {
       "info",
     );
   }
+  // handleReabrir (pedido da Iasmin, 2026-10-08): homologação cancelada pode
+  // ser reaberta. Volta para o status em que estava ANTES de ser cancelada
+  // (lido do histórico; "nova" se não houver registro), registra o evento
+  // "reaberta" no histórico e NÃO dispara e-mail (reabrir não é "em andamento"
+  // novo para o consultor — só mudanças de status normais notificam).
+  function handleReabrir() {
+    if (h.status !== "cancelada") return;
+    const hist = h.historico || [];
+    let anterior = "nova";
+    for (let i = hist.length - 1; i >= 0; i--) {
+      const ev = hist[i];
+      if (ev && ev.evento === "status_alterado" && ev.para === "cancelada") {
+        if (ev.de === "nova" || ev.de === "andamento") anterior = ev.de;
+        break;
+      }
+    }
+    const patch = {
+      status: anterior,
+      historico: pushHistorico("reaberta", { de: "cancelada", para: anterior }),
+    };
+    onUpdate(h.id, patch);
+    logDocumentAction("reabriu_homologacao", {
+      homologacao: h.cliente,
+      de: "cancelada",
+      para: anterior,
+    });
+    onNotify?.(
+      `Homologação de "${h.cliente}" reaberta (status: "${HOMOLOGACAO_STATUS_META[anterior]?.label}").`,
+      "info",
+    );
+  }
   function handleRevelar() {
     setSenhaRevelada(true);
     onUpdate(h.id, { historico: pushHistorico("credenciais_reveladas") });
@@ -14335,6 +14366,17 @@ function avisoFonteExterna(descricao) {
               HOMOLOGACAO_STATUS_META[t]?.label,
             ),
           ),
+          // Reabrir: só quando cancelada (pedido da Iasmin, 2026-10-08).
+          h.status === "cancelada" &&
+            /*#__PURE__*/ React.createElement(
+              "button",
+              {
+                className: "doc-view-btn homolog-reopen-btn",
+                onClick: handleReabrir,
+                title: "Reabrir esta homologação cancelada (Administrador)",
+              },
+              "Reabrir homologação",
+            ),
           // Excluir: pedido explícito da Iasmin (2026-09-18) — botão só na
           // área interna de cada homologação, restrito a Administrador
           // (mesmo gate de excluirDocumentoConfirmado), sempre disponível
@@ -14835,6 +14877,8 @@ function avisoFonteExterna(descricao) {
                     `${ev.usuario} registrou esta homologação.`,
                   ev.evento === "status_alterado" &&
                     `${ev.usuario} alterou o status de "${HOMOLOGACAO_STATUS_META[ev.de]?.label || ev.de}" para "${HOMOLOGACAO_STATUS_META[ev.para]?.label || ev.para}".`,
+                  ev.evento === "reaberta" &&
+                    `${ev.usuario} reabriu a homologação (voltou para "${HOMOLOGACAO_STATUS_META[ev.para]?.label || ev.para}").`,
                   ev.evento === "credenciais_reveladas" &&
                     `${ev.usuario} revelou as credenciais de acesso.`,
                   ev.evento === "bases_alteradas" &&
