@@ -30309,6 +30309,67 @@ function GrupoprimaPortal() {
         .filters-bar-fields { display: flex; gap: 10px; flex: 0 1 auto; flex-wrap: wrap; align-items: flex-end; }
         .filters-bar-fields .filter-field { min-width: 124px; }
         .filter-field-date { min-width: 136px; }
+
+        /* ---- Acabamento dos filtros (pedido da Iasmin, 2026-10-08) ----
+           Campos com a MESMA altura (antes: o campo de texto era mais baixo
+           que os selects nativos e os rótulos ficavam desalinhados), selects
+           sem o visual nativo do Safari/macOS (gradiente + setas duplas) e
+           datas sem as cores azuis nativas do navegador. Vale para toda
+           tela que usa .filters-bar (Empresas, Homologação, Envio em Lote,
+           Auditoria, Análise de Clientes, Informações Financeiras). */
+        .filters-bar { padding: 12px 16px; gap: 14px; }
+        .filters-bar-fields { gap: 10px; align-items: flex-end; }
+        .filters-bar .filter-field { gap: 6px; }
+        .filters-bar .filter-field > span, .filters-bar .filter-field { line-height: 1.2; }
+        .filters-bar .filter-field > span { white-space: nowrap; font-size: 10.5px; }
+        .filters-bar .filter-field input, .filters-bar .filter-field select {
+          box-sizing: border-box; width: 100%; height: 36px; padding: 0 12px; margin: 0;
+          font-size: 13px; line-height: 34px; font-weight: 500; border-radius: 8px;
+          -webkit-appearance: none; appearance: none; background-color: var(--branco-frio);
+        }
+        .filters-bar .filter-field input::placeholder { color: var(--carvao); opacity: 0.75; }
+        .filters-bar .filter-field select {
+          padding-right: 34px; cursor: pointer; text-overflow: ellipsis;
+          background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%238A9AA8' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+          background-repeat: no-repeat; background-position: right 12px center; background-size: 12px;
+        }
+        .filters-bar .filter-field select:hover, .filters-bar .filter-field input:hover { border-color: var(--carvao); }
+        .filters-bar .filter-field input:focus, .filters-bar .filter-field select:focus {
+          border-color: var(--texto); box-shadow: 0 0 0 3px rgba(138,154,168,0.22);
+        }
+        .filters-bar { align-items: flex-end; }
+        .filters-bar .filters-bar-fields { flex: 1 1 0; min-width: 0; }
+        .filters-bar .filters-bar-fields .filter-field { min-width: 104px; flex: 1 1 0; }
+        .filters-bar .filter-field input, .filters-bar .filter-field select { min-width: 0; }
+        .filters-bar .filters-bar-fields .filter-field-date { min-width: 132px; }
+        @media (min-width: 1024px) { .filters-bar.homolog-filters-bar .filters-bar-fields { flex-wrap: wrap; } }
+        /* Barra da página Bases/Empresas usa .desktop-only (display:block !important) — no desktop precisa ser a mesma barra em linha das demais. */
+        @media (min-width: 1024px) { .filters-bar.desktop-only { display: flex !important; } }
+        .filters-bar-head { align-self: flex-end; height: 36px; font-size: 11px; }
+        .filters-modal-body .filter-field input, .filters-modal-body .filter-field select {
+          box-sizing: border-box; width: 100%; height: 40px; padding: 0 12px; border-radius: 8px;
+          -webkit-appearance: none; appearance: none; line-height: 38px; min-width: 0;
+        }
+        .filters-modal-body .filter-field select {
+          padding-right: 34px; background-repeat: no-repeat; background-position: right 12px center; background-size: 12px;
+          background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%238A9AA8' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+        }
+        .filters-bar .fin-check-field { height: 36px; padding-bottom: 0; align-items: center; display: inline-flex; }
+        .filters-bar .filters-clear-inline { height: 36px; padding: 0 16px; display: inline-flex; align-items: center; border-radius: 8px; margin-bottom: 0; }
+        /* Datas: sem o azul nativo do navegador — número na cor do texto,
+           barras discretas, calendário em tom neutro. */
+        .portal-root input[type="date"] { font-variant-numeric: tabular-nums; color: var(--texto); }
+        .portal-root input[type="date"]::-webkit-datetime-edit,
+        .portal-root input[type="date"]::-webkit-datetime-edit-fields-wrapper,
+        .portal-root input[type="date"]::-webkit-datetime-edit-day-field,
+        .portal-root input[type="date"]::-webkit-datetime-edit-month-field,
+        .portal-root input[type="date"]::-webkit-datetime-edit-year-field { color: var(--texto); background: transparent; }
+        .portal-root input[type="date"]::-webkit-datetime-edit-text { color: var(--carvao); opacity: 0.7; padding: 0 1px; }
+        .portal-root input[type="date"]::-webkit-datetime-edit-day-field:focus,
+        .portal-root input[type="date"]::-webkit-datetime-edit-month-field:focus,
+        .portal-root input[type="date"]::-webkit-datetime-edit-year-field:focus { background: var(--cinza-frio); color: var(--texto); outline: none; border-radius: 3px; }
+        .portal-root input[type="date"]::-webkit-calendar-picker-indicator { opacity: 0.55; cursor: pointer; }
+        .portal-root input[type="date"]::-webkit-calendar-picker-indicator:hover { opacity: 0.9; }
         .filters-clear-inline { flex: none; margin-left: auto; padding: 7px 13px; margin-bottom: 0; font-size: 11.5px; }
         @media (min-width: 1024px) {
           .homolog-filters-bar .filters-bar-fields { flex-wrap: nowrap; }
@@ -30535,7 +30596,7 @@ function GrupoprimaPortal() {
         @media (max-width: 1000px) { .fin-detalhe-topo { grid-template-columns: 1fr; } .fin-detalhe-topo .company-header { margin-bottom: 0; } }
         /* Filtros da lista numa linha só (telas largas) + coluna "Retorno do cliente" */
         .fin-filters-bar { padding: 8px 12px; margin: 14px 0 14px; gap: 10px; }
-        .fin-filters-bar .filter-field input, .fin-filters-bar .filter-field select { padding: 6px 8px; font-size: 12px; }
+        .fin-filters-bar .filter-field input, .fin-filters-bar .filter-field select { font-size: 12.5px; }
         .fin-filters-bar .fin-check-field { padding-bottom: 6px; white-space: nowrap; }
         .fin-filters-bar .filters-clear-inline { margin-left: 0; }
         @media (min-width: 1200px) {
