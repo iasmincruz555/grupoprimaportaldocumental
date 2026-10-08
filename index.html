@@ -4164,6 +4164,13 @@ async function createDocumentPackageMultiBase(numerados, opts = {}) {
     "Upload ainda não conectado a um repositório real. Estrutura pronta para integração com POST /api/documents/upload.",
   );
 }
+/* Alvará Sanitário e AVCB (Corpo de Bombeiros) são documentos PRÓPRIOS — nunca
+ * entram no tipo genérico "Alvará de Localização e Funcionamento" (pedido da
+ * Iasmin, 2026-10-08, com print: "alvara sanitario" trouxe também o AVBC).
+ * Padrões sobre texto normalizado (sem acento, minúsculo). "avbc" é a grafia
+ * invertida que aparece em documentos reais cadastrados. */
+const RE_TEXTO_SANITARIO = /licen[c]a sanitari[ao]|vigilancia sanitaria|alvara sanitari[ao]|\bsanitari[ao]s?\b/;
+const RE_TEXTO_BOMBEIROS = /\bavcb\b|\bavbc\b|\bclcb\b|bombeiros?|atestado de vistoria/;
 /* ---- Intenção + busca de documentos (preservado) ---- */ const DOC_TYPE_KEYWORDS =
   [
     {
@@ -4405,7 +4412,7 @@ async function createDocumentPackageMultiBase(numerados, opts = {}) {
       // usado por clientes/consultores — nunca deve cair como "não
       // identificado" só por não repetir a palavra exata "licença".
       label: "Licença Sanitária",
-      match: /licen[c]a sanitaria|vigilancia sanitaria|alvara sanitario/,
+      match: /licen[c]a sanitari[ao]|vigilancia sanitaria|alvara sanitari[ao]|\bsanitari[ao]s?\b/,
     },
     {
       key: "licencas_autorizacoes",
@@ -4413,7 +4420,15 @@ async function createDocumentPackageMultiBase(numerados, opts = {}) {
       // próprio ("Inscrição Municipal", abaixo) — deixava de bater com ele
       // porque esta entrada vem antes no array e "ganhava" o match.
       label: "Alvará de Localização e Funcionamento",
-      match: /alvar[a]|localiza[c]ao e funcionamento/,
+      // 2026-10-08: o genérico NUNCA cobre Alvará Sanitário nem AVCB/Corpo de
+      // Bombeiros ("alvará sanitário", "alvará bombeiros"...) — são tipos
+      // próprios, reconhecidos só pelos seus nomes.
+      match: {
+        test: (t) =>
+          /alvar[a]|localiza[c]ao e funcionamento/.test(t) &&
+          !RE_TEXTO_SANITARIO.test(t) &&
+          !RE_TEXTO_BOMBEIROS.test(t),
+      },
     },
     {
       key: "licencas_autorizacoes",
@@ -4489,7 +4504,9 @@ async function createDocumentPackageMultiBase(numerados, opts = {}) {
     {
       key: "seguranca_qualidade_compliance",
       label: "AVCB",
-      match: /\bavcb\b|corpo de bombeiros|atestado de vistoria/,
+      // 2026-10-08 (Iasmin): AVCB também por "avbc", "bombeiros", "corpo de
+      // bombeiros", "alvará (do corpo de) bombeiros", "licença bombeiros/avcb".
+      match: /\bavcb\b|\bavbc\b|\bclcb\b|bombeiros?|atestado de vistoria/,
     },
     {
       key: "seguranca_qualidade_compliance",
@@ -5610,7 +5627,7 @@ function DocTituloEditable({ doc, onNotify, className, isAdmin }) {
  * SIGLA formada pelas iniciais do título, ex.: PCMSO = Programa de Controle
  * Médico de Saúde Ocupacional) nos títulos dos documentos reais. */
 const TITULO_STOPWORDS = new Set(["de", "da", "do", "das", "dos", "e", "a", "o", "as", "os", "para", "por", "em", "no", "na", "nos", "nas", "com", "um", "uma", "me", "manda", "mande", "envia", "enviar", "quero", "preciso", "queria", "pode", "voce", "documento", "documentos", "arquivo", "arquivos", "da", "tem", "ter", "mostra", "mostrar", "favor", "por favor", "pfv", "pf", "matriz", "filial", "base", "mais", "recente", "atual", "ultimo", "ultima"]);
-const DIGITACAO_VOCAB_EXTRA = ["pcmso", "sassmaq", "avcb", "cnpj", "ibama", "rctr", "cndt", "fgts", "alvara", "licenca", "sanitaria", "ambiental", "certidao", "negativa", "apolice", "contrato", "social", "alteracao", "contratual", "balanco", "balancete", "faturamento", "inscricao", "estadual", "municipal", "federal", "trabalhista", "falencia", "seguro", "matriz", "filial", "funcionamento", "bombeiros", "qualidade", "gerenciamento", "emergencia", "procuracao", "regularidade", "titularidade", "bancaria", "bancarias", "bancario", "bancarios", "comprovante", "pagamento"];
+const DIGITACAO_VOCAB_EXTRA = ["pcmso", "sassmaq", "avcb", "cnpj", "ibama", "rctr", "cndt", "fgts", "alvara", "licenca", "sanitaria", "ambiental", "certidao", "negativa", "apolice", "contrato", "social", "alteracao", "contratual", "balanco", "balancete", "faturamento", "inscricao", "estadual", "municipal", "federal", "trabalhista", "falencia", "seguro", "matriz", "filial", "funcionamento", "bombeiros", "qualidade", "gerenciamento", "emergencia", "procuracao", "regularidade", "bombeiros", "titularidade", "bancaria", "bancarias", "bancario", "bancarios", "comprovante", "pagamento"];
 let _vocabDigitacaoBase = null;
 function vocabularioDigitacaoBase() {
   if (_vocabDigitacaoBase) return _vocabDigitacaoBase;
@@ -5855,14 +5872,30 @@ function findCompaniesInQuery(q, companies) {
  *  documentos já cadastrados com tipo vazio/diferente (ex.: "Programa de
  *  Controle Médico de Saúde Ocupacional" salvo antes de existir o tipo
  *  PCMSO), sem alterar nenhum pedido que já encontrava documentos. */
+const TIPOS_GENERICOS_NO_FALLBACK = new Set(["Alvará de Localização e Funcionamento", "Outro documento", "Apólice"]);
 function docsDoTipoPedido(docs, label, keyword) {
   const labels = tipoLabelsAceitos(label);
-  const porTipo = docs.filter((d) => labels.includes(d.tipo));
+  const textoDoc = (d) => normalize(`${d.titulo || ""} ${(d.arquivo && d.arquivo.nome) || ""}`);
+  // Alvará Sanitário e AVCB/Bombeiros nunca fazem parte do tipo genérico
+  // "Alvará de Localização e Funcionamento", mesmo que o `tipo` gravado do
+  // documento esteja genérico: o título/arquivo decide (2026-10-08).
+  const ehGenericoAlvara = label === "Alvará de Localização e Funcionamento";
+  const proprioDeOutroTipo = (d) => {
+    const t = textoDoc(d);
+    return RE_TEXTO_SANITARIO.test(t) || RE_TEXTO_BOMBEIROS.test(t) || d.tipo === "AVCB" || d.tipo === "Licença Sanitária";
+  };
+  const porTipo = docs.filter((d) => labels.includes(d.tipo) && !(ehGenericoAlvara && proprioDeOutroTipo(d)));
   if (porTipo.length > 0 || !keyword || !keyword.match) return porTipo;
+  // AVCB: o documento real pode estar cadastrado em "Licenças e Alvarás".
+  const categoriasAceitas = keyword.label === "AVCB" ? [keyword.key, "licencas_autorizacoes"] : [keyword.key];
+  const outrosLabels = new Set(DOC_TYPE_KEYWORDS.map((k) => k.label).filter((l) => l !== keyword.label));
   return docs.filter((d) => {
-    if (d.categoria !== keyword.key) return false;
-    const texto = normalize(`${d.titulo || ""} ${(d.arquivo && d.arquivo.nome) || ""}`);
-    return keyword.match.test(texto);
+    if (!categoriasAceitas.includes(d.categoria)) return false;
+    // Já tem um tipo específico próprio (ex.: Licença Sanitária): não é
+    // puxado para outro tipo só porque o título cita uma palavra parecida.
+    if (d.tipo && !TIPOS_GENERICOS_NO_FALLBACK.has(d.tipo) && outrosLabels.has(d.tipo) && !labels.includes(d.tipo)) return false;
+    if (ehGenericoAlvara && proprioDeOutroTipo(d)) return false;
+    return keyword.match.test(textoDoc(d));
   });
 }
 /** searchDocuments: localiza documentos de uma empresa por tipo/categoria.
