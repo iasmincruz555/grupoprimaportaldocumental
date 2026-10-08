@@ -18286,7 +18286,7 @@ function isArquivoDeEnvioLote(arquivo) {
  *  função roda também na carga da tela, antes de outras constantes do
  *  arquivo existirem). Compara sem acento/caixa, em qualquer nível do
  *  caminho — e a própria pasta, quando listada como se fosse arquivo. */
-const AREAS_INTERNAS_PASTAS_DRIVE = ["HOMOLOGAÇÃO - ARQUIVOS DE RESPOSTA", "INFORMAÇÕES FINANCEIRAS"];
+const AREAS_INTERNAS_PASTAS_DRIVE = ["HOMOLOGAÇÃO - ARQUIVOS DE RESPOSTA", "INFORMAÇÕES FINANCEIRAS", "PORTAL"];
 function isArquivoDeAreaInternaDoPortal(arquivo) {
   if (!arquivo) return false;
   const alvos = AREAS_INTERNAS_PASTAS_DRIVE.map((n) => normalize(n).trim());
