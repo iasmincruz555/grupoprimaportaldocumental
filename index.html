@@ -29463,6 +29463,37 @@ function VgLista({ me, escopo, onAbrir, onNova, onNotify, refreshKey, usuarios, 
 
 /* ---------- Assistente de nova viagem / edição ---------- */
 const VG_PASSOS = ["Dados da viagem", "Orçamento", "Adiantamento e anexos", "Revisão e envio"];
+/** Janela exibida ao clicar em "Enviar para aprovação": pede o e-mail do gestor que
+ *  receberá a planilha preenchida. Primeiro e-mail = destinatário; demais = cópia. */
+function VgEnviarGestorModal({ me, ocupado, erro, onCancelar, onConfirmar }) {
+  const [emails, setEmails] = useState(me.gestorEmail || "");
+  const [mensagem, setMensagem] = useState("");
+  const [erroLocal, setErroLocal] = useState(null);
+  function submeter(ev) {
+    ev.preventDefault();
+    const r = finNormalizarEmails(emails);
+    if (r.lista.length === 0) return setErroLocal("Informe o e-mail do gestor.");
+    if (r.invalido) return setErroLocal(`E-mail inválido: ${r.invalido}`);
+    if (r.lista.length > 10) return setErroLocal("Informe no máximo 10 e-mails.");
+    setErroLocal(null);
+    onConfirmar({ emails: r.texto, mensagem: mensagem.trim() });
+  }
+  return vgEl(
+    FinModal,
+    { titulo: "Enviar para aprovação", subtitulo: "A planilha preenchida será enviada por e-mail ao gestor", icon: vgEl(Send, { size: 16 }), onClose: ocupado ? () => {} : onCancelar },
+    vgEl(
+      "form",
+      { onSubmit: submeter, "data-testid": "vg-modal-gestor" },
+      vgEl(FinErro, { erro: erroLocal || erro }),
+      vgEl(FinCampo, { rotulo: "E-mail do gestor", dica: me.gestorNome ? ` (gestor cadastrado: ${me.gestorNome})` : "" },
+        vgEl("input", { type: "text", value: emails, onChange: (e) => setEmails(e.target.value), placeholder: "gestor@grupoprimalog.com.br", autoFocus: true, "data-testid": "vg-gestor-emails" })),
+      vgEl("p", { className: "vg-muted" }, "Para mais de um e-mail, separe com ponto e vírgula (;). O primeiro recebe a solicitação e os demais ficam em cópia."),
+      vgEl(FinCampo, { rotulo: "Mensagem ao gestor", dica: " (opcional)" },
+        vgEl("textarea", { value: mensagem, onChange: (e) => setMensagem(e.target.value), maxLength: 2000, placeholder: "Ex.: Segue a solicitação da viagem para aprovação." })),
+      vgEl(FinAcoesForm, { onCancel: onCancelar, ocupado, rotuloOk: "Enviar para aprovação", rotuloOcupado: "Enviando..." }),
+    ),
+  );
+}
 function VgWizard({ me, viagemId, onCancelar, onConcluido, onNotify, onView }) {
   const [passo, setPasso] = useState(0);
   const [form, setForm] = useState(vgFormVazio());
@@ -29474,6 +29505,7 @@ function VgWizard({ me, viagemId, onCancelar, onConcluido, onNotify, onView }) {
   const [ocupado, setOcupado] = useState(false);
   const [salvoEm, setSalvoEm] = useState(null);
   const [avisosImport, setAvisosImport] = useState([]);
+  const [modalGestor, setModalGestor] = useState(false);
   useEffect(() => {
     if (!viagemId) return;
     let vivo = true;
@@ -29522,18 +29554,32 @@ function VgWizard({ me, viagemId, onCancelar, onConcluido, onNotify, onView }) {
     try { await salvarRascunho(); onNotify?.("Rascunho salvo.", "info"); onConcluido(null); }
     catch (err) { setErro(err.message); setOcupado(false); }
   }
-  async function enviar() {
+  // 1º clique: valida e abre a janela do e-mail do gestor.
+  function enviar() {
     const e = vgValidarPasso(3, form);
     if (e) return setErro(e);
     const p = vgFormParaPayload(form);
     if (!p.ok) return setErro(p.erro);
+    setErro(null); setModalGestor(true);
+  }
+  // 2º passo: envia para aprovação e manda a planilha preenchida ao e-mail informado.
+  async function confirmarEnvio({ emails, mensagem }) {
+    const p = vgFormParaPayload(form);
+    if (!p.ok) { setModalGestor(false); return setErro(p.erro); }
     setErro(null); setOcupado(true);
+    let vid;
     try {
-      const vid = await salvarRascunho();
+      vid = await salvarRascunho();
       await vgApi("POST", `/viagens/${encodeURIComponent(vid)}/acoes/enviar`, { corpo: p.dados });
-      onNotify?.("Solicitação enviada para aprovação do gestor.", "info");
-      onConcluido(vid);
-    } catch (err) { setErro(err.message); setOcupado(false); }
+    } catch (err) { setErro(err.message); setOcupado(false); return; }
+    try {
+      await vgApi("POST", `/viagens/${encodeURIComponent(vid)}/enviar-planilha-email`, { corpo: { emails, mensagem } });
+      onNotify?.("Solicitação enviada para aprovação e planilha enviada por e-mail ao gestor.", "info");
+    } catch (err) {
+      onNotify?.(`Solicitação enviada para aprovação, mas o e-mail não saiu: ${err.message}`, "error");
+    }
+    setModalGestor(false);
+    onConcluido(vid);
   }
   async function exportarTela() {
     setErro(null);
@@ -29565,6 +29611,7 @@ function VgWizard({ me, viagemId, onCancelar, onConcluido, onNotify, onView }) {
     vgEl("ol", { className: "vg-steps" }, VG_PASSOS.map((n, i) => vgEl("li", { key: n, className: "vg-step" + (i === passo ? " ativo" : i < passo ? " feito" : "") }, vgEl("span", { className: "vg-step-n" }, i < passo ? vgEl(CheckCircle2, { size: 12 }) : i + 1), vgEl("span", { className: "vg-step-t" }, n)))),
     motivoDevolucao && vgEl("div", { className: "vg-aviso-devolucao" }, vgEl(AlertTriangle, { size: 15 }), vgEl("div", null, vgEl("strong", null, "O gestor pediu ajustes: "), motivoDevolucao)),
     vgEl(FinErro, { erro }),
+    modalGestor && vgEl(VgEnviarGestorModal, { me, ocupado, erro, onCancelar: () => { setModalGestor(false); setErro(null); }, onConfirmar: confirmarEnvio }),
     passo === 0 && vgEl(
       "div",
       { className: "vg-form-grid" },
