@@ -3156,6 +3156,49 @@ function notificarHomologacao(tipo, item) {
     }),
   }).catch(() => {});
 }
+/** enviarEmailEncaminhamentoFinanceiro (2026-10-09, pedido da Iasmin): na
+ *  etapa "Encaminhar ao Financeiro" o portal agora ENVIA o e-mail (antes só
+ *  registrava). Mesma lógica de notificarHomologacao: chamada ao backend
+ *  (POST /api/financeiro/encaminhar-email) depois que o encaminhamento já foi
+ *  salvo — uma falha de envio nunca desfaz o registro, só avisa. O 1º e-mail
+ *  do campo vai como destinatário e os demais (depois do ";") em cópia; as
+ *  observações vão no corpo; o arquivo da versão da resposta encaminhada vai
+ *  em anexo (o backend baixa do Drive). Devolve { ok, message? }. */
+function finMontarPayloadEncaminhamentoEmail(item, usuario) {
+  const encs = (item && item.encaminhamentos) || [];
+  const enc = encs[encs.length - 1];
+  if (!enc) return null;
+  const resposta = ((item && item.respostas) || []).find((r) => r.versao === enc.versaoResposta);
+  const arq = resposta && resposta.arquivo;
+  return {
+    cliente: item.cliente,
+    consultor: item.consultor,
+    emailCliente: item.emailCliente,
+    emailsFinanceiro: enc.email,
+    dataEncaminhamento: enc.data,
+    versaoResposta: enc.versaoResposta,
+    observacoes: enc.observacoes || "",
+    encaminhadoPor: enc.encaminhadoPor,
+    remetente: usuario ? { nome: usuario.nome, email: usuario.email } : undefined,
+    anexo: arq
+      ? { nome: arq.nome, driveFileId: arq.driveFileId || null, tamanho: arq.tamanho, tipo: arq.tipo }
+      : undefined,
+  };
+}
+async function enviarEmailEncaminhamentoFinanceiro(item, usuario) {
+  const payload = finMontarPayloadEncaminhamentoEmail(item, usuario);
+  if (!payload) return { ok: false, message: "Encaminhamento não encontrado." };
+  try {
+    const res = await fetch(`${DRIVE_PROXY_URL}/api/financeiro/encaminhar-email`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Portal-Key": DRIVE_PROXY_KEY },
+      body: JSON.stringify(payload),
+    });
+    return await res.json();
+  } catch (e) {
+    return { ok: false, message: "Não foi possível enviar o e-mail agora." };
+  }
+}
 /* Requisito mínimo de segurança da nova senha (item 9 do pedido: "atender
    ao requisito mínimo de segurança definido pelo sistema") — definido aqui
    como regra única, usada tanto no primeiro acesso quanto na troca de
@@ -27751,12 +27794,12 @@ function FinEncaminharModal({ item, onClose, onConfirmar }) {
   }
   return finEl(
     FinModal,
-    { titulo: "Encaminhar ao Financeiro", subtitulo: `${item.cliente} · registro do encaminhamento (o e-mail em si é enviado por você, fora do portal)`, icon: finEl(Send, { size: 16 }), onClose },
+    { titulo: "Encaminhar ao Financeiro", subtitulo: `${item.cliente} · o e-mail será enviado ao Financeiro com a resposta do cliente em anexo`, icon: finEl(Send, { size: 16 }), onClose },
     finEl(
       "form",
       { onSubmit: handleSubmit },
       finEl(FinErro, { erro }),
-      finEl(FinCampo, { rotulo: "E-mail(s) do Financeiro", dica: " (obrigatório — para mais de um, separe com ponto e vírgula)" }, finEl("input", { type: "text", inputMode: "email", value: emailFinanceiro, onChange: (e) => setEmailFinanceiro(e.target.value), placeholder: "E-mail(s) interno(s) para o qual a resposta foi encaminhada", autoComplete: "off", autoFocus: true })),
+      finEl(FinCampo, { rotulo: "E-mail(s) do Financeiro", dica: " (obrigatório — o 1º recebe o e-mail; os demais, separados por ponto e vírgula, vão em cópia)" }, finEl("input", { type: "text", inputMode: "email", value: emailFinanceiro, onChange: (e) => setEmailFinanceiro(e.target.value), placeholder: "E-mail(s) interno(s) para o qual a resposta foi encaminhada", autoComplete: "off", autoFocus: true })),
       finEl(FinCampo, { rotulo: "Data do encaminhamento" }, finEl("input", { type: "date", value: dataEncaminhamento, max: finHojeIso(), onChange: (e) => setDataEncaminhamento(e.target.value) })),
       respostas.length > 1 &&
         finEl(
@@ -27768,8 +27811,8 @@ function FinEncaminharModal({ item, onClose, onConfirmar }) {
             [...respostas].reverse().map((r) => finEl("option", { key: r.id, value: r.versao }, `Versão ${r.versao} — ${r.arquivo.nome}`)),
           ),
         ),
-      finEl(FinCampo, { rotulo: "Observações", dica: " (opcional)" }, finEl("textarea", { value: observacoes, onChange: (e) => setObservacoes(e.target.value), placeholder: "Contexto adicional para o Financeiro" })),
-      finEl(FinAcoesForm, { onCancel: onClose, rotuloOk: "Registrar encaminhamento" }),
+      finEl(FinCampo, { rotulo: "Observações", dica: " (opcional)" }, finEl("textarea", { value: observacoes, onChange: (e) => setObservacoes(e.target.value), placeholder: "Vai junto no corpo do e-mail ao Financeiro" })),
+      finEl(FinAcoesForm, { onCancel: onClose, rotuloOk: "Enviar e registrar encaminhamento" }),
     ),
   );
 }
@@ -28296,7 +28339,20 @@ function FinanceiroView({ currentUser, onNotify, onView }) {
   }
   function handleExecutar(id, chave, args) {
     const atual = pendentesRef.current[id] || items.find((it) => it.id === id);
-    return aplicarResultado(finExecutarOperacao(atual, chave, args, currentUser));
+    const resultado = aplicarResultado(finExecutarOperacao(atual, chave, args, currentUser));
+    if (resultado.ok && chave === "encaminhar") {
+      // Envia o e-mail ao Financeiro (1º e-mail = destinatário, demais = cópia,
+      // com observações e o arquivo da resposta em anexo). O registro já foi
+      // salvo acima — falha de envio só avisa, nunca desfaz.
+      enviarEmailEncaminhamentoFinanceiro(resultado.item, currentUser).then((r) => {
+        if (r && r.ok) {
+          onNotify?.(r.anexado === false ? "E-mail enviado ao Financeiro (sem anexo — veja a mensagem do e-mail)." : "E-mail enviado ao Financeiro com a resposta do cliente em anexo.", "info");
+        } else {
+          onNotify?.(`Encaminhamento registrado, mas o e-mail não foi enviado: ${(r && r.message) || "tente novamente."}`, "error");
+        }
+      });
+    }
+    return resultado;
   }
   function handleCriar(campos) {
     const res = finExecutarCriacao(campos, currentUser, finModeloAtual().versao || null);
