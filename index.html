@@ -2864,24 +2864,36 @@ const DEFAULT_PREFERENCIAS_USUARIO = { tema: "claro", notificacoes: true };
     .set(admin)
     .catch(() => {});
 }
+/** findPortalUserAsync: devolve o usuário, `null` (e-mail realmente não
+ *  cadastrado) ou LANÇA erro quando não conseguiu consultar o servidor
+ *  (rede/backend). Antes, qualquer falha de rede devolvia `null` e a pessoa
+ *  via "E-mail não encontrado" mesmo com o cadastro existindo (caso do
+ *  celular, 2026-10-09). Tenta 2x antes de desistir. */
 async function findPortalUserAsync(email) {
   const e = (email || "").trim().toLowerCase();
   if (!e) return null;
   const db = await getDb().catch(() => null);
-  if (!db) return null;
+  if (!db) throw new Error("sem_banco");
   await ensureSeedUsers(db).catch(() => {});
-  try {
-    const snap = await db.collection("users").get();
-    const docs = (snap && snap.docs) || [];
-    const found = docs.find((d) => {
-      const u = d.data();
-      return u && (u.email || "").trim().toLowerCase() === e;
-    });
-    return found ? found.data() : null;
-  } catch (err) {
-    return null;
+  let ultimoErro = null;
+  for (let tentativa = 0; tentativa < 2; tentativa++) {
+    try {
+      const snap = await db.collection("users").get();
+      const docs = (snap && snap.docs) || [];
+      const found = docs.find((d) => {
+        const u = d.data();
+        return u && (u.email || "").trim().toLowerCase() === e;
+      });
+      return found ? found.data() : null;
+    } catch (err) {
+      ultimoErro = err;
+      await new Promise((r) => setTimeout(r, 600));
+    }
   }
+  throw ultimoErro || new Error("falha_consulta_usuarios");
 }
+const MSG_LOGIN_SEM_CONEXAO =
+  "Não foi possível conectar ao servidor do portal agora. Verifique a conexão e tente de novo — o seu e-mail não foi recusado.";
 /** authenticate: valida e-mail (presença + formato) e senha juntos contra a
  *  coleção "users". Retorna { ok: true, user } ou { ok: false, message }.
  *  Único ponto de entrada do login. `user.perfil` já modela o nível de
@@ -2897,7 +2909,12 @@ async function findPortalUserAsync(email) {
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail))
     return { ok: false, message: "Informe um e-mail em formato válido." };
   if (!senha) return { ok: false, message: "Informe sua senha." };
-  const knownUser = await findPortalUserAsync(trimmedEmail);
+  let knownUser;
+  try {
+    knownUser = await findPortalUserAsync(trimmedEmail);
+  } catch (err) {
+    return { ok: false, message: MSG_LOGIN_SEM_CONEXAO };
+  }
   if (!knownUser)
     return {
       ok: false,
@@ -19071,6 +19088,39 @@ function autoDriveEntradaValida(entrada, f) {
     (entrada.tam || null) === (f.fileSize || null)
   );
 }
+/* Cache COMPARTILHADO (Firestore, coleção "autodrive_cache") — 2026-10-09,
+   pedido da Iasmin: tudo precisa estar 100% sincronizado entre aparelhos. O
+   cache local (localStorage) continua existindo como atalho, mas o resultado
+   da classificação de cada arquivo também é gravado aqui, então o celular (ou
+   qualquer outro PC) mostra tudo na hora, sem reler nenhum PDF. Se a coleção
+   ainda não existir no backend (400) ou a rede falhar, tudo segue como antes. */
+const AUTODRIVE_SHARED_COLLECTION = "autodrive_cache";
+async function lerCacheCompartilhadoAutoDrive(db, assinatura) {
+  if (!db) return {};
+  try {
+    const snap = await db.collection(AUTODRIVE_SHARED_COLLECTION).get();
+    const out = {};
+    for (const d of snap.docs) {
+      const e = d.data();
+      if (e && e.assinatura === assinatura) out[d.id] = e;
+    }
+    return out;
+  } catch (e) {
+    return {};
+  }
+}
+async function gravarEntradaCompartilhadaAutoDrive(db, assinatura, id, entrada) {
+  if (!db || !id || !entrada) return false;
+  try {
+    await db
+      .collection(AUTODRIVE_SHARED_COLLECTION)
+      .doc(id)
+      .set({ ...entrada, assinatura, atualizadoEm: new Date().toISOString() });
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
 /** Devolve o registro do cache com o status RECALCULADO (um documento que
  *  estava vigente quando foi guardado pode ter vencido desde então). */
 function autoDriveRegistroDoCache(entrada) {
@@ -19137,19 +19187,62 @@ function autoDriveRegistroDoCache(entrada) {
           const proxyMcp = createProxyMcpAdapter();
           const docs = [];
           const novoCache = {};
+          // Cache compartilhado entre TODOS os aparelhos (ver acima).
+          const compartilhado = await lerCacheCompartilhadoAutoDrive(
+            dbParaExclusoes,
+            assinatura,
+          );
+          const paraCompartilhar = []; // [id, entrada] já sabidos aqui, a subir ao banco
+          // Publica cada arquivo recém-classificado NA HORA (em segundo plano):
+          // se a pessoa fechar a aba no meio, o que já foi lido não se perde.
+          // A 1ª falha (ex.: coleção ainda não liberada no backend) desliga as
+          // próximas tentativas — sem insistir à toa.
+          let compartilhadoAtivo = true;
+          const publicar = (id, entrada) => {
+            if (!compartilhadoAtivo) return;
+            gravarEntradaCompartilhadaAutoDrive(
+              dbParaExclusoes,
+              assinatura,
+              id,
+              entrada,
+            ).then((ok) => {
+              if (!ok) compartilhadoAtivo = false;
+            });
+          };
+          // 1ª passada: tudo que já foi classificado (neste aparelho OU em
+          // qualquer outro) entra na tela de uma vez, sem baixar nem ler nada.
+          const pendentes = [];
           for (const f of arquivos) {
-            if (cancelled) return;
-            // Arquivo que NÃO mudou desde a última classificação (mesmo
-            // modificadoEm/nome/pasta/tamanho): reaproveita o resultado e
-            // não baixa nem lê o PDF de novo — era isto que consumia
-            // memória a cada abertura do portal.
-            const guardado = cache[f.id];
-            if (autoDriveEntradaValida(guardado, f)) {
-              novoCache[f.id] = guardado;
-              const reg = autoDriveRegistroDoCache(guardado);
-              if (reg) docs.push(reg);
+            const local = cache[f.id];
+            const remoto = compartilhado[f.id];
+            const localOk = autoDriveEntradaValida(local, f);
+            const remotoOk = autoDriveEntradaValida(remoto, f);
+            const guardado = localOk ? local : remotoOk ? remoto : null;
+            if (!guardado) {
+              pendentes.push(f);
               continue;
             }
+            novoCache[f.id] = {
+              mt: guardado.mt,
+              nome: guardado.nome,
+              pasta: guardado.pasta,
+              tam: guardado.tam,
+              reg: guardado.reg,
+            };
+            const reg = autoDriveRegistroDoCache(guardado);
+            if (reg) docs.push(reg);
+            // este aparelho já sabia, o banco compartilhado ainda não:
+            // sobe uma vez, para os demais aparelhos aproveitarem.
+            if (localOk && !remotoOk) paraCompartilhar.push([f.id, novoCache[f.id]]);
+          }
+          if (!cancelled && docs.length > 0) {
+            setState({ status: "carregando", docs: [...docs] });
+          }
+          // 2ª passada: só o que é novo/mudou é baixado e lido — e a tela vai
+          // sendo atualizada a cada poucos arquivos (antes só aparecia no fim).
+          let desdeUltimaAtualizacao = 0;
+          for (const f of pendentes) {
+            if (cancelled) return;
             try {
               const { decisao, contentEv } = await classificarArquivo(
                 proxyMcp,
@@ -19212,9 +19305,15 @@ function autoDriveRegistroDoCache(entrada) {
                   tam: f.fileSize || null,
                   reg: registro,
                 };
+                publicar(f.id, novoCache[f.id]);
               }
             } catch (e) {
               /* um arquivo individual com falha (ex.: download) nunca derruba os demais */
+            }
+            desdeUltimaAtualizacao += 1;
+            if (!cancelled && desdeUltimaAtualizacao >= 3) {
+              desdeUltimaAtualizacao = 0;
+              setState({ status: "carregando", docs: [...docs] });
             }
             // respiro entre arquivos novos: deixa o navegador liberar memória
             // e atender cliques antes do próximo download/leitura.
@@ -19223,6 +19322,15 @@ function autoDriveRegistroDoCache(entrada) {
           if (!cancelled) {
             setState({ status: "pronto", docs });
             gravarCacheAutoDrive(assinatura, novoCache);
+            // Sobe ao banco o que ESTE aparelho já sabia e o banco ainda não
+            // (uma vez só, em segundo plano — nunca bloqueia a tela).
+            (async () => {
+              for (const [id, entrada] of paraCompartilhar) {
+                if (!compartilhadoAtivo) break;
+                publicar(id, entrada);
+                await new Promise((r) => setTimeout(r, 60));
+              }
+            })();
           }
         } catch (e) {
           if (!cancelled)
