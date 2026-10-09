@@ -12917,10 +12917,31 @@ function ChatDrawer({
           Math.max(0.4, (containerWidth - 32) / baseViewport.width),
         );
         const viewport = page.getViewport({ scale });
-        canvas.width = viewport.width;
-        canvas.height = viewport.height;
+        // Nitidez no celular (2026-10-09, relato da Iasmin: "a qualidade é
+        // péssima"): telas de celular têm 2–3 pixels físicos por pixel CSS
+        // e antes o canvas era desenhado com 1 pixel por pixel CSS — o
+        // navegador esticava a imagem e ela ficava borrada. Agora o canvas
+        // é desenhado na resolução real da tela (devicePixelRatio, com teto
+        // de 3x e de ~12 milhões de pixels por página para não estourar a
+        // memória do celular) e só EXIBIDO no tamanho CSS de sempre — o
+        // layout e a camada de texto (viewport CSS) continuam idênticos.
+        let dpr = Math.min(3, Math.max(1, window.devicePixelRatio || 1));
+        const maxPixels = 12000000;
+        if (viewport.width * viewport.height * dpr * dpr > maxPixels) {
+          dpr = Math.max(1, Math.sqrt(maxPixels / (viewport.width * viewport.height)));
+        }
+        canvas.width = Math.floor(viewport.width * dpr);
+        canvas.height = Math.floor(viewport.height * dpr);
+        canvas.style.width = Math.floor(viewport.width) + "px";
+        canvas.style.height = "auto";
         const ctx = canvas.getContext("2d");
-        page.render({ canvasContext: ctx, viewport }).promise.catch(() => {});
+        page
+          .render({
+            canvasContext: ctx,
+            viewport,
+            transform: dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : null,
+          })
+          .promise.catch(() => {});
         // Camada de texto selecionável por cima do canvas (pedido da
         // Iasmin, 2026-09-25: "possível copiar conteúdo de dentro dos
         // PDFs"). O canvas acima é só pixels desenhados — pdf.js nunca
