@@ -5903,17 +5903,24 @@ function findCompaniesInQuery(q, companies) {
     );
   if (nq.includes("matriz")) addUnique(matriz);
   if (pediuTodasAsFiliais) filiais.forEach(addUnique);
-  for (const c of filiais) {
+  // Id/município/CNPJ/nome do estado/UF valem para TODAS as bases, inclusive a
+  // Matriz (Iasmin, 2026-10-09: "cnpj ba e ms" devolvia só a Bahia porque a
+  // sigla "MS" só era procurada nas filiais — e a única base de MS é a Matriz).
+  // "filial"/"filiais" sem "matriz" continua NÃO incluindo a Matriz por UF.
+  const todasAsBases = matriz ? [matriz, ...filiais] : filiais;
+  const pediuSoFilial = /\bfilia(l|is)\b/.test(nq) && !nq.includes("matriz");
+  const candidatas = pediuSoFilial ? filiais : todasAsBases;
+  for (const c of candidatas) {
     if (found.includes(c)) continue;
     if (nq.includes(c.id)) addUnique(c);
     else if (nq.includes(normalize(c.municipio))) addUnique(c);
     else if (nq.includes(normalize(c.cnpj.replace(/\D/g, "")))) addUnique(c);
   }
-  for (const c of filiais) {
+  for (const c of candidatas) {
     if (found.includes(c)) continue;
     if (citaNomeDoEstadoDaBase(nq, c)) addUnique(c);
   }
-  for (const c of filiais) {
+  for (const c of candidatas) {
     if (found.includes(c)) continue;
     const re = new RegExp(`\\b${normalize(c.uf)}\\b`);
     if (re.test(nq)) addUnique(c);
@@ -7355,11 +7362,55 @@ const CHECKLIST_MULTI_TIPO_LABELS = new Set(
  *  eles (um item por tipo); caso contrário devolve só o primeiro
  *  (`detectRequestedTypes` já retorna na ordem de prioridade do array —
  *  o mesmo `tipos[0]` que esta função sempre usou). */
+/** quebrarPedidoEmPartes: separa uma linha com VÁRIOS pedidos em partes — por
+ *  vírgula, ponto e vírgula, ponto final de frase, " e ", " ou ", "+", "&" e
+ *  " / " (pedido da Iasmin, 2026-10-09: o assistente e o envio em lote precisam
+ *  reconhecer mais de uma documentação na mesma frase, "separado por vírgula,
+ *  ponto, e, etc."). Ponto só separa quando vem depois de uma palavra/número
+ *  de 2+ caracteres e antes de espaço ("cnpj. contrato"), nunca no meio de
+ *  "1.2" nem em "S.A.". Sem lookbehind (Safari antigo não aceita). */
+function quebrarPedidoEmPartes(linha) {
+  return String(linha || "")
+    .replace(/([\p{L}\p{N}]{2})\.(\s+)/gu, "$1;$2")
+    .split(/\s*[;\n]+\s*|\s*,\s*|\s+(?:e|ou|&|\+|\/)\s+/i)
+    .map((x) => x.trim())
+    .filter(Boolean);
+}
+/** tiposPorParteDaLinha: um tipo por PARTE da linha ("A, B e C" → A, B, C),
+ *  limitado aos tipos que a linha INTEIRA já reconhece (`todos`) — assim uma
+ *  parte quebrada no meio do nome de um documento nunca inventa um tipo que
+ *  a linha não pedia. Dentro de uma parte vale sempre o primeiro (mais
+ *  específico) tipo, a mesma regra de sempre, então "Alvará Sanitário" nunca
+ *  vira também o Alvará genérico. Contrato Social + Alteração Contratual
+ *  continuam sendo UM item só ("Contrato social e última alteração"). */
+function tiposPorParteDaLinha(linha, todos) {
+  const permitidos = new Map(todos.map((t) => [t.label, t]));
+  const out = [];
+  const vistos = new Set();
+  let jaTemContratual = false;
+  for (const parte of quebrarPedidoEmPartes(linha)) {
+    const doTrecho = detectRequestedTypes(parte).find((t) => permitidos.has(t.label));
+    if (!doTrecho || vistos.has(doTrecho.label)) continue;
+    if (TIPOS_ALTERACAO_CONTRATUAL.has(doTrecho.label)) {
+      if (jaTemContratual) continue;
+      jaTemContratual = true;
+    }
+    vistos.add(doTrecho.label);
+    out.push(permitidos.get(doTrecho.label));
+  }
+  return out;
+}
 function tiposDistintosParaChecklist(linha) {
   const tipos = detectRequestedTypes(linha);
   if (tipos.length <= 1) return tipos;
   const doGrupo = tipos.filter((t) => CHECKLIST_MULTI_TIPO_LABELS.has(t.label));
-  if (doGrupo.length <= 1) return tipos.length > 0 ? [tipos[0]] : [];
+  if (doGrupo.length <= 1) {
+    // Vários documentos DIFERENTES na mesma linha ("Cartão CNPJ, contrato social
+    // e alvará sanitário"): um item por parte. Antes só o primeiro tipo virava
+    // item e os demais sumiam em silêncio.
+    const porParte = tiposPorParteDaLinha(linha, tipos);
+    return porParte.length > 1 ? porParte : tipos.length > 0 ? [tipos[0]] : [];
+  }
   const vistos = new Set();
   const out = [];
   for (const tipo of doGrupo) {
@@ -7393,6 +7444,14 @@ function tiposDistintosParaChecklist(linha) {
     if (keysOcupadas.has(tipo.key)) continue;
     vistos.add(tipo.label);
     keysOcupadas.add(tipo.key);
+    out.push(tipo);
+  }
+  // Documentos de OUTRAS partes da mesma linha que dividem a categoria com o
+  // grupo (ex.: "CND federal, AVCB, alvará sanitário" — AVCB e Licença
+  // Sanitária na mesma categoria): entram quando são uma parte própria.
+  for (const tipo of tiposPorParteDaLinha(linha, tipos)) {
+    if (vistos.has(tipo.label) || CHECKLIST_MULTI_TIPO_LABELS.has(tipo.label)) continue;
+    vistos.add(tipo.label);
     out.push(tipo);
   }
   return out;
@@ -7451,7 +7510,8 @@ function detectarSegmentosNaoCobertos(linha, tiposEncontrados) {
   // dentro de uma frase que não tem vírgula nenhuma, e nunca em nenhum
   // pedaço que não seja o último depois da vírgula.
   const porVirgula = linha
-    .split(",")
+    .replace(/([\p{L}\p{N}]{2})\.(\s+)/gu, "$1;$2")
+    .split(/[,;]/)
     .map((s) => s.trim())
     .filter(Boolean);
   let pedacos = porVirgula;
@@ -7490,11 +7550,28 @@ function detectarSegmentosNaoCobertos(linha, tiposEncontrados) {
     const introduzTipoNovo = rotulosNoPrefixo.some((l) => !rotulosJaVistos.has(l));
     rotulosNoPrefixo.forEach((l) => rotulosJaVistos.add(l));
     if (temSelecaoAlteracao && soSelecaoDeAlteracao(pedaco)) return;
+    // Sufixos de razão social ("Ltda.", "S.A.") e pedaços minúsculos não são pedido.
+    if (/^(ltda|s\.?\s?a|me|epp|eireli|inc|cia)\.?$/i.test(pedaco.trim()) || pedaco.replace(/[^\p{L}]/gu, "").length < 3) return;
     if (!introduzTipoNovo && detectRequestedTypes(pedaco).length === 0) {
       naoIdentificados.push(pedaco);
     }
   });
   return naoIdentificados;
+}
+/** partesSoDeCategoria: partes da linha que são APENAS o nome de uma categoria
+ *  ("CNPJ" em "cnpj e contrato social") — sem isso a parte sumia, já que
+ *  "cnpj" sozinho nunca é tipo. Só iguais exatas ao rótulo da categoria, para
+ *  nunca criar item por palavra solta; ignora o que já virou item. */
+function partesSoDeCategoria(linha, jaCobertos) {
+  const cobertos = new Set((jaCobertos || []).map((x) => normalize(x)));
+  const out = [];
+  for (const parte of quebrarPedidoEmPartes(linha)) {
+    const n = normalize(parte);
+    if (cobertos.has(n) || detectRequestedTypes(parte).length > 0) continue;
+    const cat = CATEGORIES.find((c) => normalize(c.label) === n);
+    if (cat && !out.some((o) => o.key === cat.key)) out.push({ parte, key: cat.key });
+  }
+  return out;
 }
 function gerarChecklistViaRegras(texto) {
   texto = corrigirDigitacao(texto).texto; // "PSCMO" → "PCMSO" etc. (só vocabulário conhecido)
@@ -7563,12 +7640,23 @@ function gerarChecklistViaRegras(texto) {
       // Pedaços da mesma linha (separados por vírgula/" e ") que nenhum dos
       // tipos acima explica — pedido explícito da Iasmin, 2026-09-30 (ver
       // detectarSegmentosNaoCobertos) — também viram item, em vez de sumir.
-      detectarSegmentosNaoCobertos(linha, tipos).forEach((trecho, k) => {
+      const naoCobertosMulti = detectarSegmentosNaoCobertos(linha, tipos);
+      naoCobertosMulti.forEach((trecho, k) => {
         itens.push({
           id: `chk-${Date.now().toString(36)}-${i}-x${k}-${Math.random().toString(36).slice(2, 6)}`,
           descricaoOriginal: trecho.slice(0, 300),
           tipoSugerido: null,
           categoriaSugerida: categoriaSugeridaParaTrecho(trecho),
+          editadoManualmente: false,
+          valePorTodasAsBases: linhaValeTodasAsBases,
+        });
+      });
+      partesSoDeCategoria(linha, naoCobertosMulti).forEach((c, k) => {
+        itens.push({
+          id: `chk-${Date.now().toString(36)}-${i}-c${k}-${Math.random().toString(36).slice(2, 6)}`,
+          descricaoOriginal: c.parte.slice(0, 300),
+          tipoSugerido: null,
+          categoriaSugerida: c.key,
           editadoManualmente: false,
           valePorTodasAsBases: linhaValeTodasAsBases,
         });
@@ -7588,7 +7676,8 @@ function gerarChecklistViaRegras(texto) {
     // Mesma lógica acima: se a linha tem 1 tipo reconhecido mas também
     // outros pedaços (vírgula/" e ") que esse único tipo não explica, cada
     // um também vira item "não identificado" (pedido da Iasmin, 2026-09-30).
-    detectarSegmentosNaoCobertos(linha, tipos).forEach((trecho, k) => {
+    const naoCobertosUnico = detectarSegmentosNaoCobertos(linha, tipos);
+    naoCobertosUnico.forEach((trecho, k) => {
       itens.push({
         id: `chk-${Date.now().toString(36)}-${i}-x${k}-${Math.random().toString(36).slice(2, 6)}`,
         descricaoOriginal: trecho.slice(0, 300),
@@ -7598,6 +7687,18 @@ function gerarChecklistViaRegras(texto) {
         valePorTodasAsBases: linhaValeTodasAsBases,
       });
     });
+    if (tipos.length > 0) {
+      partesSoDeCategoria(linha, naoCobertosUnico).forEach((c, k) => {
+        itens.push({
+          id: `chk-${Date.now().toString(36)}-${i}-c${k}-${Math.random().toString(36).slice(2, 6)}`,
+          descricaoOriginal: c.parte.slice(0, 300),
+          tipoSugerido: null,
+          categoriaSugerida: c.key,
+          editadoManualmente: false,
+          valePorTodasAsBases: linhaValeTodasAsBases,
+        });
+      });
+    }
   });
   return { ok: true, itens };
 }
@@ -12514,6 +12615,23 @@ function ChatDrawer({
               text,
               { intent: "DOWNLOAD_DOCUMENT", types: tiposCartao, categories: [] },
               empresasCnpj[0],
+            );
+          }
+        } else if (empresasCnpj.length <= 4) {
+          // Poucas bases citadas ("cnpj ba e ms"): além dos números, entrega os
+          // Cartões CNPJ de cada uma numa mensagem só (Iasmin, 2026-10-09).
+          const tiposCartao = DOC_TYPE_KEYWORDS.filter((k) => k.label === "Cartão CNPJ");
+          const algumCartao = empresasCnpj.some((c) =>
+            searchDocuments({
+              company: c, wantedTypeKeys: tiposCartao, wantedCategoryKeys: [], seguroCliente: null,
+              afeAtividade: null, anoDocumento: null, selecaoAlteracao: null,
+            }).found.length > 0,
+          );
+          if (algumCartao) {
+            handleDocumentIntentMultiCompany(
+              text,
+              { intent: "DOWNLOAD_DOCUMENT", types: tiposCartao, categories: [] },
+              empresasCnpj,
             );
           }
         }
