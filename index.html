@@ -2483,6 +2483,7 @@ function documentosEmbutidosParaPortal(documentosExistentes) {
   //    conecte sua própria conta do Google Drive. Nunca inventa um arquivo:
   //    erros claros do próprio backend (403/404) são repassados direto, sem
   //    cair no caminho "mcp" abaixo (que falharia pelo mesmo motivo real).
+  let proxyErroMsg = null; // motivo REAL da falha do servidor (nunca mais a mensagem genérica de "integração")
   if (DRIVE_PROXY_URL) {
     let proxyResp = null;
     try {
@@ -2492,6 +2493,14 @@ function documentosEmbutidosParaPortal(documentosExistentes) {
       );
     } catch (e) {
       proxyResp = null;
+      proxyErroMsg =
+        "Não foi possível conectar ao servidor do portal agora (sem resposta). Verifique a conexão e tente de novo.";
+    }
+    if (proxyResp && !proxyResp.ok && proxyResp.status !== 403 && proxyResp.status !== 404) {
+      proxyErroMsg =
+        proxyResp.status === 401
+          ? "O servidor do portal recusou o acesso (chave de acesso inválida — código 401). Avise o administrador."
+          : `O servidor do portal respondeu com erro (código ${proxyResp.status}) ao buscar o arquivo no Google Drive. Tente de novo em instantes; se persistir, avise o administrador.`;
     }
     if (proxyResp) {
       if (proxyResp.ok) {
@@ -2524,7 +2533,8 @@ function documentosEmbutidosParaPortal(documentosExistentes) {
   //    Configurações → Conectores, e só funciona dentro do claude.ai.
   if (!window.claude || typeof window.claude.use !== "function") {
     throw new DocumentFileError(
-      "A integração com o Google Drive não está disponível neste ambiente.",
+      proxyErroMsg ||
+        "A integração com o Google Drive não está disponível neste ambiente.",
     );
   }
   const mcp = await window.claude.use("mcp").catch(() => null);
