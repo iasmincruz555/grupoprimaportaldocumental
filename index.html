@@ -28912,6 +28912,228 @@ function vgValidarPasso(passo, form) {
   return null;
 }
 
+/* ---------- planilha oficial: leitura (Importar) e montagem (Exportar) — funções puras, testadas ---------- */
+const VG_ABA_SOLIC = "Solicitação de Adiantamento";
+const VG_ABA_PREST = "Prestação de Contas";
+function vgNorm(t) {
+  return String(t === undefined || t === null ? "" : t).normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/\s+/g, " ").trim();
+}
+function vgCelTxt(v) {
+  if (v === undefined || v === null) return "";
+  if (typeof v === "number") return String(v);
+  return String(v).replace(/\s+/g, " ").trim();
+}
+/** Serial do Excel (dias desde 30/12/1899) → "AAAA-MM-DD". */
+function vgSerialParaIso(n) {
+  const d = new Date(Date.UTC(1899, 11, 30) + Math.floor(n) * 86400000);
+  return Number.isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10);
+}
+/** Data digitada ou formatada pelo Excel → "AAAA-MM-DD"; null se vazia; undefined se inválida. */
+function vgDataDaCelula(v) {
+  if (v === undefined || v === null || v === "") return null;
+  if (v instanceof Date) return Number.isNaN(v.getTime()) ? undefined : v.toISOString().slice(0, 10);
+  if (typeof v === "number") return v >= 36526 && v <= 73415 ? vgSerialParaIso(v) : undefined; // 2000..2100
+  const t = String(v).trim();
+  let m = /^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{4})$/.exec(t);
+  let y, mo, d;
+  if (m) { d = +m[1]; mo = +m[2]; y = +m[3]; }
+  else if ((m = /^(\d{4})-(\d{2})-(\d{2})/.exec(t))) { y = +m[1]; mo = +m[2]; d = +m[3]; }
+  else return undefined;
+  const dt = new Date(Date.UTC(y, mo - 1, d));
+  if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== mo - 1 || dt.getUTCDate() !== d) return undefined;
+  return dt.toISOString().slice(0, 10);
+}
+/** Célula de valor → centavos; null se vazia; undefined se inválida/negativa. */
+function vgDinheiroDaCelula(v) {
+  if (v === undefined || v === null || (typeof v === "string" && v.trim() === "")) return null;
+  if (typeof v === "number") {
+    if (!Number.isFinite(v) || v < 0) return undefined;
+    const c = Math.round(v * 100);
+    return c <= 100000000000 ? c : undefined;
+  }
+  const c = vgParseMoney(v);
+  return c === null ? undefined : c;
+}
+function vgCategoriaDe(texto, lista) {
+  const n = vgNorm(texto);
+  if (!n) return "";
+  const achou = (lista || []).find((c) => vgNorm(c) === n);
+  return achou || null; // null = preenchida, mas não reconhecida
+}
+/** Planilha (bytes) → linhas da aba pedida. Procura pelo nome (sem acento/maiúscula); senão pela posição. */
+function vgAbaDaPlanilha(bytes, nomeAba, posicao) {
+  if (!window.XLSX) throw new Error("A leitura de planilhas não está disponível agora. Recarregue a página e tente de novo.");
+  let wb;
+  try { wb = window.XLSX.read(bytes, { type: "array" }); } catch (e) { throw new Error("Não foi possível ler este arquivo. Use a planilha oficial em formato .xlsx."); }
+  const nomes = wb.SheetNames || [];
+  const alvo = nomes.find((n) => vgNorm(n) === vgNorm(nomeAba)) || nomes.filter((n) => vgNorm(n) !== "listas")[posicao];
+  if (!alvo) throw new Error(`Não encontrei a aba “${nomeAba}” neste arquivo. Use a planilha oficial.`);
+  const ws = wb.Sheets[alvo];
+  if (!ws || !ws["!ref"]) return [];
+  // sempre a partir de A1 (o Excel pode gravar a área usada começando em B2, e o índice das colunas mudaria)
+  const area = window.XLSX.utils.decode_range(ws["!ref"]);
+  area.s.r = 0; area.s.c = 0;
+  return window.XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: null, blankrows: true, range: area });
+}
+/** Aba “Solicitação de Adiantamento” → campos do formulário. Procura pelos RÓTULOS da coluna B. */
+function vgLerSolicitacao(linhas, me) {
+  const avisos = [];
+  const rotulos = {};
+  linhas.forEach((l, i) => {
+    const r = vgNorm(l && l[1]);
+    if (r && rotulos[r] === undefined) rotulos[r] = i;
+  });
+  const valorDe = (rot, col = 3) => { const i = rotulos[rot]; return i === undefined ? undefined : linhas[i][col]; };
+  const achou = (rot) => rotulos[rot] !== undefined;
+  if (!achou("motivo da viagem") && !achou("data de saida")) throw new Error("Esta não parece ser a planilha oficial de Viagens e Despesas (aba “Solicitação de Adiantamento”).");
+  const f = vgFormVazio();
+  f.motivo = vgCelTxt(valorDe("motivo da viagem")).slice(0, 500);
+  f.cliente = vgCelTxt(valorDe("cliente / projeto")).slice(0, 200);
+  f.destinoCidade = vgCelTxt(valorDe("cidade de destino")).slice(0, 120);
+  const uf = vgCelTxt(valorDe("uf")).toUpperCase();
+  if (uf && (me.ufs || []).includes(uf)) f.destinoUF = uf;
+  else if (uf) avisos.push(`UF “${uf}” não reconhecida — escolha na lista.`);
+  const sai = vgDataDaCelula(valorDe("data de saida"));
+  if (sai === undefined) avisos.push("Data de saída inválida — informe novamente.");
+  else if (sai) f.dataSaida = sai;
+  const ret = vgDataDaCelula(valorDe("data de retorno"));
+  if (ret === undefined) avisos.push("Data de retorno inválida — informe novamente.");
+  else if (ret) f.dataRetorno = ret;
+  f.roteiro = vgCelTxt(valorDe("roteiro (opcional)")).slice(0, 3000);
+  f.observacoes = vgCelTxt(valorDe("observacoes (opcional)")).slice(0, 3000);
+  // orçamento: tabela com cabeçalho Item | Categoria | Descrição | Valor estimado | Observação
+  const cab = linhas.findIndex((l) => l && vgNorm(l[1]) === "item" && vgNorm(l[2]) === "categoria" && vgNorm(l[4]).startsWith("valor estimado"));
+  const itens = [];
+  if (cab >= 0) {
+    for (let i = cab + 1; i < linhas.length; i++) {
+      const l = linhas[i] || [];
+      if (vgNorm(l[1]).startsWith("total")) break;
+      const catTxt = vgCelTxt(l[2]), desc = vgCelTxt(l[3]), obs = vgCelTxt(l[5]);
+      const cent = vgDinheiroDaCelula(l[4]);
+      if (!catTxt && !desc && !obs && (cent === null)) continue;
+      const rot = `Orçamento, linha ${i + 1}`;
+      let cat = vgCategoriaDe(catTxt, me.categorias);
+      if (cat === null) { avisos.push(`${rot}: categoria “${catTxt}” não reconhecida — escolha na lista.`); cat = ""; }
+      let valor = "";
+      if (cent === undefined) avisos.push(`${rot}: valor inválido — informe novamente.`);
+      else if (cent) valor = vgMoneyInput(cent);
+      const idPl = vgCelTxt(l[7]);
+      itens.push({ id: idPl && /^[A-Za-z0-9_-]{3,60}$/.test(idPl) ? idPl : vgIdLocal("o"), categoria: cat, descricao: desc.slice(0, 300), valor, observacao: obs.slice(0, 500) });
+    }
+  } else avisos.push("Não encontrei a tabela do orçamento.");
+  if (itens.length) f.orcamento = itens;
+  const adi = vgDinheiroDaCelula(valorDe("adiantamento solicitado (r$)", 4));
+  if (adi === undefined) avisos.push("Adiantamento solicitado inválido — informe novamente.");
+  else if (adi) f.adiantamento = vgMoneyInput(adi);
+  const sal = vgDinheiroDaCelula(valorDe("saldo anterior (r$)", 4));
+  if (sal === undefined) avisos.push("Saldo anterior inválido — informe novamente.");
+  else if (sal) f.saldoAnterior = vgMoneyInput(sal);
+  return { form: f, avisos, itens: itens.length };
+}
+/** Aba “Prestação de Contas” → despesas previstas (realizado/observação) e extras. */
+function vgLerPrestacao(linhas, me) {
+  const avisos = [];
+  const previstos = [], extras = [];
+  let modo = null;
+  let achouTabela = false;
+  for (let i = 0; i < linhas.length; i++) {
+    const l = linhas[i] || [];
+    const b = vgNorm(l[1]);
+    if (/^\d+ despesas nao previstas/.test(b)) { modo = "extra"; continue; }
+    if (/^\d+ despesas previstas/.test(b)) { modo = "prev"; continue; }
+    if (b.startsWith("subtotal") || /^\d+ (resumo financeiro|declaracao)/.test(b)) { modo = null; continue; }
+    if (!modo || b === "item") { if (b === "item") achouTabela = true; continue; }
+    const rot = `Linha ${i + 1}`;
+    const real = vgDinheiroDaCelula(l[5]);
+    const obs = vgCelTxt(l[7]).slice(0, 500);
+    const idPl = vgCelTxt(l[9]);
+    const id = idPl && /^[A-Za-z0-9_-]{3,60}$/.test(idPl) ? idPl : null;
+    if (modo === "prev") {
+      const n = parseInt(b, 10);
+      if (!(n >= 1)) continue;
+      if (real === undefined) { avisos.push(`${rot} (despesa prevista ${n}): valor realizado inválido — informe novamente.`); continue; }
+      if (real === null && !obs) continue;
+      previstos.push({ item: n, origemId: id, realizado: real, observacao: obs });
+    } else {
+      const catTxt = vgCelTxt(l[2]), desc = vgCelTxt(l[3]).slice(0, 300);
+      if (!catTxt && !desc && real === null && !obs) continue;
+      let cat = vgCategoriaDe(catTxt, me.categorias);
+      if (cat === null || cat === "") { avisos.push(`${rot} (despesa extra): escolha uma categoria da lista — linha ignorada.`); continue; }
+      if (real === undefined) { avisos.push(`${rot} (despesa extra): valor realizado inválido — linha ignorada.`); continue; }
+      extras.push({ id, categoria: cat, descricao: desc, realizado: real, observacao: obs });
+    }
+  }
+  if (!achouTabela) throw new Error("Esta não parece ser a planilha oficial de Viagens e Despesas (aba “Prestação de Contas”).");
+  return { previstos, extras, avisos };
+}
+/** Aplica a leitura sobre as despesas da tela. Nunca apaga nada que já esteja lá. */
+function vgAplicarPrestacao(itens, lido) {
+  const novos = itens.map((i) => ({ ...i }));
+  const naoExtras = novos.filter((i) => !i.extra);
+  let atualizados = 0, adicionados = 0;
+  const avisos = [...lido.avisos];
+  lido.previstos.forEach((p) => {
+    const alvo = (p.origemId && naoExtras.find((i) => i.origemId === p.origemId)) || naoExtras[p.item - 1];
+    if (!alvo) { avisos.push(`Despesa prevista ${p.item}: não existe no orçamento desta viagem — ignorada.`); return; }
+    if (p.realizado !== null) alvo.realizado = vgMoneyInput(p.realizado) || "0,00";
+    if (p.observacao) alvo.observacao = p.observacao;
+    atualizados++;
+  });
+  lido.extras.forEach((x) => {
+    const existente = x.id && novos.find((i) => i.extra && i.id === x.id);
+    const campos = { categoria: x.categoria, descricao: x.descricao, realizado: x.realizado === null ? "" : vgMoneyInput(x.realizado) || "0,00", observacao: x.observacao };
+    if (existente) { Object.assign(existente, campos); atualizados++; }
+    else { novos.push({ id: vgIdLocal("p"), origemId: null, extra: true, estimado: 0, ...campos }); adicionados++; }
+  });
+  return { itens: novos, atualizados, adicionados, avisos };
+}
+/** Formulário (textos) → dados da planilha, sem recusar valores incompletos (rascunho). */
+function vgFormParaPlanilha(form) {
+  const num = (t) => vgParseMoney(t) || 0;
+  return {
+    motivo: form.motivo, cliente: form.cliente, destinoCidade: form.destinoCidade, destinoUF: form.destinoUF,
+    dataSaida: form.dataSaida, dataRetorno: form.dataRetorno, roteiro: form.roteiro, observacoes: form.observacoes,
+    orcamento: (form.orcamento || []).filter((o) => o.categoria || o.descricao || o.valor || o.observacao).map((o) => ({ id: o.id, categoria: o.categoria, descricao: o.descricao, valorEstimado: num(o.valor), observacao: o.observacao })),
+    adiantamentoSolicitado: num(form.adiantamento), saldoAnterior: num(form.saldoAnterior),
+  };
+}
+/** Despesas da tela da prestação (+ a viagem) → corpo do POST /planilha.xlsx. */
+function vgPrestacaoParaPlanilha(viagem, itens) {
+  return {
+    dados: {
+      motivo: viagem.motivo, cliente: viagem.cliente, destinoCidade: viagem.destinoCidade, destinoUF: viagem.destinoUF,
+      dataSaida: viagem.dataSaida, dataRetorno: viagem.dataRetorno, roteiro: viagem.roteiro, observacoes: viagem.observacoes,
+      orcamento: (viagem.orcamento || []).map((o) => ({ id: o.id, categoria: o.categoria, descricao: o.descricao, valorEstimado: o.valorEstimado, observacao: o.observacao })),
+      adiantamentoSolicitado: viagem.adiantamentoSolicitado, saldoAnterior: viagem.saldoAnterior,
+    },
+    prestacao: {
+      adiantamentoRecebido: viagem.adiantamentoRecebido === undefined ? null : viagem.adiantamentoRecebido,
+      itens: itens.map((i) => ({ id: i.id, origemId: i.origemId || "", extra: !!i.extra, categoria: i.categoria, descricao: i.descricao, valorEstimado: i.estimado || 0, valorRealizado: vgParseMoney(i.realizado) === null || i.realizado === "" ? null : vgParseMoney(i.realizado), observacao: i.observacao })),
+    },
+  };
+}
+
+/** Barra “planilha oficial”: baixar modelo, exportar o que está na tela e importar. */
+function VgPlanilhaBarra({ onModelo, onExportar, onImportar, ocupado, textoImportar }) {
+  const ref = React.useRef(null);
+  return vgEl(
+    "div",
+    { className: "vg-planilha-barra", "data-testid": "vg-planilha-barra" },
+    vgEl("span", { className: "vg-muted" }, "Planilha oficial (Excel):"),
+    vgEl("button", { type: "button", className: "mini-download-btn", onClick: onModelo, disabled: ocupado, "data-testid": "vg-baixar-modelo" }, vgEl(Download, { size: 13 }), " Baixar modelo"),
+    vgEl("button", { type: "button", className: "mini-download-btn", onClick: onExportar, disabled: ocupado, "data-testid": "vg-exportar-planilha" }, vgEl(Download, { size: 13 }), " Exportar o que está na tela"),
+    vgEl("button", { type: "button", className: "mini-download-btn", onClick: () => ref.current && ref.current.click(), disabled: ocupado, "data-testid": "vg-importar-planilha" }, vgEl(UploadCloud, { size: 13 }), " " + (textoImportar || "Importar planilha")),
+    vgEl("input", {
+      ref, type: "file", accept: ".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", style: { display: "none" }, "data-testid": "vg-importar-arquivo",
+      onChange: (e) => { const arq = e.target.files && e.target.files[0]; e.target.value = ""; if (arq) onImportar(arq); },
+    }),
+  );
+}
+async function vgLerArquivoPlanilha(arq) {
+  if (!/\.xlsx$/i.test(arq.name)) throw new Error("Use a planilha oficial no formato .xlsx.");
+  if (arq.size > 5 * 1024 * 1024) throw new Error("A planilha passa de 5 MB.");
+  return arq.arrayBuffer();
+}
 /* ---------- componentes básicos ---------- */
 function VgMoneyInput({ value, onChange, placeholder, disabled, ...resto }) {
   return vgEl("input", {
@@ -29161,6 +29383,7 @@ function VgLista({ me, escopo, onAbrir, onNova, onNotify, refreshKey, usuarios, 
         "div",
         { className: "vg-toolbar-btns" },
         admin && escopo !== "minhas" && vgEl("button", { type: "button", className: "mini-download-btn", onClick: () => vgBaixarBlob("/exportar.xlsx" + vgQuery(filtrosServidor), "viagens-e-despesas.xlsx", onNotify) }, vgEl(Download, { size: 13 }), " Exportar Excel"),
+        me.podeCriar && escopo !== "aprovacoes" && vgEl("button", { type: "button", className: "mini-download-btn", onClick: () => vgBaixarBlob("/modelo.xlsx", "Modelo - Viagens e Despesas.xlsx", onNotify), "data-testid": "vg-modelo-lista" }, vgEl(Download, { size: 13 }), " Baixar planilha modelo"),
         me.podeCriar && escopo !== "aprovacoes" && vgEl("button", { type: "button", className: "kpi-new-homolog-btn", onClick: onNova, "data-testid": "vg-nova" }, vgEl(Plus, { size: 14 }), " Nova viagem"),
       ),
     ),
@@ -29250,6 +29473,7 @@ function VgWizard({ me, viagemId, onCancelar, onConcluido, onNotify, onView }) {
   const [erro, setErro] = useState(null);
   const [ocupado, setOcupado] = useState(false);
   const [salvoEm, setSalvoEm] = useState(null);
+  const [avisosImport, setAvisosImport] = useState([]);
   useEffect(() => {
     if (!viagemId) return;
     let vivo = true;
@@ -29311,6 +29535,24 @@ function VgWizard({ me, viagemId, onCancelar, onConcluido, onNotify, onView }) {
       onConcluido(vid);
     } catch (err) { setErro(err.message); setOcupado(false); }
   }
+  async function exportarTela() {
+    setErro(null);
+    try {
+      const { blob, nome } = await vgApi("POST", "/planilha.xlsx", { corpo: { dados: vgFormParaPlanilha(form) }, blob: true });
+      await entregaArquivo(blob, nome || "Viagens e Despesas - Planilha.xlsx");
+    } catch (e) { setErro(e.message); }
+  }
+  async function importarPlanilha(arq) {
+    setErro(null);
+    try {
+      const bytes = await vgLerArquivoPlanilha(arq);
+      const r = vgLerSolicitacao(vgAbaDaPlanilha(bytes, VG_ABA_SOLIC, 0), me);
+      const temDados = form.motivo || form.cliente || form.destinoCidade || form.dataSaida || form.adiantamento || form.orcamento.some((o) => o.categoria || o.descricao || o.valor);
+      if (temDados && !window.confirm("Importar a planilha substitui o que já está preenchido nesta solicitação. Continuar?")) return;
+      setForm(r.form); setPasso(0); setAvisosImport(r.avisos);
+      onNotify?.(`Planilha importada (${r.itens} item(ns) no orçamento). Revise os dados e continue.`, "info");
+    } catch (e) { setErro(e.message); }
+  }
   if (carregando) return vgEl("div", { className: "empty-state" }, "Carregando...");
   const campo = (rotulo, el, dica) => vgEl(FinCampo, { rotulo, dica }, el);
   return vgEl(
@@ -29318,6 +29560,8 @@ function VgWizard({ me, viagemId, onCancelar, onConcluido, onNotify, onView }) {
     { className: "vg-wizard", "data-testid": "vg-wizard" },
     vgEl("button", { type: "button", className: "link-btn vg-voltar", onClick: onCancelar }, vgEl(ArrowLeft, { size: 14 }), " Voltar"),
     vgEl("h2", { className: "vg-h2" }, viagemId ? "Editar solicitação de viagem" : "Nova viagem"),
+    vgEl(VgPlanilhaBarra, { onModelo: () => vgBaixarBlob("/modelo.xlsx", "Modelo - Viagens e Despesas.xlsx", onNotify), onExportar: exportarTela, onImportar: importarPlanilha, ocupado }),
+    avisosImport.length > 0 && vgEl("div", { className: "vg-aviso-import", "data-testid": "vg-aviso-import" }, vgEl("strong", null, "Planilha importada — confira antes de continuar:"), vgEl("ul", null, avisosImport.map((a, i) => vgEl("li", { key: i }, a)))),
     vgEl("ol", { className: "vg-steps" }, VG_PASSOS.map((n, i) => vgEl("li", { key: n, className: "vg-step" + (i === passo ? " ativo" : i < passo ? " feito" : "") }, vgEl("span", { className: "vg-step-n" }, i < passo ? vgEl(CheckCircle2, { size: 12 }) : i + 1), vgEl("span", { className: "vg-step-t" }, n)))),
     motivoDevolucao && vgEl("div", { className: "vg-aviso-devolucao" }, vgEl(AlertTriangle, { size: 15 }), vgEl("div", null, vgEl("strong", null, "O gestor pediu ajustes: "), motivoDevolucao)),
     vgEl(FinErro, { erro }),
@@ -29434,6 +29678,7 @@ function VgPrestacao({ viagem, anexos, editavel, me, onAtualizou, onAnexosChange
   const [ocupado, setOcupado] = useState(false);
   const [novaCat, setNovaCat] = useState("");
   const [novaDesc, setNovaDesc] = useState("");
+  const [avisosImport, setAvisosImport] = useState([]);
   const setIt = (i, k, v) => setItens((l) => l.map((x, j) => (j === i ? { ...x, [k]: v } : x)));
   const totais = editavel
     ? vgCalcTotais(viagem.totalEstimado, itens.map((i) => ({ valorRealizado: vgParseMoney(i.realizado) || 0 })), viagem.adiantamentoRecebido)
@@ -29468,6 +29713,23 @@ function VgPrestacao({ viagem, anexos, editavel, me, onAtualizou, onAnexosChange
     setItens((l) => [...l, { id: vgIdLocal("p"), origemId: null, extra: true, categoria: novaCat, descricao: novaDesc, estimado: 0, realizado: "", observacao: "" }]);
     setNovaCat(""); setNovaDesc("");
   }
+  async function exportarPlanilha() {
+    setErro(null);
+    try {
+      const { blob, nome } = await vgApi("POST", "/planilha.xlsx", { corpo: vgPrestacaoParaPlanilha(viagem, itens), blob: true });
+      await entregaArquivo(blob, nome || "prestacao-de-contas.xlsx");
+    } catch (e) { setErro(e.message); }
+  }
+  async function importarPlanilha(arq) {
+    setErro(null); setAvisosImport([]);
+    try {
+      const bytes = await vgLerArquivoPlanilha(arq);
+      const lido = vgLerPrestacao(vgAbaDaPlanilha(bytes, VG_ABA_PREST, 1), me);
+      const r = vgAplicarPrestacao(itens, lido);
+      setItens(r.itens); setAvisosImport(r.avisos);
+      onNotify?.(`Planilha importada: ${r.atualizados} despesa(s) atualizada(s) e ${r.adicionados} extra(s) adicionada(s). Revise e salve a prestação.`, "info");
+    } catch (e) { setErro(e.message); }
+  }
   const caixa = vgEl(
     "div",
     { className: "vg-resumo-fin", "data-testid": "vg-resumo-fin" },
@@ -29479,6 +29741,8 @@ function VgPrestacao({ viagem, anexos, editavel, me, onAtualizou, onAnexosChange
     { className: "vg-prestacao", "data-testid": "vg-prestacao" },
     editavel && vgEl("p", { className: "vg-muted" }, "Informe o valor realizado de cada despesa e anexe o comprovante (PDF, JPG ou PNG). Se não houver comprovante, explique na observação. Os totais são calculados automaticamente."),
     vgEl(FinErro, { erro }),
+    editavel && vgEl(VgPlanilhaBarra, { onModelo: () => vgBaixarBlob("/modelo.xlsx", "Modelo - Viagens e Despesas.xlsx", onNotify), onExportar: exportarPlanilha, onImportar: importarPlanilha, ocupado, textoImportar: "Importar prestação" }),
+    avisosImport.length > 0 && vgEl("div", { className: "vg-aviso-import", "data-testid": "vg-aviso-import" }, vgEl("strong", null, "Planilha importada — confira:"), vgEl("ul", null, avisosImport.map((a, i) => vgEl("li", { key: i }, a)))),
     vgEl(
       "div",
       { className: "table-wrap vg-table-scroll" },
@@ -29588,6 +29852,7 @@ function VgDetalhe({ id, me, onVoltar, onEditar, onNotify, onView, onMudou }) {
       botoes.map(([k, l, c, fn]) => vgEl("button", { key: k, type: "button", className: "vg-btn " + c, onClick: fn, "data-testid": "vg-acao-" + k }, l)),
       docDisponivel && vgEl("button", { type: "button", className: "mini-download-btn", onClick: () => vgBaixarBlob(`/viagens/${encodeURIComponent(v.id)}/documento.pdf`, "prestacao-de-contas.pdf", onNotify) }, vgEl(Download, { size: 13 }), " Documento final (PDF)"),
       docDisponivel && vgEl("button", { type: "button", className: "mini-download-btn", onClick: () => vgBaixarBlob(`/viagens/${encodeURIComponent(v.id)}/documento.xlsx`, "prestacao-de-contas.xlsx", onNotify) }, vgEl(Download, { size: 13 }), " Excel"),
+      vgEl("button", { type: "button", className: "mini-download-btn", onClick: () => vgBaixarBlob(`/viagens/${encodeURIComponent(v.id)}/planilha.xlsx`, `Viagens e Despesas - ${v.id}.xlsx`, onNotify), "data-testid": "vg-planilha-viagem" }, vgEl(Download, { size: 13 }), " Planilha oficial"),
     ),
     vgEl("div", { className: "vg-tabs" }, abaBtn("resumo", "Resumo"), temPrestacao && abaBtn("prestacao", "Prestação de contas"), abaBtn("historico", "Histórico")),
     aba === "resumo" && vgEl(
@@ -31298,6 +31563,9 @@ function GrupoprimaPortal() {
         .vg-tab.ativo { color: var(--texto); border-bottom-color: var(--verde); }
         .vg-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 4px 0 12px; flex-wrap: wrap; }
         .vg-toolbar-btns { display: flex; gap: 8px; align-items: center; }
+        .vg-planilha-barra { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 4px 0 12px; padding: 8px 10px; border: 1px dashed var(--border, rgba(127,127,127,0.35)); border-radius: 8px; }
+        .vg-aviso-import { margin: 6px 0 12px; padding: 10px 12px; border-radius: 8px; font-size: 13px; background: rgba(255,214,10,0.14); border: 1px solid rgba(214,170,10,0.5); }
+        .vg-aviso-import ul { margin: 6px 0 0 18px; padding: 0; }
         .vg-kpis { margin-bottom: 12px; }
         .vg-money-kpis { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin-bottom: 12px; }
         .vg-money-kpi { background: var(--card-bg); border: 1px solid var(--cinza-frio); border-radius: 10px; padding: 10px 14px; display: flex; flex-direction: column; gap: 3px; }
