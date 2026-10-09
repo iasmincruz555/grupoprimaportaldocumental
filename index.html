@@ -5942,6 +5942,38 @@ function findCompaniesInQuery(q, companies) {
   }
   return found;
 }
+/** agruparPedidoPorBase: "cnpj ms e ba, carta de titularidade, inscrição municipal" —
+ *  as bases citadas valem só para o trecho (separado por vírgula/ponto e vírgula/ponto)
+ *  em que aparecem; os trechos SEM base citada seguem só com a Matriz (Iasmin,
+ *  2026-10-09: o assistente mandava tudo das duas bases). Devolve null quando o pedido
+ *  não tem essa forma (nenhum trecho com base, trecho só de base, "tudo da..."),
+ *  e o fluxo de sempre continua. Cada grupo: { types, categories, companies }. */
+function agruparPedidoPorBase(text, companies) {
+  const matriz = companies.find((c) => c.tipo === "Matriz") || null;
+  if (!matriz) return null;
+  const partes = String(text || "")
+    .replace(/([\p{L}\p{N}]{2})\.(\s+)/gu, "$1;$2")
+    .split(/\s*[;\n]+\s*|\s*,\s*/)
+    .map((x) => x.trim())
+    .filter(Boolean);
+  if (partes.length < 2) return null;
+  const grupos = [];
+  let comBase = 0, semBase = 0;
+  for (const parte of partes) {
+    const p = parseIntent(parte);
+    const types = p.types || [], categories = p.categories || [];
+    const bases = findCompaniesInQuery(parte, companies);
+    if (p.intent === "DOWNLOAD_ALL_DOCUMENTS") return null;
+    if (types.length === 0 && categories.length === 0) {
+      if (bases.length > 0) return null; // trecho só de base: ambíguo, mantém o fluxo de sempre
+      continue;
+    }
+    if (bases.length > 0) comBase++; else semBase++;
+    grupos.push({ types, categories, companies: bases.length > 0 ? bases : [matriz] });
+  }
+  if (comBase === 0) return null; // ninguém citou base: o fluxo de sempre cuida
+  return grupos;
+}
 /** docsDoTipoPedido: documentos de um TIPO pedido. Primeiro pelo `tipo`
  *  gravado (regra de sempre); só se NADA bater, cai na rede de segurança —
  *  documentos da MESMA categoria do tipo cujo título/nome do arquivo casa
@@ -12054,23 +12086,36 @@ function ChatDrawer({
    *  empresas" (linhas compactas + "Ver mais" por item + um ZIP só), em vez
    *  de uma mensagem cheia por base (o que fazia "CNPJ matriz e filiais"
    *  virar uma tela enorme, pedido explícito da Iasmin, 2026-09-23). */
-  function handleDocumentIntentMultiCompany(rawText, parsed, multiCompanies) {
+  function handleDocumentIntentMultiCompany(rawText, parsed, multiCompanies, grupos = null) {
     const items = [];
     const notFoundItems = [];
-    multiCompanies.forEach((company) => {
+    // `grupos` (opcional): cada trecho do pedido com as suas próprias bases — os
+    // trechos sem base citada vêm só com a Matriz (ver agruparPedidoPorBase).
+    const buscas = grupos
+      ? grupos.flatMap((g) => g.companies.map((company) => ({ company, types: g.types, categories: g.categories })))
+      : multiCompanies.map((company) => ({ company, types: parsed.types, categories: parsed.categories }));
+    const jaTem = new Set();
+    buscas.forEach(({ company, types, categories }) => {
       const { found, notFoundLabels } = searchDocuments({
         company,
-        wantedTypeKeys: parsed.types,
-        wantedCategoryKeys: parsed.categories,
+        wantedTypeKeys: types,
+        wantedCategoryKeys: categories,
         seguroCliente: parsed.seguroCliente || null,
         afeAtividade: parsed.afeAtividade || null,
         anoDocumento: parsed.anoDocumento || null,
         selecaoAlteracao: parsed.selecaoAlteracao || null,
       });
-      found.forEach((doc) => items.push({ company, doc }));
+      found.forEach((doc) => {
+        const chave = `${company.id}|${doc.id || doc.titulo}|${doc.versao || ""}`;
+        if (jaTem.has(chave)) return;
+        jaTem.add(chave);
+        items.push({ company, doc });
+      });
       notFoundLabels.forEach((label) => notFoundItems.push({ company, label }));
     });
-    const basesLabel = multiCompanies
+    const basesUsadas = [];
+    buscas.forEach(({ company }) => { if (!basesUsadas.includes(company)) basesUsadas.push(company); });
+    const basesLabel = basesUsadas
       .map((c) => (c.tipo === "Matriz" ? "Matriz" : `Filial ${c.id}`))
       .join(", ");
     if (items.length === 0) {
@@ -12082,7 +12127,7 @@ function ChatDrawer({
       return { items, notFoundItems };
     }
     const totalPedidos = items.length + notFoundItems.length;
-    const numBases = new Set(multiCompanies.map((c) => c.id)).size;
+    const numBases = new Set(basesUsadas.map((c) => c.id)).size;
     const intro =
       items.length === totalPedidos
         ? `Encontrei ${items.length} documento(s) em ${numBases} base(s) (${basesLabel}):`
@@ -12668,7 +12713,7 @@ function ChatDrawer({
         parsed.intent === "DOWNLOAD_MULTIPLE_DOCUMENTS" ||
         parsed.intent === "SEARCH_DOCUMENT"
       ) {
-        handleDocumentIntentMultiCompany(text, parsed, multiCompanies);
+        handleDocumentIntentMultiCompany(text, parsed, multiCompanies, agruparPedidoPorBase(text, companies));
         return;
       }
       if (parsed.intent === "DOWNLOAD_ALL_DOCUMENTS") {
