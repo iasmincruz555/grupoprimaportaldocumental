@@ -29792,6 +29792,7 @@ function VgWizard({ me, viagemId, onCancelar, onConcluido, onNotify, onView }) {
       vgEl("button", { type: "button", className: "filters-clear-btn", style: { flex: "none" }, onClick: salvarESair, disabled: ocupado }, "Salvar rascunho e sair"),
       salvoEm && vgEl("span", { className: "vg-muted" }, "Salvo às " + salvoEm.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })),
       vgEl("span", { style: { flex: 1 } }),
+      passo === 3 && vgEl("span", { className: "vg-muted", "data-testid": "vg-aviso-email-gestor" }, "Ao enviar, você informa o(s) e-mail(s) do gestor."),
       passo > 0 && vgEl("button", { type: "button", className: "filters-clear-btn", style: { flex: "none" }, onClick: () => { setErro(null); setPasso(passo - 1); }, disabled: ocupado }, "Voltar"),
       passo < 3 && vgEl("button", { type: "button", className: "doc-download-btn", onClick: proximo, disabled: ocupado, "data-testid": "vg-proximo" }, ocupado ? "Salvando..." : "Continuar"),
       passo === 3 && vgEl("button", { type: "button", className: "doc-download-btn vg-enviar", onClick: enviar, disabled: ocupado, "data-testid": "vg-enviar" }, ocupado ? "Enviando..." : "Enviar para aprovação"),
