@@ -3633,11 +3633,16 @@ async function excluirDocumentoConfirmado(doc, company, { onNotify } = {}) {
   // quando o documento veio de um arquivo real do Drive; um registro
   // manual sem arquivo associado não tem o que bloquear numa sync futura.
   // Best-effort: nunca impede a exclusão em si de ter acontecido.
-  if (doc.arquivo?.driveFileId) {
-    await registrarArquivoExcluido(db, doc.arquivo.driveFileId, {
-      tituloOriginal: doc.arquivo?.nomeOriginal || doc.titulo || null,
-    });
-  }
+  // O id do arquivo vem de `arquivo.driveFileId` ou, na falta dele, do próprio id do documento
+  // (`db-<driveFileId>`); sempre registra também nome+tamanho (cobre o arquivo reenviado ao Drive
+  // com id novo e documentos sem id guardado).
+  const idArquivoExcluido =
+    doc.arquivo?.driveFileId ||
+    (typeof doc.id === "string" && doc.id.startsWith("db-") ? doc.id.slice(3) : null);
+  await registrarArquivoExcluido(db, idArquivoExcluido, {
+    tituloOriginal: doc.arquivo?.nomeOriginal || null,
+    tamanho: doc.arquivo?.tamanho || null,
+  });
   const categoriaLabel =
     CATEGORIES.find((c) => c.key === doc.categoria)?.label ||
     doc.categoria ||
@@ -16538,6 +16543,7 @@ function ConferenceQueueView({ onNotify, onView, companies }) {
   useEffect(() => {
     let unsub = null;
     let cancelled = false;
+    let exclusoesFilaPromessa = null;
     getDb().then((db) => {
       if (cancelled || !db) return;
       const col = db.collection("conference_queue"); // Garante que a semente inicial exista no armazenamento persistente,
@@ -16576,6 +16582,23 @@ function ConferenceQueueView({ onNotify, onView, companies }) {
           // cujo nome/pasta bate com uma das duas pastas excluídas é
           // apagado de vez do Firestore — nunca mexe em itens já revisados
           // (ignorados/classificados), que ficam como estão.
+          // Mesma limpeza para arquivos que a usuária excluiu do portal (lixeira): um item pendente
+          // cujo arquivo consta em ARQUIVOS_EXCLUIDOS_COLLECTION (por id, ou por nome+tamanho) sai
+          // da fila — cobre o que entrou na fila antes da exclusão ser registrada.
+          if (!exclusoesFilaPromessa) exclusoesFilaPromessa = fetchArquivosExcluidos(db);
+          exclusoesFilaPromessa.then((ex) => {
+            if (cancelled) return;
+            docs.forEach((it) => {
+              if (it.status !== "pendente") return;
+              const kb = String(it.tamanho || "").replace(/\s*KB.*/i, "");
+              const fake = {
+                id: it.driveFileId,
+                title: it.nomeOriginal,
+                fileSize: /^\d+$/.test(kb) ? Number(kb) * 1024 : null,
+              };
+              if (arquivoFoiExcluido(fake, ex)) col.doc(it.id).delete().catch(() => {});
+            });
+          });
           docs.forEach((it) => {
             if (it.status !== "pendente") return;
             const arquivoFake = { title: it.nomeOriginal, folderPath: it.folderPathArr || [] };
@@ -18692,26 +18715,86 @@ function isArquivoDeAreaInternaDoPortal(arquivo) {
  *  alterado — só para de ser indexado aqui; excluir de novo um arquivo já
  *  presente nesta lista é inofensivo (mesmo id, sobrescreve). */
 const ARQUIVOS_EXCLUIDOS_COLLECTION = "arquivos_excluidos_drive";
+/** Chave "nome + tamanho" de um arquivo (usada além do id: o mesmo arquivo reenviado ao Drive
+ *  ganha id novo, mas continua com o mesmo nome e tamanho). Só existe quando o tamanho é
+ *  conhecido dos dois lados — sem tamanho não há chave, para nunca bloquear arquivo diferente
+ *  só por nome parecido (ex.: "CND MUNICIPAL.pdf" em pastas de filiais diferentes). */
+function chaveNomeTamanhoArquivo(nome, tamanho) {
+  const n = normalize(nome || "").trim();
+  const t = String(tamanho || "").trim();
+  if (!n || !t || /nao informado|não informado/i.test(t)) return null;
+  return `${n}|${t}`;
+}
+function chaveNomeTamanhoDoDriveFile(f) {
+  if (!f || !f.fileSize) return null;
+  return chaveNomeTamanhoArquivo(f.title, `${Math.round(Number(f.fileSize) / 1024)} KB`);
+}
+function hashCurtoChave(txt) {
+  let h = 5381;
+  for (let i = 0; i < txt.length; i++) h = ((h * 33) ^ txt.charCodeAt(i)) >>> 0;
+  return h.toString(16);
+}
 async function registrarArquivoExcluido(db, driveFileId, info = {}) {
-  if (!db || !driveFileId) return;
+  if (!db) return;
+  const chave = chaveNomeTamanhoArquivo(info.tituloOriginal, info.tamanho);
+  if (!driveFileId && !chave) return;
+  const idDoc = driveFileId || `nt-${hashCurtoChave(chave)}`;
   await db
     .collection(ARQUIVOS_EXCLUIDOS_COLLECTION)
-    .doc(driveFileId)
+    .doc(idDoc)
     .set({
-      driveFileId,
+      driveFileId: driveFileId || null,
       excluidoEm: new Date().toISOString(),
       tituloOriginal: info.tituloOriginal || null,
+      chaveNomeTamanho: chave,
     })
     .catch(() => {});
 }
-async function fetchArquivosExcluidosIds(db) {
-  if (!db) return new Set();
+/** fetchArquivosExcluidos: { ids, chaves } — ids de arquivos do Drive e chaves nome+tamanho
+ *  excluídos manualmente. `arquivoFoiExcluido(f, ex)` decide por qualquer um dos dois. */
+async function fetchArquivosExcluidos(db) {
+  const vazio = { ids: new Set(), chaves: new Set() };
+  if (!db) return vazio;
   try {
     const snap = await db.collection(ARQUIVOS_EXCLUIDOS_COLLECTION).get();
-    return new Set(snap.docs.map((d) => d.id));
+    const ids = new Set();
+    const chaves = new Set();
+    snap.docs.forEach((d) => {
+      const dados = (d.data && d.data()) || {};
+      if (dados.driveFileId) ids.add(dados.driveFileId);
+      else if (!String(d.id).startsWith("nt-")) ids.add(d.id);
+      if (dados.chaveNomeTamanho) chaves.add(dados.chaveNomeTamanho);
+    });
+    return { ids, chaves };
   } catch (e) {
-    return new Set();
+    return vazio;
   }
+}
+async function fetchArquivosExcluidosIds(db) {
+  return (await fetchArquivosExcluidos(db)).ids;
+}
+function arquivoFoiExcluido(f, ex) {
+  if (!ex || !f) return false;
+  if (ex.ids && ex.ids.has(f.id)) return true;
+  const k = chaveNomeTamanhoDoDriveFile(f);
+  return !!(k && ex.chaves && ex.chaves.has(k));
+}
+/** Arquivos que já passaram pela fila de conferência (pendentes OU já revisados/ignorados) não
+ *  são "novos": sem isso, um arquivo marcado como "Ignorar" voltava a ser analisado — e a
+ *  entrar de novo na fila como pendente — em TODA sincronização (Iasmin, 2026-10-14). Só volta
+ *  a ser analisado se o `modifiedTime` dele mudou no Drive desde a última análise. */
+function mapaFilaConferenciaPorDriveId(itens) {
+  const mapa = new Map();
+  (itens || []).forEach((it) => {
+    if (it && it.driveFileId) mapa.set(it.driveFileId, it);
+  });
+  return mapa;
+}
+function arquivoJaTratadoNaFila(f, mapaFila) {
+  const it = mapaFila && mapaFila.get(f.id);
+  if (!it) return false;
+  if (it.driveModifiedTime && f.modifiedTime && it.driveModifiedTime !== f.modifiedTime) return false;
+  return true;
 }
 /** listDriveFilesViaProxy: lista, via o backend próprio, todos os
  *  documentos reais dentro da pasta oficial (já navegando recursivamente
@@ -18895,11 +18978,20 @@ function SyncView({ companies, onNotify }) {
       // voltam numa sincronização futura — pedido explícito da Iasmin,
       // 2026-09-21.
       const dbParaExclusoes = await getDb().catch(() => null);
-      const excluidosIds = await fetchArquivosExcluidosIds(dbParaExclusoes);
-      if (excluidosIds.size > 0) {
-        files = files.filter((f) => !excluidosIds.has(f.id));
+      const excluidosSync = await fetchArquivosExcluidos(dbParaExclusoes);
+      if (excluidosSync.ids.size > 0 || excluidosSync.chaves.size > 0) {
+        files = files.filter((f) => !arquivoFoiExcluido(f, excluidosSync));
       }
-      const novos = files.filter((f) => !knownDriveIds.has(f.id)); // atualizados: arquivo já indexado antes, mas cujo `modifiedTime` real no
+      let filaPorId = new Map();
+      if (dbParaExclusoes) {
+        try {
+          const snapFila = await dbParaExclusoes.collection("conference_queue").get();
+          filaPorId = mapaFilaConferenciaPorDriveId(snapFila.docs.map((d) => d.data()));
+        } catch (e) {
+          /* sem a fila, segue como antes */
+        }
+      }
+      const novos = files.filter((f) => !knownDriveIds.has(f.id) && !arquivoJaTratadoNaFila(f, filaPorId)); // atualizados: arquivo já indexado antes, mas cujo `modifiedTime` real no
       // Drive é diferente do salvo na última sincronização — sinal real de
       // conteúdo alterado (nunca presumido só pela passagem do tempo).
       const atualizados = files.filter((f) => {
@@ -19468,9 +19560,9 @@ function autoDriveRegistroDoCache(entrada) {
           // administrativa explícita (pedido explícito da Iasmin,
           // 2026-09-21).
           const dbParaExclusoes = await getDb().catch(() => null);
-          const excluidosIds = await fetchArquivosExcluidosIds(dbParaExclusoes);
-          if (excluidosIds.size > 0) {
-            arquivos = arquivos.filter((f) => !excluidosIds.has(f.id));
+          const excluidosAuto = await fetchArquivosExcluidos(dbParaExclusoes);
+          if (excluidosAuto.ids.size > 0 || excluidosAuto.chaves.size > 0) {
+            arquivos = arquivos.filter((f) => !arquivoFoiExcluido(f, excluidosAuto));
           }
           const proxyMcp = createProxyMcpAdapter();
           const docs = [];
