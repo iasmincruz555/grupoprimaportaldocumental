@@ -2050,11 +2050,7 @@ const GOOGLE_OAUTH_CONFIGURADO =
   if (ab === "empresa" || ab === "corporativa")
     return "Empresa — Grupoprima Logística";
   const c = companies.find((x) => x.id === doc.companyId);
-  return c
-    ? c.tipo === "Matriz"
-      ? "Matriz"
-      : `Filial ${c.id}`
-    : "Base não identificada";
+  return c ? rotuloBaseComEstado(c) : "Base não identificada";
 }
 /** DocScopeBadge: selo visual curto ao lado do documento quando ele NÃO é
  *  específico deste estabelecimento (abrangência empresa/corporativa/
@@ -4309,7 +4305,11 @@ const RE_TEXTO_BOMBEIROS = /\bavcb\b|\bavbc\b|\bclcb\b|bombeiros?|atestado de vi
     { key: "contratos_sociais", label: "Contrato Social", match: /contrato social/ },
     { key: "contratos_sociais", label: "Estatuto Social", match: /estatuto/ },
     { key: "contratos_sociais", label: "Ata Societária", match: /\bata\b/ },
-    { key: "contratos_sociais", label: "Procuração", match: /procura[c]ao/ }, // Fiscal e Tributária — CNDs por esfera, sempre com o nome específico
+    { key: "contratos_sociais", label: "Procuração", match: /procura[c]ao/ },
+    // Certidão Simplificada/Certificada da Junta Comercial (Iasmin, 2026-10-14: pedir
+    // "certidão simplificada" ou "junta comercial" devolvia TODOS os contratos sociais).
+    // É UM documento só; o pedido "junta comercial" avulso é tratado em detectRequestedTypes.
+    { key: "contratos_sociais", label: "Certidão Simplificada", match: /certid\w*\s+(simplificada|certificada)/ }, // Fiscal e Tributária — CNDs por esfera, sempre com o nome específico
     // (nunca genérico "certidão"), para não colidir com outras certidões.
     // "certid\w* negativ\w*" (em vez do antigo "certidao negativa" fixo, só
     // singular) corrigido em 2026-09-21: uma checklist real da Iasmin
@@ -5795,9 +5795,29 @@ function dobrarPluralDeSiglas(t) {
  *  cnpj ba" respondia só o número do CNPJ, sem entregar o documento. */
 const PEDE_ARQUIVO_NO_TEXTO =
   /\b(arquivos?|documentos?|pdf|copia|via|anexo|mand\w*|envi\w*|baix\w*|download|visualiz\w*|abr(e|ir)|mostr\w*|ver|cartao|comprovante)\b/;
+/** pedeCertidaoSimplificada: "certidão simplificada/certificada" ou "junta comercial" avulso
+ *  (sem falar em contrato, alteração, consolidação etc.) — é a Certidão da Junta, não os
+ *  contratos sociais. Texto já normalizado. */
+const RE_CERT_SIMPLIFICADA_NOME = /certid\w*\s+(simplificada|certificada)/;
+const RE_CERT_SIMPLIFICADA_FRASE = /certid\w*\s+(simplificada|certificada)|\bjunta comercial\b/g;
+function pedeCertidaoSimplificada(t) {
+  if (RE_CERT_SIMPLIFICADA_NOME.test(t)) return true;
+  return /\bjunta comercial\b/.test(t) && !/altera|contrat|consolida|distrato|estatuto|\bata\b|registr|arquiv|requerimento|societ/.test(t);
+}
+const LABEL_CERT_SIMPLIFICADA = "Certidão Simplificada";
+/** Documento da Certidão Simplificada/Certificada, seja qual for o tipo/categoria gravado:
+ *  o título ou o nome do arquivo decide. */
+function ehCertidaoSimplificadaDoc(d) {
+  const t = normalize(`${d.titulo || ""} ${(d.arquivo && d.arquivo.nome) || ""}`);
+  return d.tipo === LABEL_CERT_SIMPLIFICADA || RE_CERT_SIMPLIFICADA_NOME.test(t) || /certid\w*.{0,60}\bjunta comercial\b|\bjunta comercial\b.{0,60}certid/.test(t);
+}
 function detectRequestedTypes(text) {
   const t = dobrarPluralDeSiglas(normalize(text));
   const tipos = DOC_TYPE_KEYWORDS.filter((k) => k.match.test(t));
+  if (pedeCertidaoSimplificada(t) && !tipos.some((k) => k.label === LABEL_CERT_SIMPLIFICADA)) {
+    const cert = DOC_TYPE_KEYWORDS.find((k) => k.label === LABEL_CERT_SIMPLIFICADA);
+    if (cert) tipos.push(cert);
+  }
   // "cnpj" sozinho nunca é tipo (quase todo documento imprime um CNPJ), mas
   // "cnpj" + palavra de pedir arquivo/enviar é o Cartão CNPJ.
   if (tipos.length === 0 && /\bcnpjs?\b/.test(t) && PEDE_ARQUIVO_NO_TEXTO.test(t)) {
@@ -5807,7 +5827,10 @@ function detectRequestedTypes(text) {
   return tipos;
 }
 function detectRequestedCategories(text) {
-  const t = dobrarPluralDeSiglas(normalize(text));
+  let t = dobrarPluralDeSiglas(normalize(text));
+  // "certidão simplificada"/"junta comercial" avulso é UM documento, não a categoria inteira
+  // de Contratos Sociais.
+  if (pedeCertidaoSimplificada(t)) t = t.replace(RE_CERT_SIMPLIFICADA_FRASE, " ");
   const base = CATEGORY_ALIASES.filter((k) => k.match.test(t)).map(
     (k) => k.key,
   );
@@ -5830,6 +5853,18 @@ const NOMES_DE_ESTADO_POR_UF = {
   PB: "paraiba",
   BA: "bahia",
 };
+/** rotuloBaseComEstado: "Filial 0005 · Paraná" — o nome do estado ao lado do número da
+ *  filial, para identificar a base de relance (Iasmin, 2026-10-13). A Matriz fica "Matriz". */
+const NOMES_EXIBICAO_ESTADO_POR_UF = {
+  MS: "Mato Grosso do Sul", PE: "Pernambuco", PR: "Paraná", SP: "São Paulo",
+  ES: "Espírito Santo", MG: "Minas Gerais", PB: "Paraíba", BA: "Bahia",
+};
+function rotuloBaseComEstado(c) {
+  if (!c) return "";
+  if (c.tipo === "Matriz") return "Matriz";
+  const estado = NOMES_EXIBICAO_ESTADO_POR_UF[c.uf];
+  return estado ? `Filial ${c.id} · ${estado}` : `Filial ${c.id}`;
+}
 function citaNomeDoEstadoDaBase(nq, c) {
   const nome = NOMES_DE_ESTADO_POR_UF[c.uf];
   if (!nome) return false;
@@ -5966,6 +6001,10 @@ function agruparPedidoPorBase(text, companies) {
     if (p.intent === "DOWNLOAD_ALL_DOCUMENTS") return null;
     if (types.length === 0 && categories.length === 0) {
       if (bases.length > 0) return null; // trecho só de base: ambíguo, mantém o fluxo de sempre
+      // Trecho sem tipo conhecido e sem base (ex.: "comprovante bancário"): procura pelo
+      // título dos documentos, só na Matriz, como o pedido isolado já faz.
+      const palavras = normalize(parte).split(/[^a-z0-9]+/).filter((w) => w.length >= 4 && !TITULO_STOPWORDS.has(w));
+      if (palavras.length > 0) grupos.push({ types: [], categories: [], companies: [matriz], titulo: parte });
       continue;
     }
     if (bases.length > 0) comBase++; else semBase++;
@@ -5988,6 +6027,7 @@ function docsDoTipoPedido(docs, label, keyword) {
   // Alvará Sanitário e AVCB/Bombeiros nunca fazem parte do tipo genérico
   // "Alvará de Localização e Funcionamento", mesmo que o `tipo` gravado do
   // documento esteja genérico: o título/arquivo decide (2026-10-08).
+  if (label === LABEL_CERT_SIMPLIFICADA) return docs.filter(ehCertidaoSimplificadaDoc);
   const ehGenericoAlvara = label === "Alvará de Localização e Funcionamento";
   const proprioDeOutroTipo = (d) => {
     const t = textoDoc(d);
@@ -11249,7 +11289,7 @@ function DocMiniRow({ company, doc, onNotify }) {
 function DocMultiCompanyRow({ company, doc, onNotify, onView, isAdmin, onOpenDocument }) {
   const [expanded, setExpanded] = useState(false);
   const [busy, setBusy] = useState(false);
-  const baseLabel = company.tipo === "Matriz" ? "Matriz" : `Filial ${company.id}`;
+  const baseLabel = rotuloBaseComEstado(company);
   if (expanded) {
     return /*#__PURE__*/ React.createElement(
       "div",
@@ -11596,7 +11636,7 @@ function ChatMessage({
               " ",
               nf.label,
               " — não localizado(a) para ",
-              nf.company.tipo === "Matriz" ? "a Matriz" : `a Filial ${nf.company.id}`,
+              nf.company.tipo === "Matriz" ? "a Matriz" : `a ${rotuloBaseComEstado(nf.company)}`,
             ),
           ),
         ),
@@ -12092,10 +12132,22 @@ function ChatDrawer({
     // `grupos` (opcional): cada trecho do pedido com as suas próprias bases — os
     // trechos sem base citada vêm só com a Matriz (ver agruparPedidoPorBase).
     const buscas = grupos
-      ? grupos.flatMap((g) => g.companies.map((company) => ({ company, types: g.types, categories: g.categories })))
+      ? grupos.flatMap((g) => g.companies.map((company) => ({ company, types: g.types, categories: g.categories, titulo: g.titulo || null })))
       : multiCompanies.map((company) => ({ company, types: parsed.types, categories: parsed.categories }));
     const jaTem = new Set();
-    buscas.forEach(({ company, types, categories }) => {
+    buscas.forEach(({ company, types, categories, titulo }) => {
+      if (titulo) {
+        // Trecho sem tipo cadastrado: busca pelo título (mesmo critério do pedido isolado).
+        const porTitulo = currentDocsFor(buscarDocsPorTituloLivre(company.documentos || [], titulo));
+        if (porTitulo.length === 0) notFoundItems.push({ company, label: titulo });
+        porTitulo.forEach((doc) => {
+          const chave = `${company.id}|${doc.id || doc.titulo}|${doc.versao || ""}`;
+          if (jaTem.has(chave)) return;
+          jaTem.add(chave);
+          items.push({ company, doc });
+        });
+        return;
+      }
       const { found, notFoundLabels } = searchDocuments({
         company,
         wantedTypeKeys: types,
@@ -12116,7 +12168,7 @@ function ChatDrawer({
     const basesUsadas = [];
     buscas.forEach(({ company }) => { if (!basesUsadas.includes(company)) basesUsadas.push(company); });
     const basesLabel = basesUsadas
-      .map((c) => (c.tipo === "Matriz" ? "Matriz" : `Filial ${c.id}`))
+      .map((c) => rotuloBaseComEstado(c))
       .join(", ");
     if (items.length === 0) {
       pushMessage({
@@ -12201,8 +12253,7 @@ function ChatDrawer({
       text: `${company.tipo === "Matriz" ? "Matriz" : `Filial ${company.id}`} possui ${company.totalDocs} documento(s):\n${lines.join("\n")}\n\nPeça um tipo específico (ex.: "contrato social") ou "toda a documentação" para receber os arquivos.`,
     });
   }
-  const companyLabel = (c) =>
-    c.tipo === "Matriz" ? "Matriz" : `Filial ${c.id}`;
+  const companyLabel = (c) => rotuloBaseComEstado(c);
   /** tryAnalyticQuery: consultas que cruzam os dados reais (vencimentos,
    *  categorias ausentes, pendências, conferência, atualizações por ano...).
    *  Retorna true se a pergunta foi respondida aqui, para não cair no
@@ -29792,15 +29843,15 @@ function VgWizard({ me, viagemId, onCancelar, onConcluido, onNotify, onView }) {
       "div",
       null,
       vgEl("p", { className: "vg-muted" }, "Liste o que você prevê gastar na viagem. Esse é o orçamento que o gestor vai aprovar."),
-      vgEl("div", { className: "vg-orc-head" }, ["Item", "Categoria", "Descrição", "Valor estimado", "Observação", ""].map((t, i) => vgEl("span", { key: i }, t))),
+      vgEl("div", { className: "vg-orc-head" }, ["Item", "Categoria", "Valor estimado", "Descrição", "Observação", ""].map((t, i) => vgEl("span", { key: i }, t))),
       form.orcamento.map((o, i) =>
         vgEl(
           "div",
           { key: o.id, className: "vg-orc-row", "data-testid": "vg-orc-row" },
           vgEl("span", { className: "vg-orc-n" }, i + 1),
           vgEl("select", { value: o.categoria, onChange: (e) => setItem(i, "categoria", e.target.value), "aria-label": "Categoria" }, vgEl("option", { value: "" }, "Categoria"), (me.categorias || []).map((c) => vgEl("option", { key: c, value: c }, c))),
-          vgEl("input", { value: o.descricao, onChange: (e) => setItem(i, "descricao", e.target.value), placeholder: "Descrição", "aria-label": "Descrição", maxLength: 300 }),
           vgEl(VgMoneyInput, { value: o.valor, onChange: (v) => setItem(i, "valor", v), "aria-label": "Valor estimado" }),
+          vgEl("input", { value: o.descricao, onChange: (e) => setItem(i, "descricao", e.target.value), placeholder: "Descrição", "aria-label": "Descrição", maxLength: 300 }),
           vgEl("input", { value: o.observacao, onChange: (e) => setItem(i, "observacao", e.target.value), placeholder: "Observação", "aria-label": "Observação", maxLength: 500 }),
           vgEl("button", { type: "button", className: "vg-orc-x", "aria-label": "Remover item", disabled: form.orcamento.length === 1, onClick: () => setForm((f) => ({ ...f, orcamento: f.orcamento.filter((_, j) => j !== i) })) }, vgEl(Trash2, { size: 14 })),
         ),
@@ -29960,7 +30011,7 @@ function VgPrestacao({ viagem, anexos, editavel, me, onAtualizou, onAnexosChange
       vgEl(
         "table",
         { className: "company-table vg-table vg-prest-table" },
-        vgEl("thead", null, vgEl("tr", null, ["Categoria", "Descrição", "Valor estimado", "Valor realizado", !editavel && "Diferença", "Comprovante", "Observação", editavel && ""].filter((x) => x !== false).map((t, i) => vgEl("th", { key: i }, t)))),
+        vgEl("thead", null, vgEl("tr", null, ["Categoria", "Valor estimado", "Valor realizado", !editavel && "Diferença", "Descrição", "Comprovante", "Observação", editavel && ""].filter((x) => x !== false).map((t, i) => vgEl("th", { key: i }, t)))),
         vgEl(
           "tbody",
           null,
@@ -29970,10 +30021,10 @@ function VgPrestacao({ viagem, anexos, editavel, me, onAtualizou, onAnexosChange
               "tr",
               { key: it.id, "data-testid": "vg-prest-row" },
               vgEl("td", null, it.categoria, it.extra && vgEl("span", { className: "vg-tag-extra" }, "extra")),
-              vgEl("td", null, editavel && it.extra ? vgEl("input", { value: it.descricao, onChange: (e) => setIt(i, "descricao", e.target.value), maxLength: 300 }) : it.descricao || "—"),
               vgEl("td", { className: "mono" }, vgBRL(it.estimado)),
               vgEl("td", { className: "mono" }, editavel ? vgEl(VgMoneyInput, { value: it.realizado, onChange: (v) => setIt(i, "realizado", v), "aria-label": "Valor realizado" }) : vgBRL(real)),
               !editavel && vgEl("td", { className: "mono " + (real > it.estimado ? "vg-neg" : "") }, vgBRL(real - it.estimado)),
+              vgEl("td", null, editavel && it.extra ? vgEl("input", { value: it.descricao, onChange: (e) => setIt(i, "descricao", e.target.value), maxLength: 300 }) : it.descricao || "—"),
               vgEl("td", null, vgEl(VgAnexos, { viagemId: viagem.id, tipo: "comprovante", itemId: it.id, anexos, editavel, compacto: true, onView, onNotify, antesDeAnexar: () => salvar(true), onAnexado: (a) => { setErro(null); onAnexosChange?.((l) => [...l, a]); }, onRemovido: (a) => onAnexosChange?.((l) => l.filter((x) => x.id !== a.id)) })),
               vgEl("td", null, editavel ? vgEl("input", { value: it.observacao, onChange: (e) => setIt(i, "observacao", e.target.value), maxLength: 500, placeholder: "Observação" }) : it.observacao || "—"),
               editavel && vgEl("td", null, it.extra && vgEl("button", { type: "button", className: "vg-orc-x", "aria-label": "Remover despesa extra", onClick: () => setItens((l) => l.filter((_, j) => j !== i)) }, vgEl(Trash2, { size: 14 }))),
@@ -30072,7 +30123,7 @@ function VgDetalhe({ id, me, onVoltar, onEditar, onNotify, onView, onMudou }) {
       vgEl("dl", { className: "vg-dl" },
         [["Motivo", v.motivo], ["Cliente / projeto", v.cliente], ["Destino", vgDestino(v)], ["Período", vgPeriodo(v)], ["Roteiro", v.roteiro || "—"], ["Observações", v.observacoes || "—"]].map(([k, val]) => vgEl(React.Fragment, { key: k }, vgEl("dt", null, k), vgEl("dd", null, val)))),
       vgEl("h4", { className: "vg-h4" }, "Orçamento"),
-      vgEl("div", { className: "table-wrap vg-table-scroll" }, vgEl("table", { className: "company-table vg-mini-table" }, vgEl("thead", null, vgEl("tr", null, ["Item", "Categoria", "Descrição", "Valor estimado", "Observação"].map((t) => vgEl("th", { key: t }, t)))), vgEl("tbody", null, (v.orcamento || []).map((o, i) => vgEl("tr", { key: o.id }, vgEl("td", null, i + 1), vgEl("td", null, o.categoria), vgEl("td", null, o.descricao || "—"), vgEl("td", { className: "mono" }, vgBRL(o.valorEstimado)), vgEl("td", null, o.observacao || "—")))))),
+      vgEl("div", { className: "table-wrap vg-table-scroll" }, vgEl("table", { className: "company-table vg-mini-table" }, vgEl("thead", null, vgEl("tr", null, ["Item", "Categoria", "Valor estimado", "Descrição", "Observação"].map((t) => vgEl("th", { key: t }, t)))), vgEl("tbody", null, (v.orcamento || []).map((o, i) => vgEl("tr", { key: o.id }, vgEl("td", null, i + 1), vgEl("td", null, o.categoria), vgEl("td", { className: "mono" }, vgBRL(o.valorEstimado)), vgEl("td", null, o.descricao || "—"), vgEl("td", null, o.observacao || "—")))))),
       vgEl("div", { className: "vg-total-linha" }, vgEl("span", null, "TOTAL ESTIMADO"), vgEl("strong", null, vgBRL(v.totalEstimado))),
       vgEl("h4", { className: "vg-h4" }, "Adiantamento"),
       vgEl("dl", { className: "vg-dl" },
@@ -31814,7 +31865,7 @@ function GrupoprimaPortal() {
         .vg-form-grid .homolog-field input, .vg-form-grid .homolog-field select, .vg-form-grid .homolog-field textarea { width: 100%; box-sizing: border-box; }
         .vg-span2 { grid-column: 1 / -1; }
         .vg-readonly { background: var(--branco-frio) !important; color: var(--carvao) !important; }
-        .vg-orc-head, .vg-orc-row { display: grid; grid-template-columns: 34px 190px 1.4fr 140px 1.2fr 34px; gap: 8px; align-items: center; }
+        .vg-orc-head, .vg-orc-row { display: grid; grid-template-columns: 34px 190px 140px 1.4fr 1.2fr 34px; gap: 8px; align-items: center; }
         .vg-orc-head { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--carvao); font-weight: 700; padding: 0 0 6px; }
         .vg-orc-row { margin-bottom: 8px; }
         .vg-orc-n { color: var(--carvao); font-weight: 700; text-align: center; }
