@@ -1,5 +1,12 @@
 <!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1"><style>:root{color-scheme:light}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#faf9f5;color:#141413}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
 <title>Portal Documental Grupoprima</title>
+<!-- Fonte Archivo (títulos/números) carregada JÁ NO HEAD, em paralelo com os scripts: antes ela só era
+     pedida quando a tela de login montava (via @import dentro do React), então o portal aparecia com a
+     fonte padrão e "trocava" de visual segundos depois (2026-10-15). O mount do portal espera essa fonte
+     (no máximo ~2s) antes de desenhar a tela — ver o final do script. Carregamento não bloqueante. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link id="fonte-archivo" rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@700;900&display=swap" media="print" onload="this.media='all'">
 <style>
   html, body { margin: 0; padding: 0; background: #003753; color-scheme: light; }
   #root { min-height: 100vh; min-height: 100dvh; display: flex; align-items: center; justify-content: center; padding: 20px; box-sizing: border-box; }
@@ -2697,6 +2704,7 @@ function documentosEmbutidosParaPortal(documentosExistentes) {
       // encaminhar, pendência, baixar modelo) / administrar (editar, status livre,
       // excluir, atualizar o modelo). "Consulta" = perfil "usuario".
       informacoesFinanceiras: true,
+      informacoesLogisticas: true,
       viagensDespesas: true,
       financeiroOperar: true,
       financeiroAdmin: true,
@@ -2720,6 +2728,7 @@ function documentosEmbutidosParaPortal(documentosExistentes) {
       homologacoes: true,
       homologacoesInterno: false,
       informacoesFinanceiras: true,
+      informacoesLogisticas: true,
       viagensDespesas: true,
       financeiroOperar: true,
       financeiroAdmin: false,
@@ -2743,6 +2752,7 @@ function documentosEmbutidosParaPortal(documentosExistentes) {
       homologacoes: false,
       homologacoesInterno: false,
       informacoesFinanceiras: true,
+      informacoesLogisticas: true,
       viagensDespesas: true,
       financeiroOperar: false,
       financeiroAdmin: false,
@@ -4564,6 +4574,13 @@ const RE_TEXTO_BOMBEIROS = /\bavcb\b|\bavbc\b|\bclcb\b|bombeiros?|atestado de vi
       // como "tipo não identificado".
       match: /rc[\s-]?f?[\s-]?dc/,
     },
+    {
+      key: "seguros",
+      label: "Apólice RC-V",
+      // 2026-10-15 (Iasmin): RC-V (Responsabilidade Civil de Veículos) passa a ser a 3ª apólice
+      // principal da Grupoprima, junto com RCTR-C e RC-DC. Grafias: "RC-V", "RC V", "RCV", "RCF-V".
+      match: /\brc[\s-]?f?[\s-]?v\b|responsabilidade civil (facultativa )?(de |dos |do )?veiculos?/,
+    },
     { key: "seguros", label: "Apólice", match: /ap[oó]lice/ },
     { key: "seguros", label: "Endosso", match: /endosso/ },
     {
@@ -6224,7 +6241,7 @@ function docsDoTipoPedido(docs, label, keyword) {
         // específico, sem tipo específico reconhecido — senão nem chegaria
         // aqui, ver categoryKeysEfetivos acima): pedido explícito da Iasmin,
         // 2026-09-28 — "ao solicitar 'apólices'/'seguros'/'apólice de
-        // seguro'... somente o RCTR-C e o RC-DC devem ser enviados".
+        // seguro'... somente o RCTR-C, o RC-DC e o RC-V devem ser enviados".
         // Restringe às duas apólices reais, nunca a categoria inteira como
         // cadastrada no portal (que pode incluir a PGR por particularidade
         // do cadastro real — ela é de "Segurança, Qualidade e Compliance",
@@ -6238,6 +6255,7 @@ function docsDoTipoPedido(docs, label, keyword) {
         const rotulosApoliceGeral = [
           ...tipoLabelsAceitos("Apólice RCTR-C"),
           ...tipoLabelsAceitos("Apólice RC-DC"),
+          ...tipoLabelsAceitos("Apólice RC-V"),
         ];
         matches = matches.filter(
           (d) =>
@@ -6396,7 +6414,7 @@ function refinarMatchesPorRegraDeTipoEspecifico(
     out = out.filter((d) => afeDocMatchesAtividade(d, afeAtividade));
     sufixo += ` ${afeAtividade}`;
   }
-  if (tipoLabel === "Apólice RCTR-C" || tipoLabel === "Apólice RC-DC") {
+  if (tipoLabel === "Apólice RCTR-C" || tipoLabel === "Apólice RC-DC" || tipoLabel === "Apólice RC-V") {
     const clientePrefix = seguroCliente
       ? `seguro_cliente_${slugifyDocFamily(seguroCliente)}`
       : null;
@@ -6583,7 +6601,7 @@ function matchChecklistItemToCompany(item, company) {
         // Pedido genérico da categoria inteira "seguros" (sem cliente
         // específico): mesma regra já aplicada no chat (searchDocuments,
         // pedido explícito da Iasmin, 2026-09-28 — "ao solicitar 'apólices'/
-        // 'seguros'/'apólice de seguro'... somente o RCTR-C e o RC-DC devem
+        // 'seguros'/'apólice de seguro'... somente o RCTR-C, o RC-DC e o RC-V devem
         // ser enviados") — nunca a categoria inteira como cadastrada (que
         // pode trazer PGR por particularidade do cadastro real, ou Endosso/
         // Certificado de Seguro/Condições Particulares, que só devem
@@ -6596,6 +6614,7 @@ function matchChecklistItemToCompany(item, company) {
         const rotulosApoliceGeral = [
           ...tipoLabelsAceitos("Apólice RCTR-C"),
           ...tipoLabelsAceitos("Apólice RC-DC"),
+          ...tipoLabelsAceitos("Apólice RC-V"),
         ];
         brutos = brutos.filter(
           (d) =>
@@ -7121,7 +7140,7 @@ const HOMOLOGACAO_STATUS_LABEL_PLURAL = {
           tipo_ou_categoria: {
             type: "string",
             description:
-              "tipo ou categoria do documento pedido, nas mesmas palavras usadas pela pessoa (ex.: 'CNPJ', 'contrato social', 'alvará', 'apólice de seguro'). Importante para seguros: RCTR-C e RC-DC são apólices diferentes — mantenha a sigla se a pessoa a citou. Um pedido genérico de 'seguro' (sem citar cliente) traz só as apólices gerais da empresa; se a pessoa citar um cliente específico (ex.: 'seguro da Nestlé'), inclua o nome do cliente neste campo, nunca omita. Importante para AFE: cada uma autoriza uma atividade diferente (ex.: 'AFE de saneantes' x 'AFE de cosméticos') — mantenha a atividade citada, nunca omita. Importante para Contabilidade (DRE, Balanço, Balancete, Faturamento): documentos de anos diferentes NÃO se substituem — se a pessoa citar um ano (ex.: 'DRE de 2024'), mantenha o ano neste campo; um pedido sem ano (ex.: 'me manda o DRE') deve trazer todos os anos disponíveis, nunca só o mais recente.",
+              "tipo ou categoria do documento pedido, nas mesmas palavras usadas pela pessoa (ex.: 'CNPJ', 'contrato social', 'alvará', 'apólice de seguro'). Importante para seguros: RCTR-C, RC-DC e RC-V são apólices diferentes — mantenha a sigla se a pessoa a citou. Um pedido genérico de 'seguro' (sem citar cliente) traz só as apólices gerais da empresa; se a pessoa citar um cliente específico (ex.: 'seguro da Nestlé'), inclua o nome do cliente neste campo, nunca omita. Importante para AFE: cada uma autoriza uma atividade diferente (ex.: 'AFE de saneantes' x 'AFE de cosméticos') — mantenha a atividade citada, nunca omita. Importante para Contabilidade (DRE, Balanço, Balancete, Faturamento): documentos de anos diferentes NÃO se substituem — se a pessoa citar um ano (ex.: 'DRE de 2024'), mantenha o ano neste campo; um pedido sem ano (ex.: 'me manda o DRE') deve trazer todos os anos disponíveis, nunca só o mais recente.",
           },
         },
         required: ["referencia", "tipo_ou_categoria"],
@@ -7427,7 +7446,7 @@ const CHECKLIST_MULTI_TIPO_GRUPOS = [
   // depois de virar um tipo reconhecido, ela ficaria de fora do grupo e
   // cairia na mesma armadilha do "Contrato Social" corrigida logo abaixo.
   new Set(["CND Federal", "CND Estadual", "CND Municipal", "CND FGTS", "CND Trabalhista", "CND Falência"]),
-  new Set(["Apólice RCTR-C", "Apólice RC-DC"]),
+  new Set(["Apólice RCTR-C", "Apólice RC-DC", "Apólice RC-V"]),
 ];
 const CHECKLIST_MULTI_TIPO_LABELS = new Set(
   CHECKLIST_MULTI_TIPO_GRUPOS.flatMap((g) => [...g]),
@@ -18339,6 +18358,7 @@ const TIPO_LABEL_TO_DOC_FAMILY = {
     "Comprovante de Pagamento",
     "Apólice RCTR-C",
     "Apólice RC-DC",
+    "Apólice RC-V",
   ]);
 function slugifyDocFamily(label) {
   return normalize(label)
@@ -25555,15 +25575,6 @@ function LoginScreen({
         "login-screen" + (status === "success" ? " login-screen-leaving" : ""),
     },
     /*#__PURE__*/ React.createElement("style", null, LOGIN_SCREEN_CSS),
-    /*#__PURE__*/ React.createElement("link", {
-      rel: "preconnect",
-      href: "https://fonts.googleapis.com",
-    }),
-    /*#__PURE__*/ React.createElement(
-      "style",
-      null,
-      `@import url('https://fonts.googleapis.com/css2?family=Archivo:wght@700;900&display=swap');`,
-    ),
     /*#__PURE__*/ React.createElement(
       "div",
       { className: "login-card" },
@@ -30418,6 +30429,335 @@ function ViagensView({ currentUser, onNotify, onView, deepLinkId, onDeepLinkCons
 }
 /* VG_BLOCK_END */
 
+/* LG_BLOCK_START */
+/* =========================================================================
+   INFORMAÇÕES LOGÍSTICAS (2026-10-19) — aba nova do portal. Hoje traz o
+   acompanhamento do DIESEL S-10:
+     1. "Informações mastigadas", atualizadas sozinhas: preço médio de
+        revenda no Brasil, variação contra a semana anterior, semana de
+        referência, preço nas UFs das bases da Grupoprima e as últimas
+        semanas num gráfico. Os números vêm do backend (GET /logistica/diesel),
+        que lê as planilhas oficiais semanais da ANP — nada digitado à mão.
+     2. O painel completo do Power BI, embutido logo abaixo (link "Publicar na
+        Web" — público por natureza; o endereço fica visível no código).
+   Se o backend/ANP falhar, a aba mostra o aviso e continua exibindo o painel;
+   nunca inventa um valor. Uma nova informação logística entra aqui como mais
+   uma seção. */
+const LG_POWERBI_URL =
+  "https://app.powerbi.com/view?r=eyJrIjoiMGM0NDhhMTUtMjQwZi00N2RlLTk1M2UtYjkxZTlkNzM1YzE5IiwidCI6IjQ0OTlmNGZmLTI0YTYtNGI0Mi1iN2VmLTEyNGFmY2FkYzkxMyJ9";
+const LG_ANP_URL =
+  "https://www.gov.br/anp/pt-br/assuntos/precos-e-defesa-da-concorrencia/precos/levantamento-de-precos-de-combustiveis-ultimas-semanas-pesquisadas";
+const lgEl = React.createElement;
+const Fuel = (p) =>
+  lgEl(
+    Icon,
+    p,
+    lgEl("path", { d: "M3 22V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v17" }),
+    lgEl("path", { d: "M3 22h12" }),
+    lgEl("rect", { x: "6", y: "6", width: "6", height: "5" }),
+    lgEl("path", { d: "M15 12h2a2 2 0 0 1 2 2v3a1.5 1.5 0 0 0 3 0V9l-3-3" }),
+  );
+const LgArrowUp = (p) => lgEl(Icon, p, lgEl("line", { x1: "12", y1: "19", x2: "12", y2: "5" }), lgEl("polyline", { points: "5 12 12 5 19 12" }));
+const LgArrowDown = (p) => lgEl(Icon, p, lgEl("line", { x1: "12", y1: "5", x2: "12", y2: "19" }), lgEl("polyline", { points: "19 12 12 19 5 12" }));
+const LgRefresh = (p) =>
+  lgEl(Icon, p, lgEl("path", { d: "M21 12a9 9 0 1 1-3-6.7" }), lgEl("polyline", { points: "21 3 21 9 15 9" }));
+const LgExternal = (p) =>
+  lgEl(
+    Icon,
+    p,
+    lgEl("path", { d: "M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" }),
+    lgEl("polyline", { points: "15 3 21 3 21 9" }),
+    lgEl("line", { x1: "10", y1: "14", x2: "21", y2: "3" }),
+  );
+
+function lgMoeda(n, casas = 2) {
+  if (n == null || !Number.isFinite(n)) return "—";
+  return "R$ " + n.toLocaleString("pt-BR", { minimumFractionDigits: casas, maximumFractionDigits: casas });
+}
+function lgSinal(n, casas, sufixo) {
+  if (n == null || !Number.isFinite(n)) return "—";
+  const abs = Math.abs(n).toLocaleString("pt-BR", { minimumFractionDigits: casas, maximumFractionDigits: casas });
+  return (n > 0 ? "+" : n < 0 ? "−" : "") + abs + (sufixo || "");
+}
+function lgDataBR(iso) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso || "");
+  return m ? `${m[3]}/${m[2]}/${m[1]}` : "—";
+}
+function lgDataCurta(iso) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso || "");
+  return m ? `${m[3]}/${m[2]}` : "";
+}
+/** Classe/ícone da variação: alta de combustível é custo maior (vermelho); queda, verde; igual, neutro. */
+function lgTendencia(v) {
+  if (v == null || !Number.isFinite(v) || Math.abs(v) < 0.005) return { cls: "lg-neutro", icon: null, texto: "estável" };
+  return v > 0 ? { cls: "lg-alta", icon: LgArrowUp, texto: "alta" } : { cls: "lg-queda", icon: LgArrowDown, texto: "queda" };
+}
+function LgVariacao({ pct, abs, compacto }) {
+  const t = lgTendencia(pct);
+  return lgEl(
+    "span",
+    { className: "lg-var " + t.cls },
+    t.icon ? lgEl(t.icon, { size: compacto ? 12 : 15 }) : null,
+    lgEl("span", null, lgSinal(pct, 2, "%")),
+    !compacto && abs != null ? lgEl("span", { className: "lg-var-abs" }, `(${lgSinal(abs, 2, "")} R$/l)`) : null,
+  );
+}
+
+/** Gráfico simples das últimas semanas (SVG próprio, sem biblioteca). */
+function LgSerie({ serie }) {
+  if (!serie || serie.length < 2) return null;
+  const W = 560, H = 170, PX = 34, PT = 28, PB = 34;
+  const precos = serie.map((s) => s.preco);
+  const min = Math.min(...precos), max = Math.max(...precos);
+  const folga = Math.max((max - min) * 0.25, 0.03);
+  const lo = min - folga, hi = max + folga;
+  const x = (i) => PX + (i * (W - 2 * PX)) / (serie.length - 1);
+  const y = (v) => PT + ((hi - v) * (H - PT - PB)) / (hi - lo);
+  const pts = serie.map((s, i) => `${x(i).toFixed(1)},${y(s.preco).toFixed(1)}`).join(" ");
+  return lgEl(
+    "svg",
+    { className: "lg-serie", viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "Preço médio do diesel S-10 nas últimas semanas" },
+    lgEl("polyline", { points: pts, fill: "none", stroke: "var(--texto)", strokeWidth: 2.2, strokeLinejoin: "round", strokeLinecap: "round" }),
+    serie.map((s, i) => {
+      const ultimo = i === serie.length - 1;
+      return lgEl(
+        "g",
+        { key: s.inicio },
+        lgEl("circle", { cx: x(i), cy: y(s.preco), r: ultimo ? 5 : 3.6, fill: ultimo ? "#2E7DA6" : "var(--card-bg)", stroke: ultimo ? "#2E7DA6" : "var(--texto)", strokeWidth: 2 }),
+        lgEl("text", { x: x(i), y: y(s.preco) - 11, textAnchor: "middle", className: "lg-serie-valor" }, s.preco.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })),
+        lgEl("text", { x: x(i), y: H - 12, textAnchor: "middle", className: "lg-serie-data" }, lgDataCurta(s.fim)),
+      );
+    }),
+  );
+}
+
+let lgCacheDiesel = null; // { em, dados } — evita rebuscar a cada troca de aba (o backend também tem cache)
+function LogisticaView({ companies, onNotify }) {
+  const [estado, setEstado] = useState(() => (lgCacheDiesel ? "ok" : "carregando")); // carregando | ok | erro
+  const [dados, setDados] = useState(() => (lgCacheDiesel ? lgCacheDiesel.dados : null));
+  const [erro, setErro] = useState(null);
+  const [atualizando, setAtualizando] = useState(false);
+
+  async function buscar(forcar) {
+    setAtualizando(true);
+    try {
+      const resp = await fetch(`${DRIVE_PROXY_URL}/logistica/diesel${forcar ? "?atualizar=1" : ""}`, {
+        headers: DRIVE_PROXY_KEY ? { "X-Portal-Key": DRIVE_PROXY_KEY } : {},
+        cache: "no-store",
+      });
+      const json = await resp.json().catch(() => null);
+      if (!resp.ok || !json) throw new Error(`HTTP ${resp.status}`);
+      if (!json.ok) {
+        setErro(json);
+        if (!lgCacheDiesel) setEstado("erro");
+        if (forcar) onNotify?.("A ANP não respondeu agora. Mantive o último valor.", "error");
+        return;
+      }
+      lgCacheDiesel = { em: Date.now(), dados: json };
+      setDados(json);
+      setErro(null);
+      setEstado("ok");
+      if (forcar) onNotify?.("Preço do diesel atualizado.", "info");
+    } catch (e) {
+      setErro({ erro: "Não foi possível falar com o servidor agora.", motivo: String((e && e.message) || e) });
+      if (!lgCacheDiesel) setEstado("erro");
+      if (forcar) onNotify?.("Não foi possível atualizar agora.", "error");
+    } finally {
+      setAtualizando(false);
+    }
+  }
+  useEffect(() => {
+    // Usa o que já está em memória se for recente (< 15 min); senão busca de novo.
+    if (lgCacheDiesel && Date.now() - lgCacheDiesel.em < 15 * 60 * 1000) return;
+    buscar(false);
+  }, []);
+
+  // UFs das bases da Grupoprima (Matriz + filiais), na ordem do cadastro.
+  const bases = useMemo(
+    () => (companies || []).map((c) => ({ id: c.id, rotulo: c.tipo === "Matriz" ? "Matriz" : `Filial ${c.id}`, municipio: c.municipio, uf: c.uf })),
+    [companies],
+  );
+  const porUf = useMemo(() => {
+    const m = {};
+    ((dados && dados.estados) || []).forEach((e) => {
+      m[e.uf] = e;
+    });
+    return m;
+  }, [dados]);
+
+  const br = dados && dados.brasil;
+  const tBr = br ? lgTendencia(br.variacaoPct) : null;
+  const semana = dados && dados.semana ? `${lgDataCurta(dados.semana.inicio)} a ${lgDataBR(dados.semana.fim)}` : "—";
+  const atualizadoEm = dados && dados.atualizadoEm ? new Date(dados.atualizadoEm).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : null;
+
+  const cabecalho = lgEl(
+    "header",
+    { className: "view-header" },
+    lgEl(
+      "div",
+      null,
+      lgEl("p", { className: "eyebrow" }, "Informações Logísticas"),
+      lgEl("h1", null, "Diesel S-10"),
+      lgEl("p", { className: "lede" }, "Preço médio de revenda e variação semanal, atualizados automaticamente a partir do levantamento oficial da ANP."),
+    ),
+    lgEl(
+      "button",
+      { className: "filters-clear-btn lg-refresh", onClick: () => buscar(true), disabled: atualizando, title: "Buscar de novo na ANP" },
+      lgEl(LgRefresh, { size: 14, className: atualizando ? "spin" : "" }),
+      " ",
+      atualizando ? "Atualizando…" : "Atualizar",
+    ),
+  );
+
+  let resumo;
+  if (estado === "carregando") {
+    resumo = lgEl("div", { className: "lg-aviso lg-aviso-info" }, "Buscando o preço mais recente na ANP… (a primeira consulta do dia pode levar alguns segundos)");
+  } else if (estado === "erro" || !dados) {
+    resumo = lgEl(
+      "div",
+      { className: "lg-aviso lg-aviso-erro" },
+      lgEl("strong", null, (erro && erro.erro) || "Não foi possível obter o preço do diesel agora."),
+      " O painel do Power BI abaixo continua disponível. ",
+      lgEl("a", { href: (erro && erro.fonteUrl) || LG_ANP_URL, target: "_blank", rel: "noopener noreferrer" }, "Ver levantamento da ANP"),
+      ".",
+      erro && erro.motivo ? lgEl("div", { className: "lg-aviso-motivo" }, `Detalhe técnico: ${erro.motivo}`) : null,
+      erro && erro.diagnostico ? lgEl("details", { className: "lg-aviso-motivo" }, lgEl("summary", null, "Diagnóstico (para o suporte)"), lgEl("pre", null, JSON.stringify(erro.diagnostico, null, 1))) : null,
+    );
+  } else {
+    resumo = lgEl(
+      React.Fragment,
+      null,
+      dados.desatualizado ? lgEl("div", { className: "lg-aviso lg-aviso-erro" }, "Não consegui consultar a ANP agora — mostrando o último valor obtido. Tente “Atualizar” mais tarde.") : null,
+      lgEl(
+        "div",
+        { className: "lg-cards" },
+        lgEl(
+          "div",
+          { className: "kpi-card lg-card-hero" },
+          lgEl("div", { className: "kpi-top" }, lgEl(Fuel, { size: 15 }), lgEl("span", { className: "kpi-label" }, "Preço médio — Brasil")),
+          lgEl("div", { className: "kpi-value lg-valor" }, lgMoeda(br.preco), lgEl("small", null, " /litro")),
+          lgEl("div", { className: "kpi-sub" }, "Diesel S-10, preço médio de revenda ao consumidor"),
+        ),
+        lgEl(
+          "div",
+          { className: "kpi-card lg-card-hero" },
+          lgEl("div", { className: "kpi-top" }, tBr.icon ? lgEl(tBr.icon, { size: 15 }) : lgEl(Fuel, { size: 15 }), lgEl("span", { className: "kpi-label" }, "Última variação publicada")),
+          lgEl("div", { className: "kpi-value lg-valor " + tBr.cls }, lgSinal(br.variacaoPct, 2, "%")),
+          lgEl(
+            "div",
+            { className: "kpi-sub" },
+            br.variacaoAbs != null
+              ? `${lgSinal(br.variacaoAbs, 2, "")} R$/l vs. semana anterior (${lgMoeda(br.anterior)})`
+              : "Sem semana anterior para comparar",
+          ),
+        ),
+        lgEl(
+          "div",
+          { className: "kpi-card" },
+          lgEl("div", { className: "kpi-top" }, lgEl(Calendar, { size: 15 }), lgEl("span", { className: "kpi-label" }, "Semana de referência")),
+          lgEl("div", { className: "kpi-value lg-valor-sm" }, semana),
+          lgEl("div", { className: "kpi-sub" }, "Publicada pela ANP (levantamento semanal)"),
+        ),
+        lgEl(
+          "div",
+          { className: "kpi-card" },
+          lgEl("div", { className: "kpi-top" }, lgEl(Fuel, { size: 15 }), lgEl("span", { className: "kpi-label" }, "Faixa de preços no país")),
+          lgEl("div", { className: "kpi-value lg-valor-sm" }, br.minimo != null && br.maximo != null ? `${lgMoeda(br.minimo)} a ${lgMoeda(br.maximo)}` : "—"),
+          lgEl("div", { className: "kpi-sub" }, br.postos ? `${br.postos.toLocaleString("pt-BR")} postos pesquisados` : "Mínimo e máximo observados"),
+        ),
+      ),
+      lgEl(
+        "div",
+        { className: "lg-grade" },
+        lgEl(
+          "section",
+          { className: "lg-bloco" },
+          lgEl("h3", null, "Nas nossas bases"),
+          lgEl(
+            "div",
+            { className: "lg-tabela-wrap" },
+            lgEl(
+              "table",
+              { className: "lg-tabela" },
+              lgEl("thead", null, lgEl("tr", null, ["Base", "UF", "Preço médio", "Variação semanal"].map((h) => lgEl("th", { key: h }, h)))),
+              lgEl(
+                "tbody",
+                null,
+                bases.map((b) => {
+                  const e = porUf[b.uf];
+                  return lgEl(
+                    "tr",
+                    { key: b.id },
+                    lgEl("td", null, lgEl("strong", null, b.rotulo), lgEl("span", { className: "lg-muted" }, ` · ${b.municipio}`)),
+                    lgEl("td", null, b.uf),
+                    lgEl("td", { className: "mono" }, e ? lgMoeda(e.preco) : "—"),
+                    lgEl("td", null, e ? lgEl(LgVariacao, { pct: e.variacaoPct, abs: e.variacaoAbs, compacto: true }) : "—"),
+                  );
+                }),
+              ),
+            ),
+          ),
+        ),
+        lgEl(
+          "section",
+          { className: "lg-bloco" },
+          lgEl("h3", null, "Últimas semanas — Brasil"),
+          lgEl(LgSerie, { serie: dados.serie }),
+          (dados.regioes || []).length > 0
+            ? lgEl(
+                "div",
+                { className: "lg-regioes" },
+                dados.regioes.map((r) =>
+                  lgEl(
+                    "div",
+                    { key: r.nome, className: "lg-regiao" },
+                    lgEl("span", { className: "lg-muted" }, r.nome),
+                    lgEl("strong", null, lgMoeda(r.preco)),
+                    lgEl(LgVariacao, { pct: r.variacaoPct, compacto: true }),
+                  ),
+                ),
+              )
+            : null,
+        ),
+      ),
+      lgEl(
+        "p",
+        { className: "lg-fonte" },
+        "Fonte: ",
+        lgEl("a", { href: dados.fonteUrl || LG_ANP_URL, target: "_blank", rel: "noopener noreferrer" }, "ANP — Levantamento de Preços de Combustíveis"),
+        ". Preço médio de revenda (postos), todas as regiões; alta de preço aparece em vermelho (custo maior) e queda em verde.",
+        atualizadoEm ? ` Consulta feita em ${atualizadoEm}.` : "",
+      ),
+    );
+  }
+
+  return lgEl(
+    "div",
+    { className: "view" },
+    cabecalho,
+    resumo,
+    lgEl(
+      "section",
+      { className: "lg-bloco lg-bi" },
+      lgEl(
+        "div",
+        { className: "lg-bi-head" },
+        lgEl("h3", null, "Painel completo — Power BI"),
+        lgEl("a", { className: "lg-link-ext", href: LG_POWERBI_URL, target: "_blank", rel: "noopener noreferrer" }, lgEl(LgExternal, { size: 13 }), " Abrir em nova aba"),
+      ),
+      lgEl("iframe", {
+        className: "lg-bi-frame",
+        title: "Painel Power BI — Diesel S-10",
+        src: LG_POWERBI_URL,
+        allowFullScreen: true,
+        loading: "lazy",
+        referrerPolicy: "no-referrer",
+      }),
+    ),
+  );
+}
+/* LG_BLOCK_END */
+
 function GrupoprimaPortal() {
   // confirmedDocs: documentos classificados automaticamente na sincronização
   // ou confirmados manualmente na fila de conferência (capability "db",
@@ -31905,6 +32245,55 @@ function GrupoprimaPortal() {
         .vg-sub { color: var(--carvao); font-size: 11.5px; margin-top: 2px; }
         .vg-h2 { font-size: 18px; margin: 0; color: var(--texto); }
         .vg-h4 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--carvao); margin: 20px 0 8px; }
+        /* Informações Logísticas (2026-10-19) */
+        .portal-root { --lg-alta: #D64545; --lg-queda: #1B8A4B; }
+        .portal-root[data-theme="dark"] { --lg-alta: #FF9B9B; --lg-queda: #7FE6A0; }
+        .lg-refresh { flex: none; display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+        .lg-cards { display: grid; grid-template-columns: 1.15fr 1.15fr 1fr 1fr; gap: 12px; margin-bottom: 16px; }
+        .lg-cards > * { min-width: 0; }
+        .lg-card-hero { padding: 16px 18px; }
+        .lg-valor { font-size: clamp(26px, 5vw, 34px); }
+        .lg-valor small { font-family: inherit; font-weight: 600; font-size: 13px; color: var(--carvao); }
+        .lg-valor-sm { font-size: clamp(15px, 2.6vw, 19px); line-height: 1.25; }
+        .lg-alta { color: var(--lg-alta); } .lg-queda { color: var(--lg-queda); } .lg-neutro { color: var(--carvao); }
+        .lg-var { display: inline-flex; align-items: center; gap: 4px; font-weight: 700; font-size: 12.5px; white-space: nowrap; }
+        .lg-var-abs { font-weight: 500; color: var(--carvao); font-size: 12px; }
+        .lg-grade { display: grid; grid-template-columns: 1.05fr 1fr; gap: 14px; margin-bottom: 10px; }
+        .lg-bloco { background: var(--card-bg); border: 1px solid var(--cinza-frio); border-radius: 10px; padding: 14px 16px; min-width: 0; }
+        .lg-bloco h3 { font-family: 'Archivo', sans-serif; font-weight: 900; font-size: 14px; color: var(--texto); margin: 0 0 10px; }
+        .lg-tabela-wrap { overflow-x: auto; }
+        .lg-tabela { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+        .lg-tabela th { text-align: left; font-size: 11px; font-weight: 700; color: var(--carvao); padding: 6px 8px; border-bottom: 1px solid var(--cinza-frio); white-space: nowrap; }
+        .lg-tabela td { padding: 8px; border-bottom: 1px solid var(--cinza-frio); color: var(--texto); }
+        .lg-tabela tr:last-child td { border-bottom: none; }
+        .lg-muted { color: var(--carvao); font-size: 12px; }
+        .lg-serie { width: 100%; height: auto; display: block; }
+        .lg-serie-valor { font-size: 11px; font-weight: 700; fill: var(--texto); }
+        .lg-serie-data { font-size: 10.5px; fill: var(--carvao); }
+        .lg-regioes { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; margin-top: 10px; }
+        .lg-regiao { display: flex; flex-direction: column; gap: 2px; border: 1px solid var(--cinza-frio); border-radius: 8px; padding: 6px 8px; font-size: 12px; min-width: 0; }
+        .lg-regiao strong { font-size: 12.5px; color: var(--texto); }
+        .lg-fonte { font-size: 11.5px; color: var(--carvao); margin: 8px 0 18px; line-height: 1.5; }
+        .lg-fonte a, .lg-aviso a { color: inherit; text-decoration: underline; }
+        .lg-aviso { border-radius: 8px; padding: 10px 13px; font-size: 13px; margin: 0 0 14px; line-height: 1.5; }
+        .lg-aviso-info { background: rgba(111,187,227,0.14); border: 1px solid rgba(111,187,227,0.4); color: var(--texto); }
+        .lg-aviso-erro { background: rgba(201,138,0,0.14); border: 1px solid rgba(201,138,0,0.45); color: var(--texto); }
+        .lg-aviso-motivo { font-size: 11.5px; color: var(--carvao); margin-top: 6px; }
+        .lg-aviso-motivo pre { white-space: pre-wrap; word-break: break-word; margin: 6px 0 0; font-size: 11px; }
+        .lg-bi { margin-top: 6px; }
+        .lg-bi-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+        .lg-bi-head h3 { margin: 0; }
+        .lg-link-ext { display: inline-flex; align-items: center; gap: 5px; font-size: 12.5px; font-weight: 700; color: var(--texto); text-decoration: underline; }
+        .lg-bi-frame { width: 100%; height: clamp(480px, 78vh, 860px); border: 1px solid var(--cinza-frio); border-radius: 8px; background: #fff; display: block; }
+        @media (max-width: 900px) {
+          .lg-cards { grid-template-columns: repeat(2, 1fr); }
+          .lg-grade { grid-template-columns: 1fr; }
+          .lg-regioes { grid-template-columns: repeat(2, 1fr); }
+        }
+        @media (max-width: 520px) {
+          .lg-cards { grid-template-columns: 1fr; }
+          .lg-bi-frame { height: 70vh; }
+        }
         .vg-info { background: rgba(111,187,227,0.14); border: 1px solid rgba(111,187,227,0.4); color: var(--texto); border-radius: 8px; padding: 9px 12px; font-size: 12.5px; margin: 8px 0; }
         .vg-userchip { display: flex; align-items: center; gap: 10px; }
         .vg-userchip-txt { display: flex; flex-direction: column; line-height: 1.2; text-align: right; }
@@ -32021,15 +32410,6 @@ function GrupoprimaPortal() {
         }
       `,
     ),
-    /*#__PURE__*/ React.createElement("link", {
-      rel: "preconnect",
-      href: "https://fonts.googleapis.com",
-    }),
-    /*#__PURE__*/ React.createElement(
-      "style",
-      null,
-      `@import url('https://fonts.googleapis.com/css2?family=Archivo:wght@700;900&display=swap');`,
-    ),
     /*#__PURE__*/ React.createElement("div", {
       className: "mobile-overlay" + (mobileNavOpen ? " visible" : ""),
       onClick: () => setMobileNavOpen(false),
@@ -32114,6 +32494,17 @@ function GrupoprimaPortal() {
           /*#__PURE__*/ React.createElement(Banknote, { size: 16 }),
           " ",
           /*#__PURE__*/ React.createElement("span", null, "Informações Financeiras"),
+        ),
+      can(currentUser, "informacoesLogisticas") &&
+        /*#__PURE__*/ React.createElement(
+          "button",
+          {
+            className: "nav-item" + (view === "logistica" ? " active" : ""),
+            onClick: () => goTo("logistica"),
+          },
+          /*#__PURE__*/ React.createElement(Fuel, { size: 16 }),
+          " ",
+          /*#__PURE__*/ React.createElement("span", null, "Informações Logísticas"),
         ),
       can(currentUser, "viagensDespesas") &&
         /*#__PURE__*/ React.createElement(
@@ -32244,7 +32635,7 @@ function GrupoprimaPortal() {
           },
           /*#__PURE__*/ React.createElement(Menu, { size: 18 }),
         ),
-        view === "homologacao" || view === "financeiro" || view === "viagens"
+        view === "homologacao" || view === "financeiro" || view === "viagens" || view === "logistica"
           ? /*#__PURE__*/ React.createElement("div", {
               className: "search-box-spacer",
               style: { flex: 1 },
@@ -32389,6 +32780,12 @@ function GrupoprimaPortal() {
             onNotify: notify,
             onView: setViewer,
           }),
+        view === "logistica" &&
+          can(currentUser, "informacoesLogisticas") &&
+          /*#__PURE__*/ React.createElement(LogisticaView, {
+            companies: data.companies,
+            onNotify: notify,
+          }),
         view === "viagens" &&
           can(currentUser, "viagensDespesas") &&
           /*#__PURE__*/ React.createElement(ViagensView, {
@@ -32485,6 +32882,39 @@ function GrupoprimaPortal() {
   );
 }
 const root = ReactDOM.createRoot(document.getElementById("root"));
-root.render(/*#__PURE__*/ React.createElement(GrupoprimaPortal, null));
+// Só desenha o portal depois que a fonte Archivo (carregada no <head>) estiver pronta — evita ver a
+// tela com a fonte padrão e depois "pular" para a final. Teto de 2s: se a fonte não chegar (rede
+// bloqueada), abre do mesmo jeito, com a fonte padrão, sem travar nada.
+function aguardarFonteArchivo() {
+  return new Promise((resolve) => {
+    let feito = false;
+    const fim = () => {
+      if (feito) return;
+      feito = true;
+      resolve();
+    };
+    setTimeout(fim, 2000);
+    try {
+      const link = document.getElementById("fonte-archivo");
+      const folhaPronta = new Promise((res) => {
+        if (!link || link.sheet) return res();
+        link.addEventListener("load", () => res());
+        link.addEventListener("error", () => res());
+      });
+      folhaPronta
+        .then(() =>
+          document.fonts && document.fonts.load
+            ? Promise.all([document.fonts.load("900 16px Archivo"), document.fonts.load("700 16px Archivo")])
+            : null,
+        )
+        .then(fim, fim);
+    } catch (e) {
+      fim();
+    }
+  });
+}
+aguardarFonteArchivo().then(() => {
+  root.render(/*#__PURE__*/ React.createElement(GrupoprimaPortal, null));
+});
 </script>
 </body></html>
