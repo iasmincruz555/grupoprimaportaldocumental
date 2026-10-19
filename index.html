@@ -30537,6 +30537,7 @@ function LogisticaView({ companies, onNotify }) {
   const [dados, setDados] = useState(() => (lgCacheDiesel ? lgCacheDiesel.dados : null));
   const [erro, setErro] = useState(null);
   const [atualizando, setAtualizando] = useState(false);
+  const [painelAberto, setPainelAberto] = useState(false); // painel Power BI começa recolhido (pedido 2026-10-19)
 
   async function buscar(forcar) {
     setAtualizando(true);
@@ -30592,13 +30593,13 @@ function LogisticaView({ companies, onNotify }) {
 
   const cabecalho = lgEl(
     "header",
-    { className: "view-header" },
+    { className: "view-header view-header-compact" },
     lgEl(
       "div",
       null,
-      lgEl("p", { className: "eyebrow" }, "Informações Logísticas"),
-      lgEl("h1", null, "Diesel S-10"),
-      lgEl("p", { className: "lede" }, "Preço médio de revenda e variação semanal, atualizados automaticamente a partir do levantamento oficial da ANP."),
+      lgEl("p", { className: "eyebrow-pill" }, "Comercial · Logística"),
+      lgEl("h1", null, "Informações Logísticas"),
+      lgEl("p", { className: "lede" }, "Diesel S-10: preço médio de revenda e variação semanal, atualizados automaticamente a partir do levantamento oficial da ANP."),
     ),
     lgEl(
       "button",
@@ -30673,6 +30674,14 @@ function LogisticaView({ companies, onNotify }) {
           "section",
           { className: "lg-bloco" },
           lgEl("h3", null, "Nas nossas bases"),
+          (dados.estados || []).length === 0
+            ? lgEl(
+                "div",
+                { className: "lg-aviso lg-aviso-erro" },
+                "Os preços por estado não vieram nesta consulta da ANP.",
+                dados.diagnosticoEstados ? lgEl("details", { className: "lg-aviso-motivo" }, lgEl("summary", null, "Diagnóstico (para o suporte)"), lgEl("pre", null, JSON.stringify(dados.diagnosticoEstados, null, 1))) : null,
+              )
+            : null,
           lgEl(
             "div",
             { className: "lg-tabela-wrap" },
@@ -30733,7 +30742,7 @@ function LogisticaView({ companies, onNotify }) {
 
   return lgEl(
     "div",
-    { className: "view" },
+    { className: "view view-wide" },
     cabecalho,
     resumo,
     lgEl(
@@ -30742,17 +30751,23 @@ function LogisticaView({ companies, onNotify }) {
       lgEl(
         "div",
         { className: "lg-bi-head" },
-        lgEl("h3", null, "Painel completo — Power BI"),
-        lgEl("a", { className: "lg-link-ext", href: LG_POWERBI_URL, target: "_blank", rel: "noopener noreferrer" }, lgEl(LgExternal, { size: 13 }), " Abrir em nova aba"),
+        lgEl("h3", null, "Painel completo da ANP — Power BI"),
+        lgEl(
+          "div",
+          { className: "lg-bi-acoes" },
+          lgEl("a", { className: "lg-link-ext", href: LG_POWERBI_URL, target: "_blank", rel: "noopener noreferrer" }, lgEl(LgExternal, { size: 13 }), " Abrir em nova aba"),
+          lgEl("button", { type: "button", className: "filters-clear-btn lg-bi-toggle", onClick: () => setPainelAberto((v) => !v), "aria-expanded": painelAberto }, painelAberto ? "Recolher" : "Mostrar painel"),
+        ),
       ),
-      lgEl("iframe", {
-        className: "lg-bi-frame",
-        title: "Painel Power BI — Diesel S-10",
-        src: LG_POWERBI_URL,
-        allowFullScreen: true,
-        loading: "lazy",
-        referrerPolicy: "no-referrer",
-      }),
+      painelAberto
+        ? lgEl("iframe", {
+            className: "lg-bi-frame",
+            title: "Painel Power BI — Diesel S-10",
+            src: LG_POWERBI_URL,
+            allowFullScreen: true,
+            referrerPolicy: "no-referrer",
+          })
+        : null,
     ),
   );
 }
@@ -32281,10 +32296,13 @@ function GrupoprimaPortal() {
         .lg-aviso-motivo { font-size: 11.5px; color: var(--carvao); margin-top: 6px; }
         .lg-aviso-motivo pre { white-space: pre-wrap; word-break: break-word; margin: 6px 0 0; font-size: 11px; }
         .lg-bi { margin-top: 6px; }
-        .lg-bi-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+        .lg-bi-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-bottom: 0; }
         .lg-bi-head h3 { margin: 0; }
         .lg-link-ext { display: inline-flex; align-items: center; gap: 5px; font-size: 12.5px; font-weight: 700; color: var(--texto); text-decoration: underline; }
-        .lg-bi-frame { width: 100%; height: clamp(480px, 78vh, 860px); border: 1px solid var(--cinza-frio); border-radius: 8px; background: #fff; display: block; }
+        .lg-bi-acoes { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+        .lg-bi-toggle { padding: 6px 12px; font-size: 12.5px; }
+        .lg-bi:has(.lg-bi-frame) .lg-bi-head { margin-bottom: 10px; }
+        .lg-bi-frame { width: 100%; height: clamp(420px, 68vh, 760px); border: 1px solid var(--cinza-frio); border-radius: 8px; background: #fff; display: block; }
         @media (max-width: 900px) {
           .lg-cards { grid-template-columns: repeat(2, 1fr); }
           .lg-grade { grid-template-columns: 1fr; }
