@@ -3364,6 +3364,11 @@ const AUDIT_ACTION_LABELS = {
   concluiu_lote: "Concluiu solicitação de envio em lote",
   atualizou_solicitacao_lote: "Atualizou solicitação de envio em lote",
   excluiu_solicitacao_lote: "Excluiu solicitação de envio em lote",
+  classificou_solicitacao_lote: "Classificou solicitação de envio em lote (Homologação / Atualização)",
+  registrou_lote_em_homologacao: "Registrou solicitação de envio em lote na área de Homologação",
+  sincronizou_status_lote_homologacao: "Sincronizou o status do envio em lote com a Homologação",
+  desvinculou_lote_homologacao: "Homologação vinculada removida (envio em lote desvinculado)",
+  excluiu_homologacao_vinculada_lote: "Excluiu a Homologação vinculada junto com a solicitação em lote",
   // Migração automática de uma vez só (pedido da Iasmin, 2026-09-28) — ver
   // runReextracaoDataEmissaoVersaoUmaVez.
   reextraiu_dados_documentos_existentes:
@@ -14030,13 +14035,19 @@ const HOMOLOGACAO_FLUXOS = {
   },
 };
 const HOMOLOGACAO_TIPOS_ATUALIZACAO = [
-  "Nova certidão",
-  "Atualização de licença",
-  "Envio de documentação adicional",
-  "Renovação de documentos",
-  "Nova exigência documental do cliente",
-  "Outro",
+  "Atualização de documentação",
+  "Novo formulário",
+  "Outros",
 ];
+/** Tipos antigos (cadastrados antes da simplificação) continuam aparecendo
+ *  em registros existentes, edição e filtro, sem entrar na lista de novas opções. */
+function homologacaoTiposComLegado(extras) {
+  const lista = [...HOMOLOGACAO_TIPOS_ATUALIZACAO];
+  (extras || []).forEach((t) => {
+    if (t && !lista.includes(t)) lista.push(t);
+  });
+  return lista;
+}
 function homologacaoFluxoDe(item) {
   return item && item.fluxo === "atualizacao" ? "atualizacao" : "homologacao";
 }
@@ -14060,6 +14071,351 @@ function clientesHomologadosDe(items) {
   return [...porNome.values()]
     .map((it) => ({ id: it.id, nome: it.cliente, status: it.status }))
     .sort((a, b) => a.nome.localeCompare(b.nome, "pt-BR"));
+}
+
+/* =========================================================================
+   INTEGRAÇÃO ENVIO DE DOCUMENTAÇÕES EM LOTE ↔ HOMOLOGAÇÃO (2026-10-20)
+
+   Cada solicitação em lote classificada (`tipoSolicitacao`: "homologacao" |
+   "atualizacao") tem EXATAMENTE UM registro de acompanhamento comercial na
+   coleção "homologacoes", com id DETERMINÍSTICO (`hm-<id do lote>`): gravar
+   duas vezes o mesmo lote só sobrescreve o mesmo documento — nunca cria um
+   segundo. O lote guarda `homologacaoId`; o registro guarda `loteId`,
+   `origem: "envio_lote"`, `loteStatus` e `loteResumo`.
+
+   Status — o lote continua DERIVADO dos itens (computeLoteStatusGeral) e
+   nunca é sobrescrito pela Homologação. O lote empurra o status para a
+   Homologação só quando o status DO LOTE muda (evento), assim uma decisão
+   manual da equipe comercial não é desfeita a cada sincronização:
+     pendente                       -> nova
+     processando / com_pendencias / erro -> andamento
+     concluido                      -> concluida
+   Uma Homologação "cancelada" (decisão comercial) nunca é reaberta pelo lote.
+   ========================================================================= */
+const LOTE_TIPOS_SOLICITACAO = {
+  homologacao: { label: "Homologação", sub: "Novo cliente" },
+  atualizacao: { label: "Atualização de Homologação", sub: "Cliente já cadastrado" },
+};
+function homologacaoIdDoLote(loteId) {
+  return "hm-" + loteId;
+}
+function statusHomologacaoDoLote(statusLote) {
+  if (statusLote === "concluido") return "concluida";
+  if (!statusLote || statusLote === "pendente") return "nova";
+  return "andamento";
+}
+function resumoDoLote(lote) {
+  let itensBase = 0;
+  let resolvidos = 0;
+  (lote.documentacoesSolicitadas || []).forEach((it) => {
+    Object.values(it.statusPorBase || {}).forEach((st) => {
+      itensBase++;
+      if (st === "recebido" || st === "conferido" || st === "nao_aplicavel") resolvidos++;
+    });
+  });
+  return {
+    documentacoes: (lote.documentacoesSolicitadas || []).length,
+    itensBase,
+    resolvidos,
+    pendentes: itensBase - resolvidos,
+    anexos: (lote.anexosRecebidos || []).length,
+  };
+}
+function homologacaoBaseDaCompany(company, companies) {
+  if (!company) return null;
+  const oficial = HOMOLOGACAO_BASES.find((b) => {
+    const c = resolveCompanyFromHomologacaoBase(b, companies);
+    return c && c.id === company.id;
+  });
+  if (oficial) return oficial;
+  return company.tipo === "Matriz" ? "Matriz" : `Filial ${company.id} — ${company.municipio}/${company.uf}`;
+}
+const sincLotePendentes = {};
+const lotesDesvinculadosSessao = new Set();
+/** sincronizarLoteComHomologacao: cria (uma única vez) ou atualiza o registro
+ *  vinculado. Serializada por lote (nunca duas gravações concorrentes) e
+ *  conservadora: se a leitura falhar NÃO grava (evita duplicar/sobrescrever). */
+function sincronizarLoteComHomologacao(lote, companies, ctx) {
+  const fila = sincLotePendentes[lote.id] || Promise.resolve();
+  const p = fila.catch(() => {}).then(() => sincronizarLoteInterno(lote, companies, ctx || {}));
+  sincLotePendentes[lote.id] = p;
+  return p;
+}
+async function sincronizarLoteInterno(lote, companies, ctx) {
+  if (!lote || !lote.tipoSolicitacao) return { ok: false, motivo: "sem_tipo" };
+  if (lote.homologacaoDesvinculada || lotesDesvinculadosSessao.has(lote.id)) return { ok: false, motivo: "desvinculado" };
+  const db = await getDb().catch(() => null);
+  if (!db) return { ok: false, motivo: "sem_db" };
+  const hid = homologacaoIdDoLote(lote.id);
+  let existente = null;
+  try {
+    const snap = await db.collection("homologacoes").get();
+    const d = snap.docs.find((x) => x.id === hid);
+    existente = d ? d.data() : null;
+  } catch (e) {
+    return { ok: false, motivo: "falha_leitura" };
+  }
+  const agora = new Date().toISOString();
+  const usuario = ctx.usuario || lote.usuarioSolicitante?.nome || "Usuário do portal";
+  const resumo = resumoDoLote(lote);
+  const statusMapeado = statusHomologacaoDoLote(lote.status);
+  const ehAtu = lote.tipoSolicitacao === "atualizacao";
+  let registro;
+  let eventoAuditoria = null;
+  if (!existente) {
+    const porId = new Map((companies || []).map((c) => [c.id, c]));
+    const bases = (lote.baseIds || []).map((id) => homologacaoBaseDaCompany(porId.get(id), companies)).filter(Boolean);
+    const nomes = (lote.documentacoesSolicitadas || []).map((it) => it.nome).filter(Boolean);
+    const listaTxt = nomes.slice(0, 25).join("; ") + (nomes.length > 25 ? `; … (+${nomes.length - 25})` : "");
+    registro = {
+      id: hid,
+      fluxo: lote.tipoSolicitacao,
+      ...(ehAtu ? { clienteOrigemId: lote.clienteOrigemId || null, tipoAtualizacao: "Atualização de documentação" } : {}),
+      loteId: lote.id,
+      origem: "envio_lote",
+      consultor: { nome: lote.usuarioSolicitante?.nome || usuario, email: lote.usuarioSolicitante?.email || "" },
+      dataSolicitacao: lote.criadoEm || agora,
+      cliente: lote.cliente,
+      prazoRetorno: "",
+      bases,
+      formatoEnvio: "consultor",
+      emailCliente: null,
+      emailsCopia: [],
+      acessoPlataforma: null,
+      observacoes:
+        "Registrada automaticamente a partir do Envio de Documentações em Lote." +
+        (listaTxt ? ` Documentações solicitadas: ${listaTxt}.` : ""),
+      anexos: [],
+      status: statusMapeado,
+      linkHomologacao: "",
+      dataConclusao: statusMapeado === "concluida" ? lote.concluidoEm || agora : null,
+      loteStatus: lote.status,
+      loteResumo: resumo,
+      historico: [
+        { at: lote.criadoEm || agora, usuario: lote.usuarioSolicitante?.nome || usuario, evento: "criada", de: null, para: statusMapeado, origem: "envio_lote" },
+      ],
+    };
+    eventoAuditoria = "registrou_lote_em_homologacao";
+  } else {
+    const mudouResumo = JSON.stringify(existente.loteResumo || null) !== JSON.stringify(resumo);
+    const mudouStatusLote = existente.loteStatus !== lote.status;
+    registro = { ...existente };
+    let mudou = mudouResumo || mudouStatusLote;
+    if (mudouStatusLote && existente.status !== "cancelada" && statusMapeado !== existente.status) {
+      registro.status = statusMapeado;
+      registro.dataConclusao = statusMapeado === "concluida" ? lote.concluidoEm || agora : null;
+      registro.historico = [
+        ...(existente.historico || []),
+        { at: agora, usuario, evento: "status_alterado", de: existente.status, para: statusMapeado, origem: "envio_lote" },
+      ];
+      eventoAuditoria = "sincronizou_status_lote_homologacao";
+    }
+    if (!mudou) return { ok: true, criado: false, registro: existente };
+    registro.loteStatus = lote.status;
+    registro.loteResumo = resumo;
+  }
+  try {
+    await db.collection("homologacoes").doc(hid).set(registro);
+  } catch (e) {
+    return { ok: false, motivo: "falha_gravacao" };
+  }
+  if (eventoAuditoria) {
+    logDocumentAction(eventoAuditoria, {
+      cliente: lote.cliente,
+      tipo: LOTE_TIPOS_SOLICITACAO[lote.tipoSolicitacao]?.label,
+      homologacao: hid,
+      ...(existente ? { de: existente.status, para: registro.status } : {}),
+    });
+  }
+  return { ok: true, criado: !existente, registro };
+}
+/** Homologação vinculada foi excluída na própria Homologação: o lote passa a
+ *  "desvinculado" (não é recriada sozinha ao reabrir o lote). */
+async function desvincularLoteDaHomologacao(loteId) {
+  lotesDesvinculadosSessao.add(loteId);
+  try {
+    const db = await getDb();
+    if (!db) return;
+    const snap = await db.collection("batch_document_submissions").get();
+    const d = snap.docs.find((x) => x.id === loteId);
+    if (!d) return;
+    await db
+      .collection("batch_document_submissions")
+      .doc(loteId)
+      .set({ ...d.data(), homologacaoDesvinculada: true, homologacaoDesvinculadaEm: new Date().toISOString() });
+    logDocumentAction("desvinculou_lote_homologacao", { cliente: d.data().cliente });
+  } catch (e) {}
+}
+/** Lote excluído: leva junto o acompanhamento vinculado (sem órfãos). */
+async function excluirHomologacaoDoLote(loteId) {
+  lotesDesvinculadosSessao.add(loteId);
+  try {
+    const db = await getDb();
+    if (!db) return;
+    await db.collection("homologacoes").doc(homologacaoIdDoLote(loteId)).delete();
+  } catch (e) {}
+}
+function LoteTipoTag({ tipo }) {
+  const meta = LOTE_TIPOS_SOLICITACAO[tipo];
+  if (!meta) return null;
+  return React.createElement("span", { className: "lote-tipo-tag lote-tipo-tag-" + tipo }, tipo === "atualizacao" ? "Atualização" : "Homologação");
+}
+/** LoteHomologacaoCard: dentro do detalhe do lote — mostra/recupera o registro
+ *  vinculado (idempotente) ou permite classificar um lote antigo. */
+function LoteHomologacaoCard({ item, companies, onUpdate, onAbrir, currentUser }) {
+  const h = React.createElement;
+  const [reg, setReg] = useState(null);
+  const [clientes, setClientes] = useState([]);
+  const [carregando, setCarregando] = useState(true);
+  const [tentativa, setTentativa] = useState(0);
+  const [escolhendoAtu, setEscolhendoAtu] = useState(false);
+  const [clienteSel, setClienteSel] = useState("");
+  const [erro, setErro] = useState(null);
+  const podeAbrir = can(currentUser, "homologacoes");
+  const resumo = resumoDoLote(item);
+  const assinatura = [item.tipoSolicitacao || "", item.homologacaoDesvinculada ? 1 : 0, item.status, resumo.itensBase, resumo.resolvidos, resumo.anexos, tentativa].join("|");
+  useEffect(() => {
+    let cancel = false;
+    setCarregando(true);
+    (async () => {
+      const db = await getDb().catch(() => null);
+      let lista = [];
+      if (db) {
+        try {
+          const snap = await db.collection("homologacoes").get();
+          lista = snap.docs.map((d) => d.data());
+        } catch (e) {}
+      }
+      if (cancel) return;
+      setClientes(clientesHomologadosDe(lista));
+      if (item.tipoSolicitacao && !item.homologacaoDesvinculada) {
+        const r = await sincronizarLoteComHomologacao(item, companies, { usuario: currentUser?.nome });
+        if (!cancel) setReg(r.ok ? r.registro : lista.find((x) => x.id === homologacaoIdDoLote(item.id)) || null);
+      } else if (!cancel) {
+        setReg(null);
+      }
+      if (!cancel) setCarregando(false);
+    })();
+    return () => {
+      cancel = true;
+    };
+  }, [assinatura]);
+  function classificar(tipo) {
+    setErro(null);
+    if (tipo === "atualizacao") {
+      const origem = clientes.find((c) => c.id === clienteSel);
+      if (!origem) return setErro("Selecione o cliente já cadastrado.");
+      lotesDesvinculadosSessao.delete(item.id);
+      onUpdate({ tipoSolicitacao: "atualizacao", clienteOrigemId: origem.id, homologacaoId: homologacaoIdDoLote(item.id), homologacaoDesvinculada: false });
+    } else {
+      lotesDesvinculadosSessao.delete(item.id);
+      onUpdate({ tipoSolicitacao: "homologacao", homologacaoId: homologacaoIdDoLote(item.id), homologacaoDesvinculada: false });
+    }
+    logDocumentAction("classificou_solicitacao_lote", { cliente: item.cliente, tipo: LOTE_TIPOS_SOLICITACAO[tipo].label });
+  }
+  function registrarNovamente() {
+    lotesDesvinculadosSessao.delete(item.id);
+    onUpdate({ homologacaoDesvinculada: false });
+  }
+  const titulo = h("div", { className: "integ-card-head" }, h(UserPlus, { size: 15 }), h("span", null, "Acompanhamento em Homologação"));
+  let corpo;
+  if (!item.tipoSolicitacao) {
+    corpo = h(
+      "div",
+      null,
+      h("p", { className: "integ-card-text" }, "Esta solicitação foi criada antes da integração e ainda não está classificada. Classifique para acompanhá-la também na área de Homologação (as demais funções não mudam)."),
+      escolhendoAtu
+        ? h(
+            "div",
+            { className: "integ-card-row" },
+            h(
+              "select",
+              { value: clienteSel, onChange: (e) => setClienteSel(e.target.value), "aria-label": "Cliente já cadastrado" },
+              h("option", { value: "" }, clientes.length ? "Selecione o cliente já cadastrado..." : "Nenhum cliente com homologação cadastrada"),
+              clientes.map((c) => h("option", { key: c.id, value: c.id }, c.nome + " — " + (HOMOLOGACAO_STATUS_META[c.status]?.label || c.status))),
+            ),
+            h("button", { type: "button", className: "doc-download-btn", onClick: () => classificar("atualizacao") }, "Confirmar"),
+            h("button", { type: "button", className: "filters-clear-btn", style: { flex: "none" }, onClick: () => setEscolhendoAtu(false) }, "Cancelar"),
+          )
+        : h(
+            "div",
+            { className: "integ-card-row" },
+            h("button", { type: "button", className: "doc-view-btn", onClick: () => classificar("homologacao") }, "Classificar como Homologação"),
+            h("button", { type: "button", className: "doc-view-btn", onClick: () => setEscolhendoAtu(true) }, "Classificar como Atualização de Homologação"),
+          ),
+      erro && h("p", { className: "integ-card-erro" }, erro),
+    );
+  } else if (item.homologacaoDesvinculada) {
+    corpo = h(
+      "div",
+      null,
+      h("p", { className: "integ-card-text" }, "O registro desta solicitação na área de Homologação foi removido. Ela segue funcionando normalmente aqui."),
+      h("div", { className: "integ-card-row" }, h("button", { type: "button", className: "doc-view-btn", onClick: registrarNovamente }, "Registrar novamente em Homologação")),
+    );
+  } else if (reg) {
+    const aba = LOTE_TIPOS_SOLICITACAO[item.tipoSolicitacao].label;
+    corpo = h(
+      "div",
+      null,
+      h(
+        "div",
+        { className: "integ-card-line" },
+        h(LoteTipoTag, { tipo: item.tipoSolicitacao }),
+        h("span", { className: "integ-card-text" }, `Registrada na aba "${aba}" · status comercial:`),
+        h(HomologacaoStatusBadge, { status: reg.status }),
+        podeAbrir &&
+          h(
+            "button",
+            { type: "button", className: "link-btn integ-card-link", onClick: () => onAbrir && onAbrir(reg.id, reg.fluxo || item.tipoSolicitacao) },
+            "Abrir em Homologação ",
+            h(ChevronRight, { size: 13 }),
+          ),
+      ),
+      h("p", { className: "integ-card-hint" }, "O status comercial acompanha este envio automaticamente. Cancelamentos feitos na Homologação não alteram o envio em lote."),
+    );
+  } else if (carregando) {
+    corpo = h("p", { className: "integ-card-text" }, h(Loader2, { size: 13, className: "spin" }), " Verificando o vínculo com Homologação...");
+  } else {
+    corpo = h(
+      "div",
+      null,
+      h("p", { className: "integ-card-text" }, "Não foi possível confirmar o registro em Homologação agora."),
+      h("div", { className: "integ-card-row" }, h("button", { type: "button", className: "doc-view-btn", onClick: () => setTentativa((t) => t + 1) }, "Tentar novamente")),
+    );
+  }
+  return h("section", { className: "section-block integ-card" }, titulo, corpo);
+}
+/** HomologacaoLoteCard: no detalhe da Homologação — mostra o resumo do envio
+ *  em lote vinculado e leva até ele. */
+function HomologacaoLoteCard({ homolog, onAbrirLote, currentUser }) {
+  const h = React.createElement;
+  if (!homolog || !homolog.loteId) return null;
+  const r = homolog.loteResumo || {};
+  const podeAbrir = can(currentUser, "envioLote");
+  return h(
+    "section",
+    { className: "section-block integ-card" },
+    h("div", { className: "integ-card-head" }, h(FolderArchive, { size: 15 }), h("span", null, "Envio de Documentações em Lote vinculado")),
+    h(
+      "div",
+      { className: "integ-card-line" },
+      h("span", { className: "integ-card-text" }, "Status do envio:"),
+      h(LoteStatusBadge, { status: homolog.loteStatus || "pendente" }),
+      h(
+        "span",
+        { className: "integ-card-text" },
+        `${r.documentacoes ?? 0} documentação(ões) · ${r.resolvidos ?? 0} de ${r.itensBase ?? 0} item(ns) por base resolvido(s) · ${r.anexos ?? 0} arquivo(s) recebido(s)`,
+      ),
+      podeAbrir &&
+        h(
+          "button",
+          { type: "button", className: "link-btn integ-card-link", onClick: () => onAbrirLote && onAbrirLote(homolog.loteId) },
+          "Abrir solicitação em lote ",
+          h(ChevronRight, { size: 13 }),
+        ),
+    ),
+    h("p", { className: "integ-card-hint" }, "Documentos, pendências, ZIP e histórico documental ficam no envio em lote; o status desta homologação acompanha esse processo."),
+  );
 }
 /* =========================================================================
    HOMOLOGAÇÃO — acompanhamento do processo de homologação de novos
@@ -15064,7 +15420,9 @@ function HomologacaoEmailsCopia({ valor, onAdicionar, onRemover, texto, setTexto
                   "select",
                   { value: tipoAtualizacao, onChange: (e) => setTipoAtualizacao(e.target.value) },
                   h("option", { value: "" }, "Selecione..."),
-                  HOMOLOGACAO_TIPOS_ATUALIZACAO.map((t) => h("option", { key: t, value: t }, t)),
+                  homologacaoTiposComLegado([tipoAtualizacao]).map((t) =>
+                    h("option", { key: t, value: t }, t),
+                  ),
                 ),
               ),
             )
@@ -15508,6 +15866,7 @@ function HomologacaoEnvioDetalhe({ homolog: h, isAdmin, revelando, credRevelada,
   onNotify,
   onView,
   companies,
+  onAbrirLote,
 }) {
   const [senhaRevelada, setSenhaRevelada] = useState(false);
   const [credRevelada, setCredRevelada] = useState(null);
@@ -15945,6 +16304,11 @@ function HomologacaoEnvioDetalhe({ homolog: h, isAdmin, revelando, credRevelada,
         value: h.anexos?.length || 0,
       }),
     ),
+    /*#__PURE__*/ React.createElement(HomologacaoLoteCard, {
+      homolog: h,
+      onAbrirLote: onAbrirLote,
+      currentUser: currentUser,
+    }),
     /*#__PURE__*/ React.createElement(
       "section",
       { className: "section-block homolog-detail-card" },
@@ -16300,9 +16664,11 @@ function HomologacaoEnvioDetalhe({ homolog: h, isAdmin, revelando, credRevelada,
                   "div",
                   null,
                   ev.evento === "criada" &&
-                    `${ev.usuario} registrou esta homologação.`,
+                    (ev.origem === "envio_lote"
+                      ? `${ev.usuario} registrou esta solicitação pelo Envio de Documentações em Lote.`
+                      : `${ev.usuario} registrou esta homologação.`),
                   ev.evento === "status_alterado" &&
-                    `${ev.usuario} alterou o status de "${HOMOLOGACAO_STATUS_META[ev.de]?.label || ev.de}" para "${HOMOLOGACAO_STATUS_META[ev.para]?.label || ev.para}".`,
+                    `${ev.usuario} alterou o status de "${HOMOLOGACAO_STATUS_META[ev.de]?.label || ev.de}" para "${HOMOLOGACAO_STATUS_META[ev.para]?.label || ev.para}"${ev.origem === "envio_lote" ? " (automático, acompanhando o envio em lote)" : ""}.`,
                   ev.evento === "reaberta" &&
                     `${ev.usuario} reabriu a homologação (voltou para "${HOMOLOGACAO_STATUS_META[ev.para]?.label || ev.para}").`,
                   ev.evento === "credenciais_reveladas" &&
@@ -16344,7 +16710,7 @@ function HomologacaoEnvioDetalhe({ homolog: h, isAdmin, revelando, credRevelada,
  *  pelo campo `fluxo` (ver homologacaoFluxoDe): "Homologação" (novos
  *  clientes) e "Atualização de Homologação" (nova demanda documental de
  *  cliente já cadastrado). Indicadores, filtros e listagem de cada aba só
- *  enxergam os registros do próprio fluxo. */ function HomologacaoView({ currentUser, onNotify, onView, companies }) {
+ *  enxergam os registros do próprio fluxo. */ function HomologacaoView({ currentUser, onNotify, onView, companies, registroAlvo, onRegistroAlvoConsumido, onIrParaRegistro }) {
   const h = React.createElement;
   const [items, setItems] = useState([]);
   const [dbBacked, setDbBacked] = useState(false);
@@ -16364,6 +16730,21 @@ function HomologacaoEnvioDetalhe({ homolog: h, isAdmin, revelando, credRevelada,
   // sessão (_localFile/_localUrl) — a versão em "db" nunca carrega esses
   // campos (não são serializáveis nem devem ser compartilhados).
   const itemsMemoriaRef = useRef({});
+  // Abrir direto um registro (vindo do detalhe do Envio em Lote)
+  useEffect(() => {
+    if (!registroAlvo || registroAlvo.view !== "homologacao") return;
+    const alvo = items.find((it) => it.id === registroAlvo.id);
+    if (!alvo) {
+      if (dbBacked) {
+        onNotify?.("O registro de Homologação vinculado não foi encontrado.", "info");
+        onRegistroAlvoConsumido?.();
+      }
+      return;
+    }
+    setAba(homologacaoFluxoDe(alvo));
+    setSelectedId(alvo.id);
+    onRegistroAlvoConsumido?.();
+  }, [registroAlvo, items, dbBacked]);
   useEffect(() => {
     let unsub = null;
     let cancelled = false;
@@ -16453,6 +16834,7 @@ function HomologacaoEnvioDetalhe({ homolog: h, isAdmin, revelando, credRevelada,
     delete itemsMemoriaRef.current[id];
     delete homologSenhasSessao[id];
     if (item?.acessoPlataforma?.credenciaisProtegidas) homologCredenciaisApi.remover(id); // não deixa segredo órfão no cofre
+    if (item?.loteId) desvincularLoteDaHomologacao(item.loteId); // o envio em lote segue funcionando, sem recriar o registro sozinho
     setItems((prev) => prev.filter((it) => it.id !== id));
     setSelectedId(null);
     getDb()
@@ -16543,6 +16925,7 @@ function HomologacaoEnvioDetalhe({ homolog: h, isAdmin, revelando, credRevelada,
       onNotify: onNotify,
       onView: onView,
       companies: companies,
+      onAbrirLote: (loteId) => onIrParaRegistro?.("envio_lote", loteId),
     });
   }
   const ehAtu = aba === "atualizacao";
@@ -16742,7 +17125,7 @@ function HomologacaoEnvioDetalhe({ homolog: h, isAdmin, revelando, credRevelada,
                   onChange: (e) => setFiltro("tipo", e.target.value),
                 },
                 h("option", { value: "" }, "Todos"),
-                HOMOLOGACAO_TIPOS_ATUALIZACAO.map((t) =>
+                homologacaoTiposComLegado(itemsAba.map((it) => it.tipoAtualizacao)).map((t) =>
                   h("option", { key: t, value: t }, t),
                 ),
               ),
@@ -16817,7 +17200,13 @@ function HomologacaoEnvioDetalhe({ homolog: h, isAdmin, revelando, credRevelada,
                   isoDateToBR(it.dataSolicitacao.slice(0, 10)),
                 ),
                 h("td", null, it.consultor?.nome),
-                h("td", { className: "homolog-cell-cliente" }, it.cliente),
+                h(
+                  "td",
+                  { className: "homolog-cell-cliente" },
+                  it.cliente,
+                  it.loteId &&
+                    h("span", { className: "lote-origem-chip", title: "Registrada pelo Envio de Documentações em Lote" }, "Via envio em lote"),
+                ),
                 ehAtu && h("td", null, it.tipoAtualizacao || "—"),
                 h(
                   "td",
@@ -24418,7 +24807,11 @@ function LoteAnexoInlinePicker({ onFile, disabled, label }) {
  *  2026-09-28 ("não tem muito uso pra ele") — continua disponível dentro da
  *  solicitação já criada, em EnvioLoteDetailView ("+ Adicionar
  *  documentação a esta solicitação"). */
-function EnvioLoteFormModal({ companies, onClose, onCreate }) {
+function EnvioLoteFormModal({ companies, onClose, onCreate, clientesCadastrados = [] }) {
+  // tipoSolicitacao (2026-10-20): obrigatório — define em qual aba da
+  // Homologação o acompanhamento comercial é registrado automaticamente.
+  const [tipoSolicitacao, setTipoSolicitacao] = useState("");
+  const [clienteOrigemId, setClienteOrigemId] = useState("");
   const [clienteNome, setClienteNome] = useState("");
   const [baseIds, setBaseIds] = useState([]);
   const [modoEntrada, setModoEntrada] = useState("texto");
@@ -24445,7 +24838,17 @@ function EnvioLoteFormModal({ companies, onClose, onCreate }) {
   async function handleSubmit(e) {
     e.preventDefault();
     setErro(null);
-    if (!clienteNome.trim()) {
+    if (!tipoSolicitacao) {
+      setErro("Selecione o tipo de solicitação: Homologação ou Atualização de Homologação.");
+      return;
+    }
+    const origemSel = tipoSolicitacao === "atualizacao" ? clientesCadastrados.find((c) => c.id === clienteOrigemId) : null;
+    if (tipoSolicitacao === "atualizacao" && !origemSel) {
+      setErro("Selecione o cliente já cadastrado.");
+      return;
+    }
+    const clienteFinal = origemSel ? origemSel.nome : clienteNome.trim();
+    if (!clienteFinal) {
       setErro("Informe o nome do cliente.");
       return;
     }
@@ -24490,7 +24893,9 @@ function EnvioLoteFormModal({ companies, onClose, onCreate }) {
     // mostrar o pedido real do cliente, sem depender da interpretação do
     // portal.
     onCreate({
-      cliente: clienteNome.trim(),
+      cliente: clienteFinal,
+      tipoSolicitacao,
+      clienteOrigemId: origemSel ? origemSel.id : null,
       baseIds,
       itens: itensDoChecklist,
       textoSolicitacaoOriginal: texto,
@@ -24541,22 +24946,76 @@ function EnvioLoteFormModal({ companies, onClose, onCreate }) {
         React.createElement(
           "div",
           { className: "homolog-field" },
-          React.createElement("label", null, "Nome do cliente"),
+          React.createElement("label", null, "Tipo de solicitação"),
           React.createElement(
-            "p",
-            { className: "homolog-bases-hint" },
-            "Usado para nomear a pasta e o ZIP final: ",
-            React.createElement("strong", null, "Grupoprima & [Nome do Cliente] - Documentações"),
-            ".",
+            "div",
+            { className: "lote-tipo-grid", role: "radiogroup", "aria-label": "Tipo de solicitação" },
+            Object.entries(LOTE_TIPOS_SOLICITACAO).map(([k, m]) =>
+              React.createElement(
+                "button",
+                {
+                  key: k,
+                  type: "button",
+                  role: "radio",
+                  "aria-checked": tipoSolicitacao === k,
+                  className: "lote-tipo-card" + (tipoSolicitacao === k ? " active" : ""),
+                  onClick: () => {
+                    setTipoSolicitacao(k);
+                    setErro(null);
+                  },
+                },
+                React.createElement("strong", null, m.label),
+                React.createElement("span", null, m.sub),
+              ),
+            ),
           ),
-          React.createElement("input", {
-            type: "text",
-            value: clienteNome,
-            onChange: (e) => setClienteNome(e.target.value),
-            placeholder: "Razão social ou nome fantasia do cliente",
-            autoFocus: true,
-          }),
         ),
+        tipoSolicitacao === "atualizacao"
+          ? React.createElement(
+              "div",
+              { className: "homolog-field" },
+              React.createElement("label", null, "Cliente já cadastrado"),
+              clientesCadastrados.length === 0
+                ? React.createElement(
+                    "p",
+                    { className: "homolog-bases-hint homolog-dup-hint" },
+                    "Ainda não há clientes com homologação cadastrada. Escolha o tipo \u201cHomologação\u201d para o primeiro registro.",
+                  )
+                : React.createElement(
+                    "select",
+                    { value: clienteOrigemId, onChange: (e) => setClienteOrigemId(e.target.value) },
+                    React.createElement("option", { value: "" }, "Selecione o cliente..."),
+                    clientesCadastrados.map((c) =>
+                      React.createElement("option", { key: c.id, value: c.id }, c.nome + " — " + (HOMOLOGACAO_STATUS_META[c.status]?.label || c.status)),
+                    ),
+                  ),
+            )
+          : React.createElement(
+              "div",
+              { className: "homolog-field" },
+              React.createElement("label", null, "Nome do cliente"),
+              React.createElement(
+                "p",
+                { className: "homolog-bases-hint" },
+                "Usado para nomear a pasta e o ZIP final: ",
+                React.createElement("strong", null, "Grupoprima & [Nome do Cliente] - Documentações"),
+                ".",
+              ),
+              React.createElement("input", {
+                type: "text",
+                value: clienteNome,
+                onChange: (e) => setClienteNome(e.target.value),
+                placeholder: "Razão social ou nome fantasia do cliente",
+              }),
+              tipoSolicitacao === "homologacao" &&
+                clienteNome.trim() &&
+                clientesCadastrados.some((c) => normalize(c.nome) === normalize(clienteNome)) &&
+                React.createElement(
+                  "p",
+                  { className: "homolog-bases-hint homolog-dup-hint" },
+                  "Este cliente já está cadastrado. Para novas documentações ou atualizações dele, escolha \u201cAtualização de Homologação\u201d.",
+                ),
+            ),
         React.createElement(
           "div",
           { className: "homolog-field" },
@@ -24809,7 +25268,7 @@ function LoteItemCard({ it, companiesPorId, anexosRecebidos, enviandoAnexoChave,
  *  (uma linha por item, expandida por base), compilado da documentação
  *  (contadores derivados ao vivo), etapas do último processamento,
  *  histórico de versões do ZIP e ação de processar/reprocessar. */
-function EnvioLoteDetailView({ item, companies, onBack, onNotify, onView, onUpdate, onDelete, currentUser }) {
+function EnvioLoteDetailView({ item, companies, onBack, onNotify, onView, onUpdate, onDelete, currentUser, onAbrirHomologacao }) {
   const [processando, setProcessando] = useState(false);
   const [novoItemNome, setNovoItemNome] = useState("");
   const [enviandoAnexoChave, setEnviandoAnexoChave] = useState(null);
@@ -25091,7 +25550,12 @@ function EnvioLoteDetailView({ item, companies, onBack, onNotify, onView, onUpda
       React.createElement(
         "div",
         { className: "company-header-top" },
-        React.createElement("span", { className: "company-header-tag" }, "ENVIO DE DOCUMENTAÇÕES EM LOTE"),
+        React.createElement(
+          "div",
+          { className: "integ-header-tags" },
+          React.createElement("span", { className: "company-header-tag" }, "ENVIO DE DOCUMENTAÇÕES EM LOTE"),
+          item.tipoSolicitacao && React.createElement(LoteTipoTag, { tipo: item.tipoSolicitacao }),
+        ),
         React.createElement(LoteStatusBadge, { status: item.status }),
       ),
       React.createElement("h1", null, item.cliente),
@@ -25148,7 +25612,7 @@ function EnvioLoteDetailView({ item, companies, onBack, onNotify, onView, onUpda
           React.createElement(
             "span",
             null,
-            `Excluir a solicitação de "${item.cliente}"? Isso remove o registro definitivamente (checklist, anexos recebidos e histórico de processamento) e não pode ser desfeito. Os arquivos já enviados ao Drive não são apagados.`,
+            `Excluir a solicitação de "${item.cliente}"? Isso remove o registro definitivamente (checklist, anexos recebidos e histórico de processamento)${item.tipoSolicitacao && !item.homologacaoDesvinculada ? " e também o acompanhamento vinculado na área de Homologação" : ""} e não pode ser desfeito. Os arquivos já enviados ao Drive não são apagados.`,
           ),
           React.createElement(
             "div",
@@ -25175,6 +25639,13 @@ function EnvioLoteDetailView({ item, companies, onBack, onNotify, onView, onUpda
           ),
         ),
     ),
+    React.createElement(LoteHomologacaoCard, {
+      item: item,
+      companies: companies,
+      onUpdate: persistPatch,
+      onAbrir: onAbrirHomologacao,
+      currentUser: currentUser,
+    }),
     // Modal "Ver solicitação original" (pedido explícito da Iasmin,
     // 2026-09-28) — mesmo padrão visual dos outros modais do portal
     // (docs-modal-overlay/docs-modal). Só mostra o texto BRUTO guardado em
@@ -25638,7 +26109,7 @@ function EnvioLoteDetailView({ item, companies, onBack, onNotify, onView, onUpda
  *  (uploads são aguardados ANTES de entrar no registro), então, ao
  *  contrário de ClientAnalysisView, não precisa de uma cópia "em memória"
  *  à parte para sobreviver ao onSnapshot. */
-function EnvioLoteView({ currentUser, onNotify, onView, companies }) {
+function EnvioLoteView({ currentUser, onNotify, onView, companies, registroAlvo, onRegistroAlvoConsumido, onIrParaRegistro }) {
   const [items, setItems] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
   const [modalOpen, setModalOpen] = useState(false);
@@ -25650,11 +26121,43 @@ function EnvioLoteView({ currentUser, onNotify, onView, companies }) {
   const [filtroInicio, setFiltroInicio] = useState("");
   const [filtroFim, setFiltroFim] = useState("");
   const [pagina, setPagina] = useState(1);
+  const [listaCarregada, setListaCarregada] = useState(false);
+  const [clientesCadastrados, setClientesCadastrados] = useState([]);
+  const sincAssinaturaRef = useRef({});
   const companiesPorId = useMemo(() => new Map(companies.map((c) => [c.id, c])), [companies]);
 
   useEffect(() => {
     setPagina(1);
   }, [filtroCliente, filtroUsuario, filtroStatus, filtroBase, filtroInicio, filtroFim]);
+  // Clientes já cadastrados em Homologação (para "Atualização de Homologação")
+  useEffect(() => {
+    if (!modalOpen) return;
+    let cancel = false;
+    getDb().then(async (db) => {
+      if (!db) return;
+      try {
+        const snap = await db.collection("homologacoes").get();
+        if (!cancel) setClientesCadastrados(clientesHomologadosDe(snap.docs.map((d) => d.data())));
+      } catch (e) {}
+    });
+    return () => {
+      cancel = true;
+    };
+  }, [modalOpen]);
+  // Abrir direto uma solicitação (vindo do detalhe da Homologação)
+  useEffect(() => {
+    if (!registroAlvo || registroAlvo.view !== "envio_lote") return;
+    const alvo = items.find((it) => it.id === registroAlvo.id);
+    if (!alvo) {
+      if (listaCarregada) {
+        onNotify?.("A solicitação em lote vinculada não foi encontrada.", "info");
+        onRegistroAlvoConsumido?.();
+      }
+      return;
+    }
+    setSelectedId(alvo.id);
+    onRegistroAlvoConsumido?.();
+  }, [registroAlvo, items, listaCarregada]);
 
   useEffect(() => {
     let unsub = null;
@@ -25665,6 +26168,7 @@ function EnvioLoteView({ currentUser, onNotify, onView, companies }) {
       unsub = col.onSnapshot(
         (snap) => {
           if (cancelled) return;
+          setListaCarregada(true);
           setItems(snap.docs.map((d) => d.data()));
         },
         () => {},
@@ -25676,7 +26180,21 @@ function EnvioLoteView({ currentUser, onNotify, onView, companies }) {
     };
   }, []);
 
-  function persist(item) {
+  /** agendarSync: mantém o registro de Homologação vinculado em dia. Só
+   *  dispara quando algo relevante mudou (tipo, status, contagem de itens
+   *  resolvidos ou anexos); a criação do registro é idempotente (id
+   *  determinístico), então reabrir/regravar nunca duplica. */
+  function agendarSync(item, onDone) {
+    if (!item || !item.tipoSolicitacao || item.homologacaoDesvinculada) return;
+    const r = resumoDoLote(item);
+    const sig = [item.tipoSolicitacao, item.status, r.itensBase, r.resolvidos, r.anexos].join("|");
+    if (!onDone && sincAssinaturaRef.current[item.id] === sig) return;
+    sincAssinaturaRef.current[item.id] = sig;
+    sincronizarLoteComHomologacao(item, companies, { usuario: currentUser?.nome }).then((res) => {
+      if (onDone) onDone(res);
+    });
+  }
+  function persist(item, onSyncDone) {
     setItems((prev) => {
       const exists = prev.some((it) => it.id === item.id);
       return exists ? prev.map((it) => (it.id === item.id ? item : it)) : [item, ...prev];
@@ -25687,6 +26205,7 @@ function EnvioLoteView({ currentUser, onNotify, onView, companies }) {
         return db.collection("batch_document_submissions").doc(item.id).set(item).catch(() => {});
       })
       .catch(() => {});
+    agendarSync(item, onSyncDone);
     return item;
   }
   function handleUpdate(id, patch) {
@@ -25711,6 +26230,10 @@ function EnvioLoteView({ currentUser, onNotify, onView, companies }) {
         return db.collection("batch_document_submissions").doc(id).delete().catch(() => {});
       })
       .catch(() => {});
+    if (item?.tipoSolicitacao) {
+      excluirHomologacaoDoLote(id);
+      logDocumentAction("excluiu_homologacao_vinculada_lote", { cliente: item.cliente });
+    }
     logDocumentAction("excluiu_solicitacao_lote", {
       cliente: item?.cliente || "(sem cliente)",
     });
@@ -25719,7 +26242,7 @@ function EnvioLoteView({ currentUser, onNotify, onView, companies }) {
       "info",
     );
   }
-  function handleCreate({ cliente, baseIds, itens, textoSolicitacaoOriginal, arquivoSolicitacaoOriginalNome }) {
+  function handleCreate({ cliente, tipoSolicitacao, clienteOrigemId, baseIds, itens, textoSolicitacaoOriginal, arquivoSolicitacaoOriginalNome }) {
     const id = generateLoteId();
     const agora = new Date().toISOString();
     const documentacoesSolicitadas = itens.map((it) => {
@@ -25761,12 +26284,27 @@ function EnvioLoteView({ currentUser, onNotify, onView, companies }) {
       // existir simplesmente não tem este campo — tratado à parte lá.
       textoSolicitacaoOriginal: textoSolicitacaoOriginal || "",
       arquivoSolicitacaoOriginalNome: arquivoSolicitacaoOriginalNome || null,
+      // Integração com Homologação (2026-10-20): `tipoSolicitacao` decide a
+      // aba; `homologacaoId` é o id determinístico do registro vinculado.
+      tipoSolicitacao,
+      clienteOrigemId: clienteOrigemId || null,
+      homologacaoId: homologacaoIdDoLote(id),
     };
-    persist(item);
+    persist(item, (res) => {
+      if (res && res.ok) {
+        onNotify?.(
+          `Acompanhamento registrado também na aba "${LOTE_TIPOS_SOLICITACAO[tipoSolicitacao].label}" de Homologação.`,
+          "info",
+        );
+      } else {
+        onNotify?.("A solicitação foi criada, mas o registro em Homologação não pôde ser confirmado agora. Abra a solicitação para tentar novamente.", "info");
+      }
+    });
     setModalOpen(false);
     setSelectedId(id);
     logDocumentAction("criou_solicitacao_lote", {
       cliente,
+      tipo: LOTE_TIPOS_SOLICITACAO[tipoSolicitacao]?.label,
       bases: baseIds.map((bId) => companyLabelFor(companiesPorId.get(bId))),
       quantidade: documentacoesSolicitadas.length,
     });
@@ -25824,6 +26362,7 @@ function EnvioLoteView({ currentUser, onNotify, onView, companies }) {
       onUpdate: (patch) => handleUpdate(selected.id, patch),
       onDelete: handleDelete,
       currentUser: currentUser,
+      onAbrirHomologacao: (hid, fluxo) => onIrParaRegistro?.("homologacao", hid, fluxo),
     });
   }
   function baseLabelFilter(c) {
@@ -25980,7 +26519,7 @@ function EnvioLoteView({ currentUser, onNotify, onView, companies }) {
               { key: it.id, onClick: () => setSelectedId(it.id), style: { cursor: "pointer" } },
               React.createElement("td", { className: "mono" }, isoDateToBR(it.criadoEm.slice(0, 10))),
               React.createElement("td", null, it.usuarioSolicitante?.nome),
-              React.createElement("td", null, it.cliente),
+              React.createElement("td", null, it.cliente, it.tipoSolicitacao && React.createElement(LoteTipoTag, { tipo: it.tipoSolicitacao })),
               React.createElement("td", null, (it.baseIds || []).map((bId) => companyLabelFor(companiesPorId.get(bId))).filter(Boolean).join(", ")),
               React.createElement("td", null, (it.documentacoesSolicitadas || []).length),
               React.createElement("td", null, React.createElement(LoteStatusBadge, { status: it.status })),
@@ -26009,6 +26548,13 @@ function EnvioLoteView({ currentUser, onNotify, onView, companies }) {
             React.createElement("span", { className: "company-mini-tag" }, it.cliente),
             React.createElement(LoteStatusBadge, { status: it.status }),
           ),
+          it.tipoSolicitacao &&
+            React.createElement(
+              "div",
+              { className: "company-card-mobile-row" },
+              React.createElement("span", null, "Tipo"),
+              React.createElement("span", null, LOTE_TIPOS_SOLICITACAO[it.tipoSolicitacao]?.label),
+            ),
           React.createElement(
             "div",
             { className: "company-card-mobile-row" },
@@ -26087,6 +26633,7 @@ function EnvioLoteView({ currentUser, onNotify, onView, companies }) {
       ),
     modalOpen &&
       React.createElement(EnvioLoteFormModal, {
+        clientesCadastrados: clientesCadastrados,
         companies: companies,
         onClose: () => setModalOpen(false),
         onCreate: handleCreate,
@@ -32039,6 +32586,13 @@ function GrupoprimaPortal() {
     savePortalTheme(choice);
   }
   const [view, setView] = useState("dashboard");
+  // registroAlvo: navegação direta entre Envio em Lote e Homologação
+  // ({ view, id, fluxo }) — consumido pela view de destino ao abrir o registro.
+  const [registroAlvo, setRegistroAlvo] = useState(null);
+  function irParaRegistro(viewDestino, id, fluxo) {
+    setRegistroAlvo({ view: viewDestino, id, fluxo });
+    setView(viewDestino);
+  }
   // Link direto "?viagem=ID" (e-mail de nova solicitação): depois do login do
   // portal, abre o módulo Viagens e Despesas já na viagem. O módulo ainda
   // exige o login dele; nada é aberto sem o servidor autorizar.
@@ -32453,6 +33007,37 @@ function GrupoprimaPortal() {
         .homolog-filters-bar { margin: 0 0 18px; }
         .homolog-table-wrap .company-table td { vertical-align: middle; }
         .homolog-cell-cliente { font-weight: 600; }
+        .lote-origem-chip { display: inline-block; margin-left: 8px; padding: 1px 8px; border-radius: 999px; font-size: 10.5px; font-weight: 700; color: var(--carvao); background: rgba(107,254,156,0.18); border: 1px solid rgba(107,254,156,0.45); vertical-align: middle; white-space: nowrap; }
+        .lote-tipo-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+        .lote-tipo-card { position: relative; display: flex; flex-direction: column; gap: 2px; text-align: left; padding: 11px 14px 11px 40px; border: 1.5px solid var(--cinza-frio); border-radius: 10px; background: var(--card-bg); color: var(--texto); cursor: pointer; font-family: inherit; transition: border-color 0.15s, background 0.15s; }
+        .lote-tipo-card::before { content: ""; position: absolute; left: 14px; top: 50%; width: 14px; height: 14px; margin-top: -7px; border-radius: 50%; border: 2px solid var(--cinza-frio); box-sizing: border-box; }
+        .lote-tipo-card strong { font-size: 13px; font-weight: 700; }
+        .lote-tipo-card span { font-size: 11.5px; color: var(--carvao); }
+        .lote-tipo-card:hover { border-color: var(--azul-2); }
+        .lote-tipo-card.active { border-color: var(--texto); background: rgba(107,254,156,0.18); }
+        .lote-tipo-card.active::before { border-color: var(--texto); background: var(--texto); box-shadow: inset 0 0 0 2.5px var(--card-bg); }
+        .lote-tipo-card:focus-visible { outline: 2px solid var(--foco); outline-offset: 2px; }
+        .portal-root[data-theme="dark"] .lote-tipo-card.active { background: rgba(107,254,156,0.20); }
+        .lote-tipo-tag { display: inline-block; margin-left: 8px; padding: 1px 8px; border-radius: 999px; font-size: 10.5px; font-weight: 700; color: var(--carvao); border: 1px solid var(--cinza-frio); vertical-align: middle; white-space: nowrap; }
+        .lote-tipo-tag-atualizacao { background: rgba(107,254,156,0.18); border-color: rgba(107,254,156,0.45); }
+        .company-header-top .lote-tipo-tag { margin-left: 0; }
+        .integ-card { margin: 16px 0; padding: 14px 16px; border: 1px solid var(--cinza-frio); border-radius: 12px; background: var(--card-bg); }
+        .integ-header-tags { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+        .integ-header-tags .lote-tipo-tag { margin-left: 0; }
+        .integ-card-head { display: flex; align-items: center; gap: 8px; font-size: 12.5px; font-weight: 800; color: var(--texto); text-transform: uppercase; letter-spacing: 0.03em; margin-bottom: 8px; }
+        .integ-card-line { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; }
+        .integ-card-line .lote-tipo-tag { margin-left: 0; }
+        .integ-card-text { font-size: 13px; color: var(--texto); margin: 0 0 8px; display: inline-flex; align-items: center; gap: 6px; }
+        .integ-card-line .integ-card-text { margin: 0; }
+        .integ-card-hint { font-size: 11.5px; color: var(--carvao); margin: 8px 0 0; line-height: 1.45; }
+        .integ-card-erro { font-size: 12px; color: #C0392B; margin: 6px 0 0; }
+        .integ-card-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+        .integ-card-row select { min-width: 220px; flex: 1 1 220px; }
+        .integ-card-link { display: inline-flex; align-items: center; margin-left: auto; font-weight: 700; }
+        @media (max-width: 560px) {
+          .lote-tipo-grid { grid-template-columns: 1fr; }
+          .integ-card-link { margin-left: 0; }
+        }
         .homolog-link { display: inline-flex; align-items: center; gap: 6px; color: var(--texto); font-weight: 700; font-size: 12.5px; text-decoration: underline; text-underline-offset: 3px; line-height: 1; }
         .homolog-link:hover { text-decoration-thickness: 2px; }
         .homolog-link:focus-visible { outline: 2px solid var(--foco); outline-offset: 3px; border-radius: 3px; }
@@ -34120,6 +34705,9 @@ function GrupoprimaPortal() {
             onNotify: notify,
             onView: setViewer,
             companies: data.companies,
+            registroAlvo: registroAlvo,
+            onRegistroAlvoConsumido: () => setRegistroAlvo(null),
+            onIrParaRegistro: irParaRegistro,
           }),
         view === "envio_lote" &&
           /*#__PURE__*/ React.createElement(EnvioLoteView, {
@@ -34127,6 +34715,9 @@ function GrupoprimaPortal() {
             onNotify: notify,
             onView: setViewer,
             companies: data.companies,
+            registroAlvo: registroAlvo,
+            onRegistroAlvoConsumido: () => setRegistroAlvo(null),
+            onIrParaRegistro: irParaRegistro,
           }),
         view === "analise_clausulas" &&
           /*#__PURE__*/ React.createElement(ClientAnalysisView, {
