@@ -3322,6 +3322,35 @@ const auditLog = [];
 function setAuditSessionUser(nome) {
   currentSessionUser = nome || CURRENT_USER_PLACEHOLDER;
 }
+/* VISIBILIDADE POR CONSULTOR (2026-10-20): Envio de Documentações em Lote,
+   Homologação e Atualização de Homologação — quem não é Administrador só vê
+   as PRÓPRIAS solicitações/registros; só o perfil "admin" enxerga os de todos
+   os consultores. Identificação do dono: e-mail (sem diferenciar maiúsculas)
+   quando o registro tem e-mail; senão, o nome. Sem usuário logado, nada é
+   visível (falha fechada).
+   ATENÇÃO: o login do portal é feito no navegador e o backend identifica o
+   portal por uma chave única (X-Portal-Key), não por usuário — então este
+   filtro organiza o que cada pessoa VÊ na interface, mas não é uma barreira
+   de segurança no servidor. */
+let portalUsuarioAtual = null;
+function definirUsuarioPortalAtual(u) {
+  portalUsuarioAtual = u || null;
+}
+function usuarioEhAdminPortal(u) {
+  return !!u && u.perfil === "admin";
+}
+function registroPertenceAoUsuario(responsavel, u) {
+  if (!u || !responsavel) return false;
+  const emR = String(responsavel.email || "").trim().toLowerCase();
+  const emU = String(u.email || "").trim().toLowerCase();
+  if (emR && emU) return emR === emU;
+  const nmR = String(responsavel.nome || "").trim().toLowerCase();
+  const nmU = String(u.nome || "").trim().toLowerCase();
+  return !!nmR && nmR === nmU;
+}
+function registroVisivelAoUsuario(responsavel, u) {
+  return usuarioEhAdminPortal(u) || registroPertenceAoUsuario(responsavel, u);
+}
 const AUDIT_ACTION_LABELS = {
   login: "Login",
   logout: "Logout",
@@ -6866,7 +6895,10 @@ function answerQuery(query, companies, totals) {
     // já cadastrados têm aba própria e não entram nas contagens/consultas
     // do assistente sobre homologações (registros antigos, sem `fluxo`,
     // sempre foram novos clientes).
-    return snap.docs.map((d) => d.data()).filter((it) => it && it.fluxo !== "atualizacao");
+    return snap.docs
+      .map((d) => d.data())
+      .filter((it) => it && it.fluxo !== "atualizacao")
+      .filter((it) => registroVisivelAoUsuario(it.consultor, portalUsuarioAtual)); // consultor só conversa sobre as próprias
   } catch {
     return null;
   }
@@ -8638,10 +8670,8 @@ function DashboardView({
           label: "Total de documentos",
           value: totalDocumentos,
           sub: `${semVencimento} sem vencimento aplicável`,
-          onClick:
-            totalDocumentos > 0
-              ? () => goToKpi("total", "Total de documentos")
-              : undefined,
+          // Pedido da Iasmin (2026-10-20): clicar em "Total de documentos" abre a aba Empresas.
+          onClick: onGoCompanies,
         }),
         /*#__PURE__*/ React.createElement(KpiCard, {
           icon: Clock,
@@ -14367,7 +14397,7 @@ function LoteHomologacaoCard({ item, companies, onUpdate, onAbrir, currentUser }
         } catch (e) {}
       }
       if (cancel) return;
-      setClientes(clientesHomologadosDe(lista));
+      setClientes(clientesHomologadosDe(lista.filter((d) => registroVisivelAoUsuario(d.consultor, currentUser))));
       if (loteGeraHomologacao(item.tipoSolicitacao) && !item.homologacaoDesvinculada) {
         const r = await sincronizarLoteComHomologacao(item, companies, { usuario: currentUser?.nome });
         if (!cancel) setReg(r.ok ? r.registro : lista.find((x) => x.id === homologacaoIdDoLote(item.id)) || null);
@@ -16846,11 +16876,13 @@ function HomologacaoEnvioDetalhe({ homolog: h, isAdmin, revelando, credRevelada,
           if (cancelled) return;
           setDbBacked(true);
           setItems(
-            snap.docs.map((d) => {
-              const data = d.data();
-              const mem = itemsMemoriaRef.current[data.id];
-              return mem ? { ...data, anexos: mem.anexos } : data;
-            }),
+            snap.docs
+              .map((d) => {
+                const data = d.data();
+                const mem = itemsMemoriaRef.current[data.id];
+                return mem ? { ...data, anexos: mem.anexos } : data;
+              })
+              .filter((data) => registroVisivelAoUsuario(data.consultor, currentUser)), // consultor só vê os próprios
           );
         },
         () => {},
@@ -16860,7 +16892,7 @@ function HomologacaoEnvioDetalhe({ homolog: h, isAdmin, revelando, credRevelada,
       cancelled = true;
       if (unsub) unsub();
     };
-  }, []);
+  }, [currentUser && currentUser.email, currentUser && currentUser.perfil]);
   function persist(item) {
     itemsMemoriaRef.current[item.id] = item;
     setItems((prev) => {
@@ -17043,7 +17075,9 @@ function HomologacaoEnvioDetalhe({ homolog: h, isAdmin, revelando, credRevelada,
         h(
           "p",
           { className: "lede" },
-          "Novos clientes e atualizações documentais de clientes já cadastrados, em um só lugar.",
+          usuarioEhAdminPortal(currentUser)
+            ? "Novos clientes e atualizações documentais de clientes já cadastrados, em um só lugar."
+            : "Novos clientes e atualizações documentais de clientes já cadastrados, em um só lugar. Você vê apenas as suas solicitações.",
         ),
       ),
     ),
@@ -17173,20 +17207,21 @@ function HomologacaoEnvioDetalhe({ homolog: h, isAdmin, revelando, credRevelada,
               onChange: (e) => setFiltro("cliente", e.target.value),
             }),
           ),
-          h(
-            "label",
-            { className: "filter-field" },
-            h("span", null, "Consultor"),
+          usuarioEhAdminPortal(currentUser) &&
             h(
-              "select",
-              {
-                value: filtros.consultor,
-                onChange: (e) => setFiltro("consultor", e.target.value),
-              },
-              h("option", { value: "" }, "Todos"),
-              consultores.map((c) => h("option", { key: c, value: c }, c)),
+              "label",
+              { className: "filter-field" },
+              h("span", null, "Consultor"),
+              h(
+                "select",
+                {
+                  value: filtros.consultor,
+                  onChange: (e) => setFiltro("consultor", e.target.value),
+                },
+                h("option", { value: "" }, "Todos"),
+                consultores.map((c) => h("option", { key: c, value: c }, c)),
+              ),
             ),
-          ),
           h(
             "label",
             { className: "filter-field" },
@@ -26497,7 +26532,10 @@ function EnvioLoteView({ currentUser, onNotify, onView, companies, registroAlvo,
       if (!db) return;
       try {
         const snap = await db.collection("homologacoes").get();
-        if (!cancel) setClientesCadastrados(clientesHomologadosDe(snap.docs.map((d) => d.data())));
+        if (!cancel)
+          setClientesCadastrados(
+            clientesHomologadosDe(snap.docs.map((d) => d.data()).filter((d) => registroVisivelAoUsuario(d.consultor, currentUser))),
+          );
       } catch (e) {}
     });
     return () => {
@@ -26529,7 +26567,7 @@ function EnvioLoteView({ currentUser, onNotify, onView, companies, registroAlvo,
         (snap) => {
           if (cancelled) return;
           setListaCarregada(true);
-          setItems(snap.docs.map((d) => d.data()));
+          setItems(snap.docs.map((d) => d.data()).filter((d) => registroVisivelAoUsuario(d.usuarioSolicitante, currentUser))); // consultor só vê as próprias
         },
         () => {},
       );
@@ -26538,7 +26576,7 @@ function EnvioLoteView({ currentUser, onNotify, onView, companies, registroAlvo,
       cancelled = true;
       if (unsub) unsub();
     };
-  }, []);
+  }, [currentUser && currentUser.email, currentUser && currentUser.perfil]);
 
   /** agendarSync: mantém o registro de Homologação vinculado em dia. Só
    *  dispara quando algo relevante mudou (tipo, status, contagem de itens
@@ -26813,17 +26851,18 @@ function EnvioLoteView({ currentUser, onNotify, onView, companies, registroAlvo,
             onChange: (e) => setFiltroCliente(e.target.value),
           }),
         ),
-        React.createElement(
-          "label",
-          { className: "filter-field" },
-          React.createElement("span", null, "Usuário"),
+        usuarioEhAdminPortal(currentUser) &&
           React.createElement(
-            "select",
-            { value: filtroUsuario, onChange: (e) => setFiltroUsuario(e.target.value) },
-            React.createElement("option", { value: "" }, "Todos"),
-            usuarios.map((u) => React.createElement("option", { key: u, value: u }, u)),
+            "label",
+            { className: "filter-field" },
+            React.createElement("span", null, "Usuário"),
+            React.createElement(
+              "select",
+              { value: filtroUsuario, onChange: (e) => setFiltroUsuario(e.target.value) },
+              React.createElement("option", { value: "" }, "Todos"),
+              usuarios.map((u) => React.createElement("option", { key: u, value: u }, u)),
+            ),
           ),
-        ),
         React.createElement(
           "label",
           { className: "filter-field" },
@@ -31045,46 +31084,27 @@ class VgErro extends Error {
   }
 }
 let vgSessao = { idToken: null, expira: 0, refreshToken: null };
-/* "Manter conectado neste computador" (2026-10-07, pedido da Iasmin: o
-   segundo login do módulo era "perda de tempo"): o refresh token passa a
-   ficar no localStorage (um login por computador) — a menos que a pessoa
-   desmarque a opção, caso em que fica só na aba (sessionStorage). Fica
-   amarrado ao e-mail do usuário do portal que fez o login: se outra pessoa
-   entrar no portal neste computador, a sessão guardada NÃO é reaproveitada
-   (ver vgRestaurarSessao). Sair do portal ou "Sair do módulo" apaga tudo. */
-const VG_LEMBRAR_KEY = "vg_lembrar_v1";
+/* ENTRADA AUTOMÁTICA (2026-10-20, pedido da Iasmin: "retirar 100% o segundo
+   login em Viagens e Despesas"): não existe mais tela de e-mail/senha neste
+   módulo. A identidade é a do login do PORTAL: o navegador pede ao backend
+   (POST /api/viagens/sessao-portal, protegido pela chave do portal) um custom
+   token do Firebase para o e-mail do usuário logado e o troca por um ID token
+   normal. O resto do módulo (token verificado no servidor, perfil lido do
+   banco, autorização viagem por viagem) segue igual. Nada de senha ou token é
+   guardado no navegador: a cada abertura do portal a sessão é refeita sozinha. */
 let vgDonoPortal = "";
+let vgEntrando = null;
 function vgNormEmail(e) { return String(e || "").trim().toLowerCase(); }
-function vgLerGuardado() {
-  for (const st of [() => localStorage, () => sessionStorage]) {
-    try {
-      const raw = st().getItem(VG_SESSION_KEY);
-      if (!raw) continue;
-      if (raw.charAt(0) === "{") { const o = JSON.parse(raw); if (o && o.rt) return { rt: o.rt, dono: vgNormEmail(o.dono) }; }
-      else return { rt: raw, dono: "" };
-    } catch (e) {}
-  }
-  return null;
-}
-function vgGuardarRefresh(rt, lembrar) {
-  try { sessionStorage.removeItem(VG_SESSION_KEY); } catch (e) {}
-  try { localStorage.removeItem(VG_SESSION_KEY); } catch (e) {}
-  if (!rt) return;
-  let usarLocal = true;
-  try {
-    if (lembrar === undefined) usarLocal = localStorage.getItem(VG_LEMBRAR_KEY) !== "0";
-    else { usarLocal = !!lembrar; localStorage.setItem(VG_LEMBRAR_KEY, usarLocal ? "1" : "0"); }
-  } catch (e) {}
-  const valor = JSON.stringify({ rt, dono: vgDonoPortal });
-  try { (usarLocal ? localStorage : sessionStorage).setItem(VG_SESSION_KEY, valor); } catch (e) {}
-}
 function vgTemSessao() {
   return !!vgSessao.refreshToken;
 }
 function vgSair() {
   vgSessao = { idToken: null, expira: 0, refreshToken: null };
-  vgGuardarRefresh(null);
   vgDonoPortal = "";
+  vgEntrando = null;
+  // Limpa o que as versões antigas deixavam guardado (refresh token do 2º login).
+  try { localStorage.removeItem(VG_SESSION_KEY); } catch (e) {}
+  try { sessionStorage.removeItem(VG_SESSION_KEY); } catch (e) {}
 }
 const VG_ERROS_FIREBASE = {
   EMAIL_NOT_FOUND: "E-mail ou senha incorretos.",
@@ -31113,53 +31133,59 @@ async function vgFirebasePost(url, corpo, tipo) {
   }
   return j;
 }
-async function vgLogin(email, senha, lembrar, donoPortal) {
-  if (!VG_FIREBASE_CONFIGURADO) throw new VgErro(0, "O módulo ainda não foi configurado.");
-  const j = await vgFirebasePost(
-    `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${VG_FIREBASE_API_KEY}`,
-    { email: String(email || "").trim(), password: senha, returnSecureToken: true },
-  );
-  vgSessao = { idToken: j.idToken, expira: Date.now() + Number(j.expiresIn || 3600) * 1000, refreshToken: j.refreshToken };
-  if (donoPortal !== undefined) vgDonoPortal = vgNormEmail(donoPortal);
-  vgGuardarRefresh(j.refreshToken, lembrar);
-}
-async function vgRenovar() {
-  if (!vgSessao.refreshToken) throw new VgErro(401, "Entre novamente.");
-  try {
-    const j = await vgFirebasePost(
-      `https://securetoken.googleapis.com/v1/token?key=${VG_FIREBASE_API_KEY}`,
-      { grant_type: "refresh_token", refresh_token: vgSessao.refreshToken },
-      "form",
+/** Entra no módulo com a identidade do portal (sem senha). */
+function vgEntrarComPortal(emailPortal) {
+  if (!VG_FIREBASE_CONFIGURADO) return Promise.reject(new VgErro(0, "O módulo ainda não foi configurado."));
+  const mail = vgNormEmail(emailPortal);
+  if (!mail) return Promise.reject(new VgErro(401, "Faça login no portal para usar este módulo."));
+  if (vgEntrando && vgEntrando.mail === mail) return vgEntrando.p;
+  const p = (async () => {
+    let r;
+    try {
+      r = await fetch(VG_API + "/sessao-portal", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...(DRIVE_PROXY_KEY ? { "X-Portal-Key": DRIVE_PROXY_KEY } : {}) },
+        body: JSON.stringify({ email: mail }),
+      });
+    } catch (e) {
+      throw new VgErro(0, "Sem conexão com o servidor. Verifique sua internet e tente novamente.");
+    }
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.token) throw new VgErro(r.status || 500, (j && j.erro) || "Não foi possível entrar no módulo agora. Tente novamente.");
+    const f = await vgFirebasePost(
+      `https://identitytoolkit.googleapis.com/v1/accounts:signInWithCustomToken?key=${VG_FIREBASE_API_KEY}`,
+      { token: j.token, returnSecureToken: true },
     );
-    vgSessao = { idToken: j.id_token, expira: Date.now() + Number(j.expires_in || 3600) * 1000, refreshToken: j.refresh_token || vgSessao.refreshToken };
-    vgGuardarRefresh(vgSessao.refreshToken);
-  } catch (e) {
-    if (e.status !== 0) vgSair();
-    throw new VgErro(e.status === 0 ? 0 : 401, e.status === 0 ? e.message : "Sua sessão expirou. Entre novamente.");
-  }
+    vgSessao = { idToken: f.idToken, expira: Date.now() + Number(f.expiresIn || 3600) * 1000, refreshToken: f.refreshToken };
+    vgDonoPortal = mail;
+  })();
+  vgEntrando = { mail, p };
+  const limpar = () => { if (vgEntrando && vgEntrando.p === p) vgEntrando = null; };
+  p.then(limpar, limpar);
+  return p;
 }
-async function vgRestaurarSessao(donoPortal) {
-  const g = vgLerGuardado();
-  if (!g || !g.rt || !VG_FIREBASE_CONFIGURADO) return false;
-  // Sessão guardada por OUTRA pessoa do portal (ou sem dono conhecido):
-  // nunca reaproveita — apaga e pede o login.
-  vgDonoPortal = vgNormEmail(donoPortal);
-  if (!vgDonoPortal || g.dono !== vgDonoPortal) { vgGuardarRefresh(null); return false; }
-  vgSessao = { idToken: null, expira: 0, refreshToken: g.rt };
-  try {
-    await vgRenovar();
-    return true;
-  } catch (e) {
-    return false;
+/** Renova o ID token; se a renovação falhar, refaz a entrada pelo portal (nunca pede senha). */
+async function vgRenovar() {
+  const dono = vgDonoPortal;
+  if (vgSessao.refreshToken) {
+    try {
+      const j = await vgFirebasePost(
+        `https://securetoken.googleapis.com/v1/token?key=${VG_FIREBASE_API_KEY}`,
+        { grant_type: "refresh_token", refresh_token: vgSessao.refreshToken },
+        "form",
+      );
+      vgSessao = { idToken: j.id_token, expira: Date.now() + Number(j.expires_in || 3600) * 1000, refreshToken: j.refresh_token || vgSessao.refreshToken };
+      return;
+    } catch (e) {
+      if (e.status === 0) throw e;
+    }
   }
-}
-async function vgEsqueciSenha(email) {
-  if (!VG_FIREBASE_CONFIGURADO) throw new VgErro(0, "O módulo ainda não foi configurado.");
-  await vgFirebasePost(`https://identitytoolkit.googleapis.com/v1/accounts:sendOobCode?key=${VG_FIREBASE_API_KEY}`, { requestType: "PASSWORD_RESET", email: String(email || "").trim() });
+  if (!dono) throw new VgErro(401, "Sua sessão expirou. Recarregue a página.");
+  await vgEntrarComPortal(dono);
 }
 /** Chamada autenticada. `blob: true` devolve { blob, tipo, nome } (comprovantes/PDF/Excel). */
 async function vgApi(metodo, caminho, { corpo, blob } = {}, tentativa = 0) {
-  if (!vgTemSessao()) throw new VgErro(401, "Entre no módulo para continuar.");
+  if (!vgTemSessao()) { if (vgDonoPortal) await vgEntrarComPortal(vgDonoPortal); else throw new VgErro(401, "Faça login no portal para usar este módulo."); }
   if (!vgSessao.idToken || Date.now() > vgSessao.expira - 60000) await vgRenovar();
   let r;
   try {
@@ -31617,66 +31643,14 @@ function VgAnexos({ viagemId, tipo, itemId, anexos, editavel, onAnexado, onRemov
   );
 }
 
-/* ---------- entrada (login) e estados do módulo ---------- */
-function VgLogin({ onEntrou, processoAntigo, emailInicial, donoPortal }) {
-  const [email, setEmail] = useState(emailInicial || "");
-  const [senha, setSenha] = useState("");
-  const [erro, setErro] = useState(null);
-  const [info, setInfo] = useState(null);
-  const [ocupado, setOcupado] = useState(false);
-  const [lembrar, setLembrar] = useState(() => { try { return localStorage.getItem(VG_LEMBRAR_KEY) !== "0"; } catch (e) { return true; } });
-  async function entrar(e) {
-    e.preventDefault();
-    if (ocupado) return;
-    if (!email.trim() || !senha) return setErro("Informe e-mail e senha.");
-    setErro(null); setInfo(null); setOcupado(true);
-    try {
-      await vgLogin(email, senha, lembrar, donoPortal);
-      await onEntrou();
-    } catch (err) {
-      setErro(err.message || "Não foi possível entrar.");
-      setOcupado(false);
-    }
-  }
-  async function esqueci() {
-    if (!email.trim()) return setErro("Digite seu e-mail acima e clique novamente em “Esqueci minha senha”.");
-    setErro(null);
-    try {
-      await vgEsqueciSenha(email);
-      setInfo("Se este e-mail estiver cadastrado, enviamos um link para criar uma nova senha.");
-    } catch (err) {
-      setInfo("Se este e-mail estiver cadastrado, enviamos um link para criar uma nova senha.");
-    }
-  }
-  return vgEl(
-    "div",
-    { className: "vg-login-wrap" },
-    vgEl(
-      "form",
-      { className: "vg-login-card", onSubmit: entrar, "data-testid": "vg-login" },
-      vgEl("div", { className: "vg-login-icon" }, vgEl(Lock, { size: 20 })),
-      vgEl("h2", null, "Acesso ao módulo Viagens e Despesas"),
-      vgEl("p", { className: "vg-muted" }, "Este módulo tem acesso individual. Entre com o e-mail corporativo e a senha cadastrados pelo administrador."),
-      vgEl(FinErro, { erro }),
-      info && vgEl("div", { className: "vg-info" }, info),
-      vgEl(FinCampo, { rotulo: "E-mail corporativo" }, vgEl("input", { type: "email", value: email, onChange: (e) => setEmail(e.target.value), autoComplete: "username", autoFocus: true })),
-      vgEl(FinCampo, { rotulo: "Senha" }, vgEl("input", { type: "password", value: senha, onChange: (e) => setSenha(e.target.value), autoComplete: "current-password" })),
-      vgEl("label", { className: "vg-lembrar", style: { display: "flex", alignItems: "center", gap: 8, fontSize: 13, margin: "4px 0 10px", cursor: "pointer" } },
-        vgEl("input", { type: "checkbox", checked: lembrar, onChange: (e) => setLembrar(e.target.checked), "data-testid": "vg-lembrar" }),
-        "Manter conectado neste computador (só peço a senha uma vez)"),
-      vgEl("button", { type: "submit", className: "doc-download-btn vg-btn-block", disabled: ocupado }, ocupado ? "Entrando..." : "Entrar"),
-      vgEl("button", { type: "button", className: "link-btn vg-esqueci", onClick: esqueci }, "Esqueci minha senha"),
-      processoAntigo && vgEl("a", { className: "vg-antigo", href: processoAntigo, target: "_blank", rel: "noopener noreferrer" }, "Precisa usar o processo antigo (Google Forms)? Clique aqui."),
-    ),
-  );
-}
+/* ---------- estados do módulo ---------- */
 function VgNaoConfigurado() {
   return vgEl(
     "div",
     { className: "vg-setup", "data-testid": "vg-setup" },
     vgEl(AlertTriangle, { size: 20 }),
     vgEl("h2", null, "Módulo ainda não configurado"),
-    vgEl("p", null, "O módulo Viagens e Despesas já está instalado no portal, mas ainda falta ligar o login do Firebase. Nada é simulado: enquanto isso, a tela não permite entrar nem registrar viagens."),
+    vgEl("p", null, "O módulo Viagens e Despesas já está instalado no portal, mas ainda falta ligar o Firebase. Nada é simulado: enquanto isso, a tela não permite entrar nem registrar viagens."),
     vgEl("p", { className: "vg-muted" }, "Siga o passo a passo do arquivo LEIA-ME-VIAGENS.md (Firebase Authentication → copiar a “Web API key” para a constante VG_FIREBASE_API_KEY → publicar o portal)."),
   );
 }
@@ -32365,15 +32339,9 @@ function VgUsuarios({ me, onNotify, onMudou }) {
   const carregar = () => vgApi("GET", "/usuarios").then((r) => { setLista(r.usuarios); onMudou?.(r.usuarios); setErro(null); }).catch((e) => setErro(e.message));
   useEffect(() => { carregar(); }, []);
   const admins = (lista || []).filter((u) => u.perfil === "administrador" && u.ativo);
-  async function reenviar(u) {
-    try {
-      const r = await vgApi("POST", `/usuarios/${encodeURIComponent(u.uid)}/reenviar-senha`);
-      onNotify?.(r.emailEnviado ? "E-mail de redefinição enviado." : "E-mail não configurado: gere o link pelo cadastro.", r.emailEnviado ? "info" : "error");
-    } catch (e) { onNotify?.(e.message, "error"); }
-  }
   return vgEl("div", { className: "vg-lista", "data-testid": "vg-usuarios" },
-    vgEl("div", { className: "vg-toolbar" }, vgEl("h2", { className: "vg-h2" }, "Usuários do módulo"), vgEl("button", { type: "button", className: "kpi-new-homolog-btn", onClick: () => setModal({ usuario: null }) }, vgEl(UserPlus, { size: 14 }), " Novo usuário")),
-    vgEl("p", { className: "vg-muted" }, "Cada pessoa tem acesso individual. O gestor responsável de cada consultor é quem recebe as solicitações de viagem dele."),
+    vgEl("div", { className: "vg-toolbar" }, vgEl("h2", { className: "vg-h2" }, "Usuários do módulo")),
+    vgEl("p", { className: "vg-muted" }, "O acesso vem do login do portal: cada pessoa aparece aqui na primeira vez que abre o módulo (administrador do portal entra como administrador; os demais, como consultor). Aqui você ajusta perfil, gestor responsável e situação."),
     erro && vgEl("div", { className: "fin-banner" }, vgEl(AlertTriangle, { size: 15 }), " ", erro),
     vgEl("div", { className: "table-wrap" },
       vgEl("table", { className: "company-table vg-table" },
@@ -32382,8 +32350,7 @@ function VgUsuarios({ me, onNotify, onMudou }) {
           vgEl("td", null, u.nome), vgEl("td", null, u.email), vgEl("td", null, VG_PERFIL_LABEL[u.perfil] || u.perfil), vgEl("td", null, u.gestorNome || "—"),
           vgEl("td", null, vgEl("span", { className: "status-badge " + (u.ativo ? "status-ok" : "status-cancelada") }, u.ativo ? "Ativo" : "Inativo")),
           vgEl("td", { className: "vg-acoes-cell" },
-            vgEl("button", { type: "button", className: "link-btn", onClick: () => setModal({ usuario: u }) }, vgEl(Pencil, { size: 12 }), " Editar"),
-            vgEl("button", { type: "button", className: "link-btn", onClick: () => reenviar(u) }, "Reenviar senha")))))),
+            vgEl("button", { type: "button", className: "link-btn", onClick: () => setModal({ usuario: u }) }, vgEl(Pencil, { size: 12 }), " Editar")))))),
       lista && lista.length === 0 && vgEl("div", { className: "empty-state" }, "Nenhum usuário cadastrado.")),
     modal && vgEl(VgUsuarioModal, { usuario: modal.usuario, administradores: admins, onClose: () => setModal(null), onSalvo: carregar, onNotify }));
 }
@@ -32421,8 +32388,7 @@ function ViagensView({ currentUser, onNotify, onView, deepLinkId, onDeepLinkCons
       setMe(m);
       setFase("pronto");
     } catch (e) {
-      if (e.status === 401) setFase("login");
-      else if (e.status === 403) { setMsgErro(e.message); setFase("sem_acesso"); }
+      if (e.status === 403) { setMsgErro(e.message); setFase("sem_acesso"); }
       else { setMsgErro(e.message); setFase("erro"); }
     }
   }
@@ -32430,10 +32396,17 @@ function ViagensView({ currentUser, onNotify, onView, deepLinkId, onDeepLinkCons
     if (!VG_FIREBASE_CONFIGURADO) return;
     let vivo = true;
     (async () => {
-      const ok = (vgTemSessao() && vgDonoPortal === vgNormEmail(currentUser && currentUser.email)) || (await vgRestaurarSessao(currentUser && currentUser.email));
+      try {
+        const dono = vgNormEmail(currentUser && currentUser.email);
+        if (!(vgTemSessao() && vgDonoPortal === dono)) { vgSair(); await vgEntrarComPortal(dono); }
+      } catch (e) {
+        if (!vivo) return;
+        setMsgErro(e.message || "Não foi possível entrar no módulo agora.");
+        setFase(e.status === 403 ? "sem_acesso" : "erro");
+        return;
+      }
       if (!vivo) return;
-      if (ok) await carregarMe();
-      else setFase("login");
+      await carregarMe();
     })();
     return () => { vivo = false; };
   }, []);
@@ -32453,11 +32426,15 @@ function ViagensView({ currentUser, onNotify, onView, deepLinkId, onDeepLinkCons
       onDeepLinkConsumed?.();
     }
   }, [fase, deepLinkId]);
-  function sair() {
+  function tentarDeNovo() {
     vgSair();
     setMe(null);
-    setFase("login");
+    setFase("carregando");
     setTela({ nome: "lista" });
+    (async () => {
+      try { await vgEntrarComPortal(currentUser && currentUser.email); await carregarMe(); }
+      catch (e) { setMsgErro(e.message || "Não foi possível entrar no módulo agora."); setFase(e.status === 403 ? "sem_acesso" : "erro"); }
+    })();
   }
   const mudou = () => setRefresh((r) => r + 1);
   const admin = me && me.perfil === "administrador";
@@ -32468,9 +32445,8 @@ function ViagensView({ currentUser, onNotify, onView, deepLinkId, onDeepLinkCons
   let corpo = null;
   if (fase === "sem_config") corpo = vgEl(VgNaoConfigurado);
   else if (fase === "carregando") corpo = vgEl("div", { className: "empty-state" }, "Carregando...");
-  else if (fase === "login") corpo = vgEl(VgLogin, { onEntrou: carregarMe, processoAntigo: VG_PROCESSO_ANTIGO_URL, emailInicial: currentUser && currentUser.email, donoPortal: currentUser && currentUser.email });
-  else if (fase === "sem_acesso") corpo = vgEl("div", { className: "vg-setup" }, vgEl(Lock, { size: 20 }), vgEl("h2", null, "Acesso não liberado"), vgEl("p", null, msgErro), vgEl("button", { type: "button", className: "doc-download-btn", onClick: sair }, "Entrar com outra conta"));
-  else if (fase === "erro") corpo = vgEl("div", { className: "vg-setup" }, vgEl(AlertTriangle, { size: 20 }), vgEl("h2", null, "Não foi possível carregar o módulo"), vgEl("p", null, msgErro), vgEl("button", { type: "button", className: "doc-download-btn", onClick: () => { setFase("carregando"); carregarMe(); } }, "Tentar novamente"));
+  else if (fase === "sem_acesso") corpo = vgEl("div", { className: "vg-setup" }, vgEl(Lock, { size: 20 }), vgEl("h2", null, "Acesso não liberado"), vgEl("p", null, msgErro), vgEl("button", { type: "button", className: "doc-download-btn", onClick: tentarDeNovo }, "Tentar novamente"));
+  else if (fase === "erro") corpo = vgEl("div", { className: "vg-setup" }, vgEl(AlertTriangle, { size: 20 }), vgEl("h2", null, "Não foi possível carregar o módulo"), vgEl("p", null, msgErro), vgEl("button", { type: "button", className: "doc-download-btn", onClick: tentarDeNovo }, "Tentar novamente"));
   else if (fase === "pronto" && me) {
     if (tela.nome === "detalhe") corpo = vgEl(VgDetalhe, { key: tela.id, id: tela.id, me, onVoltar: () => setTela({ nome: "lista" }), onEditar: (id) => setTela({ nome: "editar", id }), onNotify, onView, onMudou: mudou });
     else if (tela.nome === "nova" || tela.nome === "editar") corpo = vgEl(VgWizard, { me, viagemId: tela.nome === "editar" ? tela.id : null, onNotify, onView, onCancelar: () => setTela(tela.id ? { nome: "detalhe", id: tela.id } : { nome: "lista" }), onConcluido: (vid) => { mudou(); setTela(vid ? { nome: "detalhe", id: vid } : { nome: "lista" }); } });
@@ -32486,8 +32462,7 @@ function ViagensView({ currentUser, onNotify, onView, deepLinkId, onDeepLinkCons
         vgEl("p", { className: "lede" }, "Solicitação de viagem, adiantamento e prestação de contas em um único registro — do pedido à aprovação final.")),
       fase === "pronto" && me && vgEl("div", { className: "vg-userchip" },
         vgEl("button", { type: "button", className: "vg-bell", "aria-label": "Notificações", onClick: () => setTela({ nome: "notificacoes" }), "data-testid": "vg-bell" }, vgEl(BellIcon, { size: 17 }), me.notificacoesNaoLidas > 0 && vgEl("span", { className: "vg-bell-badge" }, me.notificacoesNaoLidas > 9 ? "9+" : me.notificacoesNaoLidas)),
-        vgEl("div", { className: "vg-userchip-txt" }, vgEl("strong", null, me.nome), vgEl("span", null, VG_PERFIL_LABEL[me.perfil])),
-        vgEl("button", { type: "button", className: "filters-clear-btn", style: { flex: "none", padding: "7px 12px" }, onClick: sair }, "Sair do módulo"))),
+        vgEl("div", { className: "vg-userchip-txt" }, vgEl("strong", null, me.nome), vgEl("span", null, VG_PERFIL_LABEL[me.perfil])))),
     VG_PROCESSO_ANTIGO_URL && fase === "pronto" && vgEl("div", { className: "fin-banner vg-antigo-banner" }, "O processo antigo (Google Forms) continua disponível durante a transição: ", vgEl("a", { href: VG_PROCESSO_ANTIGO_URL, target: "_blank", rel: "noopener noreferrer" }, "abrir formulário"), "."),
     fase === "pronto" && me && naLista && vgEl("nav", { className: "vg-tabs vg-tabs-main" }, abas.map(([k, t]) => vgEl("button", { key: k, type: "button", className: "vg-tab" + (tela.nome === k ? " ativo" : ""), onClick: () => setTela({ nome: k }), "data-testid": "vg-tab-" + k }, t))),
     corpo,
@@ -33077,6 +33052,8 @@ function GrupoprimaPortal() {
     if (currentUser) setAuditSessionUser(currentUser.nome || currentUser.email || null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+  // Usuário atual para a visibilidade por consultor (ver registroVisivelAoUsuario).
+  definirUsuarioPortalAtual(currentUser);
   function openCompany(id) {
     setSelectedId(id);
     setView("company");
