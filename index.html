@@ -8241,6 +8241,30 @@ function brBaseSummary(c) {
     conferencia: cur.filter((d) => d.flag && d.flag.severity === "warning").length,
   };
 }
+/* Selos de contagem de uma Base — total de documentos (neutro) + quantidade de
+   vencidos e de próximos do vencimento (só quando existem). Nunca rotula a Base
+   inteira como "Vencida"/"Próxima do vencimento" por causa de alguns
+   documentos (pedido da Iasmin, 2026-10-20). Conta só a versão atual de cada
+   documento (baseOnlyCurrentDocs). */
+function BaseDocBadges({ company, compact }) {
+  const h = React.createElement;
+  const sm = brBaseSummary(company);
+  const plural = (n, um, varios) => n + " " + (n === 1 ? um : varios);
+  return h(
+    "span",
+    { className: "base-badges" + (compact ? " base-badges-compact" : ""), "data-testid": "base-badges" },
+    h("span", { className: "status-badge status-neutro" }, plural(sm.total, "documento", "documentos")),
+    sm.vencidos > 0 && h("span", { className: "status-badge status-vencido" }, plural(sm.vencidos, "vencido", "vencidos")),
+    sm.proximos > 0 && h("span", { className: "status-badge status-proximo" }, sm.proximos + " a vencer"),
+    sm.conferencia > 0 && h("span", { className: "status-badge status-conferencia" }, sm.conferencia + " p/ conferir"),
+  );
+}
+/* Estados SEM atendimento da Grupoprima (informado pela Iasmin: RR, RO e AP);
+   os demais estados sem base aparecem como "Atendimentos operacionais". */
+const BR_UF_SEM_ATENDIMENTO = ["RR", "RO", "AP"];
+function brMapTone(c) {
+  return c.tipo === "Matriz" ? "matriz" : "filial";
+}
 function BasesMap({ companies, activeId, selectedId, onHover, onActivate, onOpenCompanyKey }) {
   const h = React.createElement;
   const byUF = {};
@@ -8279,11 +8303,9 @@ function BasesMap({ companies, activeId, selectedId, onHover, onActivate, onOpen
       h(
         "div",
         { className: "bm-tip-foot" },
-        h("span", { className: "bm-dot bm-dot-" + brStatusTone(focusCompany.status) }),
-        focusCompany.status,
-        " · ",
-        sm.total,
-        " doc(s)",
+        sm.total + " doc(s)",
+        sm.vencidos > 0 ? " · " + sm.vencidos + " vencido(s)" : "",
+        sm.proximos > 0 ? " · " + sm.proximos + " a vencer" : "",
       ),
     );
   }
@@ -8299,14 +8321,32 @@ function BasesMap({ companies, activeId, selectedId, onHover, onActivate, onOpen
         "aria-label": "Mapa do Brasil com as bases da Grupoprima",
         preserveAspectRatio: "xMidYMid meet",
       },
+      h(
+        "defs",
+        null,
+        h(
+          "linearGradient",
+          { id: "bm-grad-matriz", x1: "0", y1: "0", x2: "1", y2: "1" },
+          h("stop", { offset: "0%", stopColor: "#8DB52E" }),
+          h("stop", { offset: "100%", stopColor: "#E3EF63" }),
+        ),
+      ),
       Object.keys(BR_STATE_PATHS)
         .filter((uf) => !byUF[uf])
         .map((uf) =>
-          h("path", { key: uf, d: BR_STATE_PATHS[uf], className: "bm-state" }, h("title", null, BR_STATE_NAMES[uf])),
+          h(
+            "path",
+            {
+              key: uf,
+              d: BR_STATE_PATHS[uf],
+              className: "bm-state " + (BR_UF_SEM_ATENDIMENTO.indexOf(uf) >= 0 ? "bm-state-off" : "bm-state-op"),
+            },
+            h("title", null, BR_STATE_NAMES[uf] + (BR_UF_SEM_ATENDIMENTO.indexOf(uf) >= 0 ? " — sem atendimento" : " — atendimento operacional")),
+          ),
         ),
       orderedUFs.map((uf) => {
         const c = primary[uf];
-        const tone = brStatusTone(c.status);
+        const tone = brMapTone(c);
         const isActive = activeUF === uf;
         return h(
           "g",
@@ -8317,7 +8357,7 @@ function BasesMap({ companies, activeId, selectedId, onHover, onActivate, onOpen
             role: "button",
             tabIndex: 0,
             "aria-label":
-              brBaseTag(c) + " — " + c.municipio + "/" + c.uf + ". Situação: " + c.status + ". Abrir documentação da base.",
+              brBaseTag(c) + " — " + c.municipio + "/" + c.uf + ". " + c.totalDocs + " documento(s). Abrir documentação da base.",
             onMouseEnter: () => onHover(c.id),
             onMouseLeave: () => onHover(null),
             onFocus: () => onHover(c.id),
@@ -8337,13 +8377,13 @@ function BasesMap({ companies, activeId, selectedId, onHover, onActivate, onOpen
         BR_STATE_PATHS[activeUF] &&
         h(
           "g",
-          { className: "bm-tone-" + brStatusTone(primary[activeUF].status), pointerEvents: "none" },
+          { className: "bm-tone-" + brMapTone(primary[activeUF]), pointerEvents: "none" },
           h("path", { d: BR_STATE_PATHS[activeUF], className: "bm-active-outline" }),
         ),
       companies.map((c) => {
         const p = brBasePoint(c);
         if (!p || !BR_STATE_PATHS[c.uf]) return null;
-        const tone = brStatusTone(c.status);
+        const tone = brMapTone(c);
         const isM = c.tipo === "Matriz";
         const left = c.uf === "PE" || c.uf === "PB";
         const isActive = activeId === c.id;
@@ -8383,7 +8423,6 @@ function DashboardBasesPanel({ companies, onOpenCompany, onOpenDocuments, onGoCo
   const matriz = companies.find((c) => c.tipo === "Matriz") || companies[0];
   const focusId = hoverId || selectedId;
   const active = companies.find((c) => c.id === (focusId || (matriz && matriz.id))) || matriz;
-  const sm = active ? brBaseSummary(active) : null;
   // Em telas sem hover (toque), o 1º toque mostra o resumo e o 2º abre a Base;
   // com mouse/teclado, o clique abre direto a página da Base.
   function activate(c) {
@@ -8393,17 +8432,6 @@ function DashboardBasesPanel({ companies, onOpenCompany, onOpenDocuments, onGoCo
     }
     onOpenCompany(c.id);
   }
-  const counts = { ok: 0, proximo: 0, conferencia: 0, vencido: 0 };
-  companies.forEach((c) => {
-    const t = brStatusTone(c.status);
-    counts[t === "vencido" ? "vencido" : t] += 1;
-  });
-  const legend = [
-    ["ok", "Atualizado"],
-    ["proximo", "Próx. do vencimento"],
-    ["conferencia", "Necessita conferência"],
-    ["vencido", "Vencido"],
-  ];
   return h(
     "div",
     { className: "dash-bases-row" },
@@ -8427,9 +8455,10 @@ function DashboardBasesPanel({ companies, onOpenCompany, onOpenDocuments, onGoCo
       h(
         "div",
         { className: "bm-legend" },
-        legend.map(([k, label]) =>
-          h("span", { key: k, className: "bm-legend-item" }, h("span", { className: "bm-dot bm-dot-" + k }), label, " ", h("strong", null, counts[k])),
-        ),
+        h("span", { className: "bm-legend-item" }, h("span", { className: "bm-dot bm-dot-matriz" }), "Matriz"),
+        h("span", { className: "bm-legend-item" }, h("span", { className: "bm-dot bm-dot-filial" }), "Filiais"),
+        h("span", { className: "bm-legend-item" }, h("span", { className: "bm-dot bm-dot-op" }), "Atendimentos operacionais"),
+        h("span", { className: "bm-legend-item" }, h("span", { className: "bm-dot bm-dot-off" }), "Sem atendimento"),
       ),
       active &&
         h(
@@ -8440,13 +8469,7 @@ function DashboardBasesPanel({ companies, onOpenCompany, onOpenDocuments, onGoCo
             { className: "bm-focus-main" },
             h("div", { className: "bm-focus-tag" }, brBaseTag(active), h("span", { className: "bm-focus-name" }, " | ", active.nomeFantasia || active.razaoSocial)),
             h("div", { className: "bm-focus-city" }, h(MapPin, { size: 13 }), " ", active.municipio, "/", active.uf, (BR_STATE_NAMES[active.uf] && BR_STATE_NAMES[active.uf] !== active.municipio ? " · " + BR_STATE_NAMES[active.uf] : "")),
-            h("div", { className: "bm-focus-stats" },
-              h("span", { className: "status-badge " + companyStatusMeta(active.status).className }, active.status),
-              h("span", null, h("strong", null, sm.total), " doc(s)"),
-              sm.vencidos > 0 && h("span", { className: "bm-stat-bad" }, h("strong", null, sm.vencidos), " vencido(s)"),
-              sm.proximos > 0 && h("span", null, h("strong", null, sm.proximos), " a vencer"),
-              sm.conferencia > 0 && h("span", null, h("strong", null, sm.conferencia), " p/ conferir"),
-            ),
+            h("div", { className: "bm-focus-stats" }, h(BaseDocBadges, { company: active })),
           ),
           h(
             "div",
@@ -8492,7 +8515,7 @@ function DashboardBasesPanel({ companies, onOpenCompany, onOpenDocuments, onGoCo
             h(
               "div",
               { className: "company-mini-foot-row" },
-              h("span", { className: "company-mini-foot" }, c.totalDocs, " doc(s) · ", c.status),
+              h(BaseDocBadges, { company: c, compact: true }),
               h(
                 "button",
                 {
@@ -9295,14 +9318,7 @@ function FiltersModal({ open, onClose, ufs, filters, setFilters, onClear }) {
                 /*#__PURE__*/ React.createElement(
                   "td",
                   { key: c.id },
-                  /*#__PURE__*/ React.createElement(
-                    "span",
-                    {
-                      className:
-                        "status-badge " + companyStatusMeta(c.status).className,
-                    },
-                    c.status,
-                  ),
+                  /*#__PURE__*/ React.createElement(BaseDocBadges, { company: c }),
                 ),
               ),
             ),
@@ -9626,7 +9642,7 @@ function CompaniesView({
                   /*#__PURE__*/ React.createElement(
                     "span",
                     { className: "category-count" },
-                    rows.length,
+                    groupDocumentsByFamily(rows.map((r) => r.doc)).length,
                   ),
                   isOpen
                     ? /*#__PURE__*/ React.createElement(ChevronDown, {
@@ -10113,14 +10129,7 @@ function CompaniesView({
               { className: "company-mini-tag" },
               c.tipo === "Matriz" ? "MATRIZ" : `FILIAL ${c.id}`,
             ),
-            /*#__PURE__*/ React.createElement(
-              "span",
-              {
-                className:
-                  "status-badge " + companyStatusMeta(c.status).className,
-              },
-              c.status,
-            ),
+            /*#__PURE__*/ React.createElement(BaseDocBadges, { company: c, compact: true }),
           ),
           /*#__PURE__*/ React.createElement(
             "div",
@@ -10992,6 +11001,9 @@ function CompanyDetailView({
   const baseOnlyDocs = company.documentos.filter(
     (d) => d.abrangencia !== "empresa" && d.abrangencia !== "corporativa",
   );
+  // Só a versão ATUAL de cada documento entra nas contagens do resumo
+  // (2026-10-20, pedido da Iasmin: versões antigas não contam).
+  const currentBaseDocs = baseOnlyCurrentDocs(company.documentos);
   return /*#__PURE__*/ React.createElement(
     "div",
     { className: "view" },
@@ -11025,15 +11037,9 @@ function CompanyDetailView({
         // não sobra nenhum selo/botão — só a tag da Base à esquerda. Os
         // demais status (Próximo do vencimento, Necessita conferência,
         // Atualizado) continuam mostrando o selo normalmente.
-        company.status !== "Vencido" &&
-          /*#__PURE__*/ React.createElement(
-            "span",
-            {
-              className:
-                "status-badge " + companyStatusMeta(company.status).className,
-            },
-            company.status,
-          ),
+        // Selos por quantidade (2026-10-20): total de documentos + vencidos + a
+        // vencer, em vez de um status único que generalizava a Base inteira.
+        /*#__PURE__*/ React.createElement(BaseDocBadges, { company: company }),
       ),
       /*#__PURE__*/ React.createElement(
         "h1",
@@ -11200,7 +11206,7 @@ function CompanyDetailView({
         /*#__PURE__*/ React.createElement(KpiCard, {
           icon: CheckCircle2,
           label: "Sem vencimento",
-          value: baseOnlyDocs.filter((d) => d.status === "sem_vencimento")
+          value: currentBaseDocs.filter((d) => d.status === "sem_vencimento")
             .length,
         }),
         // "Confira as documentações vencidas" (pedido explícito da Iasmin,
@@ -11215,16 +11221,16 @@ function CompanyDetailView({
         /*#__PURE__*/ React.createElement(KpiCard, {
           icon: Clock,
           label: "Vencidos",
-          value: baseOnlyDocs.filter((d) => d.status === "vencido").length,
-          tone: baseOnlyDocs.some((d) => d.status === "vencido")
+          value: currentBaseDocs.filter((d) => d.status === "vencido").length,
+          tone: currentBaseDocs.some((d) => d.status === "vencido")
             ? "danger"
             : "default",
           sub:
-            onOpenChat && baseOnlyDocs.some((d) => d.status === "vencido")
+            onOpenChat && currentBaseDocs.some((d) => d.status === "vencido")
               ? "Confira as documentações vencidas"
               : undefined,
           onClick:
-            onOpenChat && baseOnlyDocs.some((d) => d.status === "vencido")
+            onOpenChat && currentBaseDocs.some((d) => d.status === "vencido")
               ? () =>
                   onOpenChat(
                     `Quais documentos da ${company.tipo === "Matriz" ? "Matriz" : `Filial ${company.id}`} estão vencidos?`,
@@ -11275,7 +11281,7 @@ function CompanyDetailView({
                 /*#__PURE__*/ React.createElement(
                   "span",
                   { className: "category-count" },
-                  docs.length,
+                  groupDocumentsByFamily(docs).length,
                 ),
                 isOpen
                   ? /*#__PURE__*/ React.createElement(ChevronDown, { size: 15 })
@@ -31741,25 +31747,26 @@ function GrupoprimaPortal() {
         .bm-stage { position: relative; width: 100%; max-width: 460px; margin: 0 auto; }
         .bm-svg { display: block; width: 100%; height: auto; }
         @media (min-width: 1500px) { .bm-stage { max-width: 520px; } }
-        .bm-state { fill: var(--branco-frio); stroke: var(--cinza-frio); stroke-width: 0.8; stroke-linejoin: round; }
-        .portal-root[data-theme="dark"] .bm-state:not(.bm-state-base) { fill: rgba(255,255,255,0.045); stroke: rgba(255,255,255,0.16); }
-        .company-mini-cnpj { font-size: 11px; color: var(--carvao); margin: -4px 0 4px; font-variant-numeric: tabular-nums; }
-        .bm-tone-ok { --bm-dot: #1FAE63; --bm-fill: rgba(31,174,99,0.22); --bm-fill-strong: rgba(31,174,99,0.42); }
-        .bm-tone-proximo { --bm-dot: #D9A400; --bm-fill: rgba(229,184,0,0.26); --bm-fill-strong: rgba(229,184,0,0.46); }
-        .bm-tone-conferencia { --bm-dot: #C98A00; --bm-fill: rgba(201,138,0,0.24); --bm-fill-strong: rgba(201,138,0,0.44); }
-        .bm-tone-vencido { --bm-dot: #D64545; --bm-fill: rgba(214,69,69,0.22); --bm-fill-strong: rgba(214,69,69,0.42); }
-        .portal-root[data-theme="dark"] .bm-tone-ok { --bm-dot: #6BFE9C; --bm-fill: rgba(107,254,156,0.20); --bm-fill-strong: rgba(107,254,156,0.40); }
-        .portal-root[data-theme="dark"] .bm-tone-proximo { --bm-dot: #F0CB4D; --bm-fill: rgba(240,203,77,0.22); --bm-fill-strong: rgba(240,203,77,0.42); }
-        .portal-root[data-theme="dark"] .bm-tone-conferencia { --bm-dot: #E3A83B; --bm-fill: rgba(227,168,59,0.22); --bm-fill-strong: rgba(227,168,59,0.42); }
-        .portal-root[data-theme="dark"] .bm-tone-vencido { --bm-dot: #FF7B7B; --bm-fill: rgba(255,123,123,0.22); --bm-fill-strong: rgba(255,123,123,0.42); }
+        /* Paleta do mapa (ideia do demonstrativo da Grupoprima, nas cores do
+           portal): Matriz em degradê verde-limão, Filiais no verde da marca,
+           demais estados atendidos num azul-petróleo suave e estados sem
+           atendimento em cinza discreto. */
+        .bm-state { stroke: var(--card-bg); stroke-width: 1; stroke-linejoin: round; }
+        .bm-state-op { fill: #CFE3EC; }
+        .bm-state-off { fill: #E6E7EA; }
+        .portal-root[data-theme="dark"] .bm-state-op { fill: #2B5A74; }
+        .portal-root[data-theme="dark"] .bm-state-off { fill: rgba(255,255,255,0.06); }
+        .bm-tone-filial { --bm-dot: #0E7A41; --bm-fill: #3FD487; --bm-fill-strong: #2DC476; }
+        .bm-tone-matriz { --bm-dot: #566E12; --bm-fill: url(#bm-grad-matriz); --bm-fill-strong: url(#bm-grad-matriz); }
+        .portal-root[data-theme="dark"] .bm-tone-filial { --bm-dot: #FFFFFF; --bm-fill: #3FCB85; --bm-fill-strong: #6BFE9C; }
+        .portal-root[data-theme="dark"] .bm-tone-matriz { --bm-dot: #FFFFFF; }
         .bm-hit { cursor: pointer; outline: none; }
-        .bm-state-base { fill: var(--bm-fill); stroke: var(--bm-dot); stroke-width: 1; transition: fill 0.15s, stroke-width 0.15s; }
-        .bm-hit:hover .bm-state-base, .bm-hit.is-active .bm-state-base { fill: var(--bm-fill-strong); stroke-width: 1.8; }
-        .bm-hit.is-selected .bm-state-base { stroke-width: 2.2; }
+        .bm-state-base { fill: var(--bm-fill); stroke: var(--card-bg); stroke-width: 0.9; transition: filter 0.15s, stroke-width 0.15s; }
+        .bm-hit:hover .bm-state-base, .bm-hit.is-active .bm-state-base { filter: brightness(1.08) saturate(1.1); }
         .bm-active-outline { fill: none; stroke: var(--bm-dot); stroke-width: 2.2; stroke-linejoin: round; }
         .bm-hit:focus-visible .bm-state-base { stroke: var(--foco); stroke-width: 2.6; }
-        .bm-dot-svg { fill: var(--bm-dot); stroke: var(--card-bg); stroke-width: 1.6; }
-        .bm-matriz-ring { fill: none; stroke: var(--bm-dot); stroke-width: 1.5; }
+        .bm-dot-svg { fill: #003753; stroke: #fff; stroke-width: 1.6; }
+        .bm-matriz-ring { fill: none; stroke: #003753; stroke-width: 1.5; }
         .bm-pulse { fill: var(--bm-dot); opacity: 0.25; transform-box: fill-box; transform-origin: center; animation: bmPulse 1.4s ease-out infinite; }
         @keyframes bmPulse { from { transform: scale(0.6); opacity: 0.4; } to { transform: scale(1.25); opacity: 0; } }
         @media (prefers-reduced-motion: reduce) { .bm-pulse { animation: none; } }
@@ -31771,15 +31778,16 @@ function GrupoprimaPortal() {
         .bm-tip-city { font-size: 13px; font-weight: 800; margin: 1px 0 2px; }
         .bm-tip-foot { font-size: 11px; opacity: 0.85; display: flex; align-items: center; }
         .bm-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; flex-shrink: 0; }
-        .bm-dot-ok { background: #1FAE63; }
-        .bm-dot-proximo { background: #E5B800; }
-        .bm-dot-conferencia { background: #C98A00; }
-        .bm-dot-vencido { background: #D64545; }
-        .portal-root[data-theme="dark"] .bm-dot-ok { background: #6BFE9C; }
-        .portal-root[data-theme="dark"] .bm-dot-proximo { background: #F0CB4D; }
-        .portal-root[data-theme="dark"] .bm-dot-conferencia { background: #E3A83B; }
-        .portal-root[data-theme="dark"] .bm-dot-vencido { background: #FF7B7B; }
-        .bm-legend { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px 16px; font-size: 11.5px; color: var(--carvao); }
+        .bm-dot-filial { background: #3FD487; }
+        .bm-dot-matriz { background: linear-gradient(135deg, #8DB52E, #E3EF63); }
+        .bm-dot-op { background: #CFE3EC; }
+        .bm-dot-off { background: #E6E7EA; box-shadow: inset 0 0 0 1px rgba(0,55,83,0.18); }
+        .portal-root[data-theme="dark"] .bm-dot-op { background: #2B5A74; }
+        .portal-root[data-theme="dark"] .bm-dot-off { background: rgba(255,255,255,0.14); box-shadow: none; }
+        .status-neutro { background: var(--branco-frio); color: var(--texto); border: 1px solid var(--cinza-frio); }
+        .base-badges { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+        .base-badges-compact .status-badge { font-size: 10.5px; padding: 3px 8px; }
+        .bm-legend { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px 16px; font-size: 11.5px; color: var(--carvao); border: 1px solid var(--cinza-frio); border-radius: 999px; padding: 7px 16px; align-self: center; }
         .bm-legend-item { display: inline-flex; align-items: center; }
         .bm-legend-item strong { color: var(--texto); margin-left: 3px; }
         .bm-focus { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; border-top: 1px solid var(--cinza-frio); padding-top: 12px; }
