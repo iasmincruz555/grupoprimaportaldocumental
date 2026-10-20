@@ -3369,6 +3369,8 @@ const AUDIT_ACTION_LABELS = {
   reabriu_homologacao: "Reabriu homologação",
   editou_homologacao: "Editou homologação",
   editou_homologacao_atualizacao: "Editou atualização de homologação",
+  gerou_pasta_drive_homologacao: "Gerou pasta do cliente no Drive (homologação)",
+  gerou_pasta_drive_homologacao_atualizacao: "Gerou pasta do cliente no Drive (atualização de homologação)",
   anexou_arquivo_resposta_homologacao: "Anexou arquivo de resposta (homologação)",
   // Aba "Atualização de Homologação" (2026-10-20): mesmas ações, sufixo
   // "_atualizacao" (ver homologAuditAction) — nunca misturadas com as de
@@ -14281,6 +14283,8 @@ async function sincronizarLoteInterno(lote, companies, ctx) {
     const bases = (lote.baseIds || []).map((id) => homologacaoBaseDaCompany(porId.get(id), companies)).filter(Boolean);
     const nomes = (lote.documentacoesSolicitadas || []).map((it) => it.nome).filter(Boolean);
     const listaTxt = nomes.slice(0, 25).join("; ") + (nomes.length > 25 ? `; … (+${nomes.length - 25})` : "");
+    const consultorLote = { nome: lote.usuarioSolicitante?.nome || usuario, email: lote.usuarioSolicitante?.email || "" };
+    const pastaDriveLote = await garantirPastaDriveHomologacao(lote.cliente, consultorLote);
     registro = {
       id: hid,
       fluxo: lote.tipoSolicitacao,
@@ -14301,7 +14305,7 @@ async function sincronizarLoteInterno(lote, companies, ctx) {
         (listaTxt ? ` Documentações solicitadas: ${listaTxt}.` : ""),
       anexos: [],
       status: statusMapeado,
-      linkHomologacao: "",
+      linkHomologacao: pastaDriveLote.ok ? pastaDriveLote.link : "",
       dataConclusao: statusMapeado === "concluida" ? lote.concluidoEm || agora : null,
       loteStatus: lote.status,
       loteResumo: resumo,
@@ -14626,8 +14630,48 @@ const HOMOLOGACAO_MAX_ANEXOS_BYTES = 10 * 1024 * 1024 * 1024; // 10 GB
 // subpasta dedicada por cliente/solicitação dentro do Drive oficial, nunca
 // solto na raiz.
 const NOME_PASTA_HOMOLOGACAO_RESPOSTA_DRIVE = "HOMOLOGAÇÃO - ARQUIVOS DE RESPOSTA";
-function pastaHomologacaoResposta(cliente, id) {
-  return `${NOME_PASTA_HOMOLOGACAO_RESPOSTA_DRIVE}/${cliente || "Cliente sem nome"}/${id}`;
+/* Pasta do CONSULTOR (2026-10-20): o nome vem do e-mail — parte antes do primeiro
+   ponto/traço/número, em maiúsculas e sem acento ("iasmin.oliveira@..." -> IASMIN).
+   Sem e-mail, usa o primeiro nome do usuário; sem nada, "SEM CONSULTOR". */
+function nomePastaConsultor(consultor) {
+  const semAcento = (t) => String(t || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  const local = String((consultor && consultor.email) || "").split("@")[0];
+  let nome = semAcento(local).split(/[._\-+0-9]/)[0];
+  if (!nome) nome = semAcento((consultor && consultor.nome) || "").trim().split(/\s+/)[0];
+  nome = nome.replace(/[^A-Za-z]/g, "").toUpperCase();
+  return nome || "SEM CONSULTOR";
+}
+function nomePastaCliente(cliente) {
+  return String(cliente || "").replace(/[\/\\]+/g, "-").replace(/\s+/g, " ").trim().slice(0, 120) || "Cliente sem nome";
+}
+/** Pasta do cliente: HOMOLOGAÇÃO - ARQUIVOS DE RESPOSTA / CONSULTOR / Cliente. */
+function pastaHomologacaoCliente(cliente, consultor) {
+  return `${NOME_PASTA_HOMOLOGACAO_RESPOSTA_DRIVE}/${nomePastaConsultor(consultor)}/${nomePastaCliente(cliente)}`;
+}
+function pastaHomologacaoResposta(cliente, id, consultor) {
+  return `${pastaHomologacaoCliente(cliente, consultor)}/${id}`;
+}
+/** Cria (ou reaproveita) a pasta do cliente no Drive e devolve o link. Nunca lança:
+ *  em qualquer falha devolve { ok:false } e o campo de link fica para preenchimento manual. */
+async function garantirPastaDriveHomologacao(cliente, consultor) {
+  if (!DRIVE_PROXY_URL) return { ok: false };
+  const ctl = typeof AbortController !== "undefined" ? new AbortController() : null;
+  const timer = ctl ? setTimeout(() => ctl.abort(), 12000) : null;
+  try {
+    const r = await fetch(`${DRIVE_PROXY_URL}/api/documents/pasta`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(DRIVE_PROXY_KEY ? { "X-Portal-Key": DRIVE_PROXY_KEY } : {}) },
+      body: JSON.stringify({ pasta: pastaHomologacaoCliente(cliente, consultor) }),
+      signal: ctl ? ctl.signal : undefined,
+    });
+    if (!r.ok) return { ok: false };
+    const j = await r.json();
+    return j && j.link ? { ok: true, link: j.link } : { ok: false };
+  } catch (e) {
+    return { ok: false };
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 /* Ver nota de segurança no cabeçalho deste bloco: propositalmente NUNCA
    persistidas, nem espelhadas em auditoria — só em memória, nesta aba. */ const homologSenhasSessao =
@@ -15403,6 +15447,8 @@ function HomologacaoEmailsCopia({ valor, onAdicionar, onRemover, texto, setTexto
         if (avisoCofre) onNotify?.(avisoCofre, "info");
         return;
       }
+      const consultorItem = { nome: currentUser?.nome || "Usuário do portal", email: currentUser?.email || "" };
+      const pastaDrive = await garantirPastaDriveHomologacao(campos.cliente, consultorItem);
       const item = {
         id,
         fluxo: ehAtualizacao ? "atualizacao" : "homologacao",
@@ -15415,7 +15461,7 @@ function HomologacaoEmailsCopia({ valor, onAdicionar, onRemover, texto, setTexto
         ...campos,
         anexos: anexosMeta.map(({ _localFile, _localUrl, enviando, ...meta }) => meta), // nunca persiste o File/blob URL, nem o selo transitório "enviando"
         status: "nova",
-        linkHomologacao: "",
+        linkHomologacao: pastaDrive.ok ? pastaDrive.link : "",
         dataConclusao: null,
         historico: [
           {
@@ -16146,6 +16192,18 @@ function HomologacaoEnvioDetalhe({ homolog: h, isAdmin, revelando, credRevelada,
     setEditOpen(false);
     onNotify?.("Solicitação atualizada.", "info");
   }
+  const [gerandoPasta, setGerandoPasta] = useState(false);
+  async function handleGerarPasta() {
+    if (gerandoPasta) return;
+    setGerandoPasta(true);
+    const r = await garantirPastaDriveHomologacao(h.cliente, h.consultor);
+    setGerandoPasta(false);
+    if (!r.ok) return onNotify?.("Não foi possível criar a pasta no Drive agora. Tente novamente ou cole o link manualmente.", "error");
+    setLinkEdit(r.link);
+    onUpdate(h.id, { linkHomologacao: r.link });
+    logDocumentAction(auditA("gerou_pasta_drive_homologacao"), { homologacao: h.cliente });
+    onNotify?.("Pasta do cliente criada no Drive e link preenchido.", "info");
+  }
   function handleSalvarLink() {
     onUpdate(h.id, { linkHomologacao: linkEdit.trim() });
     onNotify?.(ehAtu ? "Link da atualização atualizado." : "Link da homologação atualizado.", "info");
@@ -16183,7 +16241,7 @@ function HomologacaoEnvioDetalhe({ homolog: h, isAdmin, revelando, credRevelada,
     setEnviandoAnexoResposta(true);
     for (const file of aceitos) {
       const res = await tryPersistUploadedFile(file, {
-        pasta: pastaHomologacaoResposta(h.cliente, h.id),
+        pasta: pastaHomologacaoResposta(h.cliente, h.id, h.consultor),
       });
       const novoItem = {
         id: `anexo-resp-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
@@ -16676,6 +16734,12 @@ function HomologacaoEnvioDetalhe({ homolog: h, isAdmin, revelando, credRevelada,
           { className: "mini-download-btn", onClick: handleSalvarLink },
           "Salvar link",
         ),
+        !h.linkHomologacao &&
+          /*#__PURE__*/ React.createElement(
+            "button",
+            { type: "button", className: "mini-download-btn", onClick: handleGerarPasta, disabled: gerandoPasta, "data-testid": "gerar-pasta-drive" },
+            gerandoPasta ? "Criando pasta..." : "Gerar pasta no Drive",
+          ),
         h.linkHomologacao &&
           /*#__PURE__*/ React.createElement(
             "a",
