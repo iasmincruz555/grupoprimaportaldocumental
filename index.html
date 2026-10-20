@@ -8678,7 +8678,11 @@ function DashboardView({
           icon: Building2,
           label: "Bases cadastradas",
           value: totalEmpresas,
-          sub: "1 matriz · 6 filiais",
+          sub: (() => {
+            const m = (companies || []).filter((c) => c.tipo === "Matriz").length;
+            const f = totalEmpresas - m;
+            return `${m} matriz${m === 1 ? "" : "es"} · ${f} ${f === 1 ? "filial" : "filiais"}`;
+          })(),
           onClick: onGoCompanies,
         }),
       ),
