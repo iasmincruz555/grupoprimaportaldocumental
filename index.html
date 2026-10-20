@@ -1629,9 +1629,33 @@ const STATUS_META = {
   );
   return groupDocumentsByFamily(baseOnly).map((f) => f.versions[0]);
 }
+/** TIPOS_SEMPRE_EMPRESARIAIS: tipos que são SEMPRE documento de abrangência
+ *  empresarial (Grupoprima Logística como um todo), nunca de uma filial —
+ *  pedido da Iasmin, 2026-10-20 (Comprovante de pagamento pendente na Filial
+ *  0004 no Envio em Lote): "leve como documento de abrangência empresarial,
+ *  então qualquer filial pode solicitar". Pertencem à Contabilidade > Dados
+ *  Bancários. */
+const TIPOS_SEMPRE_EMPRESARIAIS = ["Comprovante de Pagamento", "Carta de Titularidade Bancária"];
+/** normalizarDocEmpresarial: documento de categoria empresarial (Contratos
+ *  Sociais, Contabilidade, Seguros, Planos/Procedimentos/Manuais) ou de um
+ *  tipo sempre empresarial passa a valer como abrangência "empresa" mesmo que
+ *  tenha sido gravado/classificado antes como de uma Base específica — assim
+ *  aparece em TODAS as bases (Envio em Lote, chat, painel empresarial) e não
+ *  é contado por filial. Não mexe em nenhum outro documento. */
+function normalizarDocEmpresarial(d) {
+  if (!d || d.abrangencia === "empresa" || d.abrangencia === "corporativa") return d;
+  const categoriaEmpresarial = !!d.categoria && EMPRESA_CATEGORIES.some((c) => c.key === d.categoria);
+  const tipoEmpresarial = !!d.tipo && TIPOS_SEMPRE_EMPRESARIAIS.some((lbl) => tipoLabelsAceitos(lbl).includes(d.tipo));
+  if (!categoriaEmpresarial && !tipoEmpresarial) return d;
+  return {
+    ...d,
+    abrangencia: "empresa",
+    ...(tipoEmpresarial && !categoriaEmpresarial ? { categoria: "contabilidade" } : {}),
+  };
+}
 function useDerived(extraDocuments) {
   return useMemo(() => {
-    const extras = extraDocuments || [];
+    const extras = (extraDocuments || []).map(normalizarDocEmpresarial);
     const companies = companiesRaw.map((c) => {
       const confirmados = extras.filter((d) =>
         docAppliesToEstablishment(d, c.id),
