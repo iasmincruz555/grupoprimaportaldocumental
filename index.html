@@ -3135,6 +3135,10 @@ function notificarHomologacao(tipo, item) {
       dataSolicitacao: item?.dataSolicitacao,
       dataConclusao: item?.dataConclusao,
       bases: item?.bases,
+      // fluxo/tipoAtualizacao (2026-10-20): só ajustam o texto do e-mail
+      // (backend retrocompatível: sem eles, o e-mail é o de sempre).
+      fluxo: item?.fluxo === "atualizacao" ? "atualizacao" : "homologacao",
+      tipoAtualizacao: item?.tipoAtualizacao,
       // anexosResposta (2026-10-01, pedido explícito da Iasmin): só nos
       // e-mails de "concluida" o backend anexa de verdade esses arquivos
       // (ver /api/homologacao/notify em index.js) — manda só os campos que
@@ -3333,6 +3337,17 @@ const AUDIT_ACTION_LABELS = {
   alterou_status_homologacao: "Alterou status de homologação",
   revelou_credenciais_homologacao: "Revelou credenciais (homologação)",
   excluiu_homologacao: "Excluiu homologação",
+  reabriu_homologacao: "Reabriu homologação",
+  anexou_arquivo_resposta_homologacao: "Anexou arquivo de resposta (homologação)",
+  // Aba "Atualização de Homologação" (2026-10-20): mesmas ações, sufixo
+  // "_atualizacao" (ver homologAuditAction) — nunca misturadas com as de
+  // novos clientes na auditoria.
+  criou_homologacao_atualizacao: "Registrou atualização de homologação",
+  alterou_status_homologacao_atualizacao: "Alterou status de atualização de homologação",
+  revelou_credenciais_homologacao_atualizacao: "Revelou credenciais (atualização de homologação)",
+  excluiu_homologacao_atualizacao: "Excluiu atualização de homologação",
+  reabriu_homologacao_atualizacao: "Reabriu atualização de homologação",
+  anexou_arquivo_resposta_homologacao_atualizacao: "Anexou arquivo de resposta (atualização de homologação)",
   solicitou_analise_clausulas: "Solicitou análise documental de cliente",
   gerou_pdf_analise_clausulas: "Gerou PDF da análise documental",
   excluiu_analise_clausulas: "Excluiu análise documental de cliente",
@@ -6740,7 +6755,7 @@ function matchChecklistItemToCompany(item, company) {
       match:
         /sub\w* (uma )?homolog|cri\w+ (uma )?homolog|nova homolog|abr\w* (uma )?homolog|cadastr\w+ (uma )?homolog/,
       answer:
-        'Para criar uma nova homologação: 1. Vá em Homologação (menu lateral). 2. Clique no botão "Nova homologação", no topo da tela. 3. Informe o cliente e o prazo de retorno (campos obrigatórios). 4. Selecione a(s) base(s)/filial(is) envolvidas. 5. Escolha o formato de envio (e-mail ou plataforma do cliente — se for plataforma, informe o login de acesso). 6. Se quiser, adicione observações e anexe arquivos (arraste e solte ou selecione). 7. Clique em salvar para criar a homologação — ela entra automaticamente com status "Nova", e você pode acompanhar e atualizar o status depois dentro do próprio registro.',
+        'Para criar uma nova homologação: 1. Vá em Homologação (menu lateral). 2. Na aba "Homologação", clique no botão "Solicite sua homologação!", no alto da tela (para nova demanda documental de um cliente já cadastrado, use a aba "Atualização de Homologação" e o botão "Solicite uma atualização!"). 3. Informe o cliente e o prazo de retorno (campos obrigatórios). 4. Selecione a(s) base(s)/filial(is) envolvidas. 5. Escolha o formato de envio (e-mail ou plataforma do cliente — se for plataforma, informe o login de acesso). 6. Se quiser, adicione observações e anexe arquivos (arraste e solte ou selecione). 7. Clique em salvar para criar a homologação — ela entra automaticamente com status "Nova", e você pode acompanhar e atualizar o status depois dentro do próprio registro.',
     },
   ];
 function answerPortalQuestion(text) {
@@ -6838,7 +6853,11 @@ function answerQuery(query, companies, totals) {
       .orderBy("dataSolicitacao", "desc")
       .limit(200)
       .get();
-    return snap.docs.map((d) => d.data());
+    // Só o fluxo "Homologação" (novos clientes): as atualizações de clientes
+    // já cadastrados têm aba própria e não entram nas contagens/consultas
+    // do assistente sobre homologações (registros antigos, sem `fluxo`,
+    // sempre foram novos clientes).
+    return snap.docs.map((d) => d.data()).filter((it) => it && it.fluxo !== "atualizacao");
   } catch {
     return null;
   }
@@ -9400,9 +9419,10 @@ function CompaniesView({
   // Dashboard (`goToCompaniesCorporate`) é que este toggle já nasce aberto
   // — qualquer outra entrada nesta tela (nav lateral, "Ver todas", busca)
   // continua nascendo fechado, como sempre (valor default `false`).
-  const [showCorporateBlock, setShowCorporateBlock] = useState(
-    () => !!openCorporateOnMount,
-  );
+  // 2026-10-20 (pedido da Iasmin): a tela de Empresas agora abre JÁ com as
+  // documentações de abrangência empresarial expandidas (visão completa);
+  // a setinha no canto do cartão recolhe para o formato compacto.
+  const [showCorporateBlock, setShowCorporateBlock] = useState(true);
   // Consome a semente uma única vez, no mount (mesmo mecanismo de
   // onSeedConsumed do chat) — sem isso, `companiesOpenCorporate` ficaria
   // "true" pra sempre no componente pai, e a PRÓXIMA vez que a usuária
@@ -9780,6 +9800,26 @@ function CompaniesView({
       /*#__PURE__*/ React.createElement(
         "div",
         { className: "empresa-card-unica" },
+        /*#__PURE__*/ React.createElement(
+          "button",
+          {
+            type: "button",
+            className: "empresa-card-unica-collapse",
+            "aria-expanded": showCorporateBlock,
+            "aria-label": showCorporateBlock
+              ? "Recolher documentações de abrangência empresarial"
+              : "Expandir documentações de abrangência empresarial",
+            title: showCorporateBlock ? "Recolher" : "Expandir",
+            onClick: () => setShowCorporateBlock((v) => !v),
+          },
+          /*#__PURE__*/ React.createElement(ChevronDown, {
+            size: 16,
+            style: {
+              transform: showCorporateBlock ? "rotate(180deg)" : "none",
+              transition: "transform 0.2s",
+            },
+          }),
+        ),
         /*#__PURE__*/ React.createElement(
           "div",
           { className: "empresa-card-unica-head" },
@@ -13889,6 +13929,137 @@ function ViewerModal({ viewer, onClose }) {
   );
 }
 /* =========================================================================
+   HOMOLOGAÇÃO — DOIS FLUXOS (2026-10-20)
+   A mesma coleção "homologacoes" guarda os dois processos, separados pelo
+   campo `fluxo`:
+     "homologacao" — entrada de NOVOS clientes (padrão; todo registro antigo,
+                     sem o campo, é tratado assim — nenhuma migração).
+     "atualizacao" — nova demanda documental de um cliente JÁ cadastrado
+                     (certidão, licença, renovação, exigência nova...).
+                     Guarda `clienteOrigemId` (id da homologação do cliente
+                     no fluxo "homologacao") e `tipoAtualizacao`.
+   Indicadores, filtros, listagens, consultas do assistente e auditoria
+   usam sempre `homologacaoFluxoDe(item)`.
+   ========================================================================= */
+const RefreshCw = (p) =>
+  /*#__PURE__*/ React.createElement(
+    Icon,
+    p,
+    /*#__PURE__*/ React.createElement("path", { d: "M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" }),
+    /*#__PURE__*/ React.createElement("path", { d: "M21 3v5h-5" }),
+    /*#__PURE__*/ React.createElement("path", { d: "M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" }),
+    /*#__PURE__*/ React.createElement("path", { d: "M8 16H3v5" }),
+  );
+/** GoogleDriveIcon: logotipo oficial do Google Drive (três cores). */
+function GoogleDriveIcon({ size = 15 }) {
+  const e = React.createElement;
+  return e(
+    "svg",
+    { viewBox: "0 0 87.3 78", width: size, height: size, "aria-hidden": "true", focusable: "false", className: "gdrive-icon" },
+    e("path", { d: "m6.6 66.85 3.85 6.65c.8 1.4 1.95 2.5 3.3 3.3l13.75-23.8h-27.5c0 1.55.4 3.1 1.2 4.5z", fill: "#0066da" }),
+    e("path", { d: "m43.65 25-13.75-23.8c-1.35.8-2.5 1.9-3.3 3.3l-25.4 44a9.06 9.06 0 0 0-1.2 4.5h27.5z", fill: "#00ac47" }),
+    e("path", { d: "m73.55 76.8c1.35-.8 2.5-1.9 3.3-3.3l1.6-2.75 7.65-13.25c.8-1.4 1.2-2.95 1.2-4.5h-27.502l5.852 11.5z", fill: "#ea4335" }),
+    e("path", { d: "m43.65 25 13.75-23.8c-1.35-.8-2.9-1.2-4.5-1.2h-18.5c-1.6 0-3.15.45-4.5 1.2z", fill: "#00832d" }),
+    e("path", { d: "m59.8 53h-32.3l-13.75 23.8c1.35.8 2.9 1.2 4.5 1.2h50.8c1.6 0 3.15-.45 4.5-1.2z", fill: "#2684fc" }),
+    e("path", { d: "m73.4 26.5-12.7-22c-.8-1.4-1.95-2.5-3.3-3.3l-13.75 23.8 16.15 28h27.45c0-1.55-.4-3.1-1.2-4.5z", fill: "#ffba00" }),
+  );
+}
+/** isGoogleDriveLink: só marca como Drive quem realmente é do Google
+ *  (drive.google.com / docs.google.com etc.) — o endereço salvo nunca é
+ *  alterado, só decide qual ícone acompanha o "Abrir". */
+function isGoogleDriveLink(url) {
+  if (!url || typeof url !== "string") return false;
+  try {
+    const host = new URL(url.trim()).hostname.toLowerCase();
+    return (
+      host === "drive.google.com" ||
+      host === "docs.google.com" ||
+      host === "drive.usercontent.google.com" ||
+      host.endsWith(".drive.google.com")
+    );
+  } catch (err) {
+    return false;
+  }
+}
+/** HomologacaoLinkCell: coluna "Link" das tabelas — "[ícone Drive] Abrir"
+ *  quando o link é do Google Drive, "Abrir ›" para qualquer outro endereço
+ *  e "—" quando não há link. Abre em nova aba; o clique nunca abre o
+ *  detalhe da linha. */
+function HomologacaoLinkCell({ link }) {
+  const e = React.createElement;
+  if (!link) return e("span", { className: "homolog-link-empty", "aria-label": "Sem link" }, "—");
+  const drive = isGoogleDriveLink(link);
+  return e(
+    "a",
+    {
+      href: link,
+      target: "_blank",
+      rel: "noopener noreferrer",
+      className: "homolog-link",
+      title: drive ? "Abrir no Google Drive" : "Abrir link",
+      onClick: (ev) => ev.stopPropagation(),
+    },
+    drive ? e(GoogleDriveIcon, { size: 15 }) : null,
+    e("span", null, "Abrir"),
+    drive ? null : e(ChevronRight, { size: 13 }),
+  );
+}
+const HOMOLOGACAO_FLUXOS = {
+  homologacao: {
+    key: "homologacao",
+    tab: "Homologação",
+    titulo: "Homologação",
+    descricao: "Cadastro e acompanhamento de novos clientes.",
+    botao: "Solicite sua homologação!",
+    vazio: "Nenhuma homologação encontrada para os filtros selecionados.",
+    voltar: "Voltar às homologações",
+    tag: "HOMOLOGAÇÃO",
+  },
+  atualizacao: {
+    key: "atualizacao",
+    tab: "Atualização de Homologação",
+    tabCurta: "Atualização",
+    titulo: "Atualização de Homologação",
+    descricao: "Novas demandas documentais de clientes já cadastrados.",
+    botao: "Solicite uma atualização!",
+    vazio: "Nenhuma atualização encontrada para os filtros selecionados.",
+    voltar: "Voltar às atualizações",
+    tag: "ATUALIZAÇÃO DE HOMOLOGAÇÃO",
+  },
+};
+const HOMOLOGACAO_TIPOS_ATUALIZACAO = [
+  "Nova certidão",
+  "Atualização de licença",
+  "Envio de documentação adicional",
+  "Renovação de documentos",
+  "Nova exigência documental do cliente",
+  "Outro",
+];
+function homologacaoFluxoDe(item) {
+  return item && item.fluxo === "atualizacao" ? "atualizacao" : "homologacao";
+}
+/** homologAuditAction: nome da ação de auditoria do fluxo correto. */
+function homologAuditAction(fluxo, base) {
+  return fluxo === "atualizacao" ? base + "_atualizacao" : base;
+}
+/** clientesHomologadosDe: clientes que já existem no fluxo "Homologação"
+ *  (sem duplicar o nome; ignora canceladas). Cada cliente aponta para o
+ *  registro mais recente dele — é o vínculo `clienteOrigemId` das
+ *  atualizações. */
+function clientesHomologadosDe(items) {
+  const porNome = new Map();
+  (items || []).forEach((it) => {
+    if (homologacaoFluxoDe(it) !== "homologacao" || it.status === "cancelada") return;
+    const chave = normalize(it.cliente || "");
+    if (!chave) return;
+    const atual = porNome.get(chave);
+    if (!atual || String(it.dataSolicitacao) > String(atual.dataSolicitacao)) porNome.set(chave, it);
+  });
+  return [...porNome.values()]
+    .map((it) => ({ id: it.id, nome: it.cliente, status: it.status }))
+    .sort((a, b) => a.nome.localeCompare(b.nome, "pt-BR"));
+}
+/* =========================================================================
    HOMOLOGAÇÃO — acompanhamento do processo de homologação de novos
    clientes, da solicitação do consultor comercial até a conclusão pela
    equipe responsável. Estrutura conceitual de cada item:
@@ -14349,7 +14520,13 @@ function HomologacaoStatusBadge({ status, atrasada }) {
   onClose,
   onCreate,
   currentUser,
+  fluxo = "homologacao",
+  clientesCadastrados = [],
 }) {
+  const ehAtualizacao = fluxo === "atualizacao";
+  const fluxoMeta = HOMOLOGACAO_FLUXOS[fluxo] || HOMOLOGACAO_FLUXOS.homologacao;
+  const [tipoAtualizacao, setTipoAtualizacao] = useState("");
+  const [clienteOrigemId, setClienteOrigemId] = useState("");
   const [cliente, setCliente] = useState("");
   const [prazoRetorno, setPrazoRetorno] = useState("");
   const [bases, setBases] = useState([]);
@@ -14367,7 +14544,19 @@ function HomologacaoStatusBadge({ status, atrasada }) {
   }
   function handleSubmit(e) {
     e.preventDefault();
-    if (!cliente.trim()) {
+    const origem = ehAtualizacao
+      ? clientesCadastrados.find((c) => c.id === clienteOrigemId)
+      : null;
+    if (ehAtualizacao) {
+      if (!origem) {
+        setErro("Selecione um cliente já cadastrado.");
+        return;
+      }
+      if (!tipoAtualizacao) {
+        setErro("Informe o tipo de atualização.");
+        return;
+      }
+    } else if (!cliente.trim()) {
       setErro("Informe o cliente.");
       return;
     }
@@ -14391,7 +14580,9 @@ function HomologacaoStatusBadge({ status, atrasada }) {
     if (formatoEnvio === "plataforma" && senha) homologSenhasSessao[id] = senha;
     const item = {
       id,
-      cliente: cliente.trim(),
+      fluxo: ehAtualizacao ? "atualizacao" : "homologacao",
+      ...(ehAtualizacao ? { tipoAtualizacao, clienteOrigemId: origem.id } : {}),
+      cliente: ehAtualizacao ? origem.nome : cliente.trim(),
       consultor: {
         nome: currentUser?.nome || "Usuário do portal",
         email: currentUser?.email || "",
@@ -14443,7 +14634,7 @@ function HomologacaoStatusBadge({ status, atrasada }) {
             "div",
             { className: "docs-modal-title" },
             /*#__PURE__*/ React.createElement(Plus, { size: 16 }),
-            " Nova homologação",
+            ehAtualizacao ? " Nova atualização de homologação" : " Nova homologação",
           ),
           /*#__PURE__*/ React.createElement(
             "div",
@@ -14475,18 +14666,73 @@ function HomologacaoStatusBadge({ status, atrasada }) {
             " ",
             erro,
           ),
-        /*#__PURE__*/ React.createElement(
-          "div",
-          { className: "homolog-field" },
-          /*#__PURE__*/ React.createElement("label", null, "Cliente"),
-          /*#__PURE__*/ React.createElement("input", {
-            type: "text",
-            value: cliente,
-            onChange: (e) => setCliente(e.target.value),
-            placeholder: "Razão social ou nome fantasia do cliente",
-            autoFocus: true,
-          }),
-        ),
+        ehAtualizacao
+          ? /*#__PURE__*/ React.createElement(
+              React.Fragment,
+              null,
+              /*#__PURE__*/ React.createElement(
+                "div",
+                { className: "homolog-field" },
+                /*#__PURE__*/ React.createElement("label", null, "Cliente já cadastrado"),
+                /*#__PURE__*/ React.createElement(
+                  "select",
+                  {
+                    value: clienteOrigemId,
+                    onChange: (e) => setClienteOrigemId(e.target.value),
+                    autoFocus: true,
+                  },
+                  /*#__PURE__*/ React.createElement("option", { value: "" }, "Selecione o cliente..."),
+                  clientesCadastrados.map((c) =>
+                    /*#__PURE__*/ React.createElement(
+                      "option",
+                      { key: c.id, value: c.id },
+                      c.nome + " — " + (HOMOLOGACAO_STATUS_META[c.status]?.label || c.status),
+                    ),
+                  ),
+                ),
+                clientesCadastrados.length === 0 &&
+                  /*#__PURE__*/ React.createElement(
+                    "p",
+                    { className: "homolog-bases-hint" },
+                    "Nenhum cliente cadastrado ainda. Registre o cliente primeiro na aba Homologação.",
+                  ),
+              ),
+              /*#__PURE__*/ React.createElement(
+                "div",
+                { className: "homolog-field" },
+                /*#__PURE__*/ React.createElement("label", null, "Tipo de atualização"),
+                /*#__PURE__*/ React.createElement(
+                  "select",
+                  {
+                    value: tipoAtualizacao,
+                    onChange: (e) => setTipoAtualizacao(e.target.value),
+                  },
+                  /*#__PURE__*/ React.createElement("option", { value: "" }, "Selecione..."),
+                  HOMOLOGACAO_TIPOS_ATUALIZACAO.map((t) =>
+                    /*#__PURE__*/ React.createElement("option", { key: t, value: t }, t),
+                  ),
+                ),
+              ),
+            )
+          : /*#__PURE__*/ React.createElement(
+              "div",
+              { className: "homolog-field" },
+              /*#__PURE__*/ React.createElement("label", null, "Cliente"),
+              /*#__PURE__*/ React.createElement("input", {
+                type: "text",
+                value: cliente,
+                onChange: (e) => setCliente(e.target.value),
+                placeholder: "Razão social ou nome fantasia do cliente",
+                autoFocus: true,
+              }),
+              cliente.trim() &&
+                clientesCadastrados.some((c) => normalize(c.nome) === normalize(cliente)) &&
+                /*#__PURE__*/ React.createElement(
+                  "p",
+                  { className: "homolog-bases-hint homolog-dup-hint" },
+                  "Este cliente já está cadastrado. Para novos documentos ou atualizações dele, use a aba Atualização de Homologação.",
+                ),
+            ),
         /*#__PURE__*/ React.createElement(
           "div",
           { className: "homolog-field" },
@@ -14503,12 +14749,14 @@ function HomologacaoStatusBadge({ status, atrasada }) {
           /*#__PURE__*/ React.createElement(
             "label",
             null,
-            "Bases solicitadas para homologação",
+            ehAtualizacao ? "Bases envolvidas na atualização" : "Bases solicitadas para homologação",
           ),
           /*#__PURE__*/ React.createElement(
             "p",
             { className: "homolog-bases-hint" },
-            "Informe as unidades solicitadas pelo cliente para homologação e/ou levantamento de dados. Este campo permite selecionar uma ou mais unidades.",
+            ehAtualizacao
+              ? "Informe as unidades às quais esta atualização documental se aplica. Este campo permite selecionar uma ou mais unidades."
+              : "Informe as unidades solicitadas pelo cliente para homologação e/ou levantamento de dados. Este campo permite selecionar uma ou mais unidades.",
           ),
           /*#__PURE__*/ React.createElement(
             "div",
@@ -14681,11 +14929,13 @@ function HomologacaoStatusBadge({ status, atrasada }) {
             {
               type: "submit",
               className: "doc-download-btn",
-              disabled: anexos.some((a) => a.enviando),
+              disabled: anexos.some((a) => a.enviando) || (ehAtualizacao && clientesCadastrados.length === 0),
             },
             anexos.some((a) => a.enviando)
               ? "Enviando anexos..."
-              : "Registrar homologação",
+              : ehAtualizacao
+                ? "Registrar atualização"
+                : "Registrar homologação",
           ),
         ),
       ),
@@ -14828,6 +15078,10 @@ function avisoFonteExterna(descricao) {
   // sempre foi exclusivo do Administrador, mesmo antes de existir o
   // perfil Comercial.
   const isAdmin = can(currentUser, "homologacoesInterno");
+  const fluxoH = homologacaoFluxoDe(h);
+  const fluxoMeta = HOMOLOGACAO_FLUXOS[fluxoH];
+  const ehAtu = fluxoH === "atualizacao";
+  const auditA = (base) => homologAuditAction(fluxoH, base);
   const { atrasada, diasRestantes } = computePrazoInfo(
     h.prazoRetorno,
     h.status,
@@ -14853,7 +15107,7 @@ function avisoFonteExterna(descricao) {
       }),
     };
     onUpdate(h.id, patch);
-    logDocumentAction("alterou_status_homologacao", {
+    logDocumentAction(auditA("alterou_status_homologacao"), {
       homologacao: h.cliente,
       de: h.status,
       para: novoStatus,
@@ -14892,7 +15146,7 @@ function avisoFonteExterna(descricao) {
       historico: pushHistorico("reaberta", { de: "cancelada", para: anterior }),
     };
     onUpdate(h.id, patch);
-    logDocumentAction("reabriu_homologacao", {
+    logDocumentAction(auditA("reabriu_homologacao"), {
       homologacao: h.cliente,
       de: "cancelada",
       para: anterior,
@@ -14905,13 +15159,13 @@ function avisoFonteExterna(descricao) {
   function handleRevelar() {
     setSenhaRevelada(true);
     onUpdate(h.id, { historico: pushHistorico("credenciais_reveladas") });
-    logDocumentAction("revelou_credenciais_homologacao", {
+    logDocumentAction(auditA("revelou_credenciais_homologacao"), {
       homologacao: h.cliente,
     });
   }
   function handleSalvarLink() {
     onUpdate(h.id, { linkHomologacao: linkEdit.trim() });
-    onNotify?.("Link da homologação atualizado.", "info");
+    onNotify?.(ehAtu ? "Link da atualização atualizado." : "Link da homologação atualizado.", "info");
   }
   // handleAnexarArquivosResposta: mesmo upload real já usado em todo o
   // portal (tryPersistUploadedFile — sobe pro Drive oficial, numa subpasta
@@ -14970,7 +15224,7 @@ function avisoFonteExterna(descricao) {
       }
     }
     setEnviandoAnexoResposta(false);
-    logDocumentAction("anexou_arquivo_resposta_homologacao", {
+    logDocumentAction(auditA("anexou_arquivo_resposta_homologacao"), {
       homologacao: h.cliente,
       quantidade: aceitos.length,
     });
@@ -15017,7 +15271,7 @@ function avisoFonteExterna(descricao) {
       "button",
       { className: "back-btn", onClick: onBack },
       /*#__PURE__*/ React.createElement(ArrowLeft, { size: 15 }),
-      " Voltar às homologações",
+      " " + fluxoMeta.voltar,
     ),
     /*#__PURE__*/ React.createElement(
       "header",
@@ -15028,7 +15282,7 @@ function avisoFonteExterna(descricao) {
         /*#__PURE__*/ React.createElement(
           "span",
           { className: "company-header-tag" },
-          "HOMOLOGAÇÃO",
+          fluxoMeta.tag,
         ),
         /*#__PURE__*/ React.createElement(HomologacaoStatusBadge, {
           status: h.status,
@@ -15036,6 +15290,14 @@ function avisoFonteExterna(descricao) {
         }),
       ),
       /*#__PURE__*/ React.createElement("h1", null, h.cliente),
+      ehAtu &&
+        h.tipoAtualizacao &&
+        /*#__PURE__*/ React.createElement(
+          "p",
+          { className: "company-header-legal homolog-tipo-line" },
+          "Tipo de atualização: ",
+          /*#__PURE__*/ React.createElement("strong", null, h.tipoAtualizacao),
+        ),
       /*#__PURE__*/ React.createElement(
         "p",
         { className: "company-header-legal" },
@@ -15079,7 +15341,7 @@ function avisoFonteExterna(descricao) {
                 onClick: handleReabrir,
                 title: "Reabrir esta homologação cancelada (Administrador)",
               },
-              "Reabrir homologação",
+              ehAtu ? "Reabrir atualização" : "Reabrir homologação",
             ),
           // Excluir: pedido explícito da Iasmin (2026-09-18) — botão só na
           // área interna de cada homologação, restrito a Administrador
@@ -15095,7 +15357,7 @@ function avisoFonteExterna(descricao) {
                 title: "Excluir esta solicitação de homologação (Administrador)",
               },
               /*#__PURE__*/ React.createElement(XCircle, { size: 14 }),
-              " Excluir homologação",
+              ehAtu ? " Excluir atualização" : " Excluir homologação",
             ),
         ),
       isAdmin &&
@@ -15106,7 +15368,7 @@ function avisoFonteExterna(descricao) {
           /*#__PURE__*/ React.createElement(
             "span",
             null,
-            `Excluir a homologação de "${h.cliente}"? Isso remove o registro definitivamente e não pode ser desfeito.`,
+            `Excluir ${ehAtu ? "a atualização de homologação" : "a homologação"} de "${h.cliente}"? Isso remove o registro definitivamente e não pode ser desfeito.`,
           ),
           /*#__PURE__*/ React.createElement(
             "div",
@@ -15160,7 +15422,7 @@ function avisoFonteExterna(descricao) {
       }),
       /*#__PURE__*/ React.createElement(KpiCard, {
         icon: Package,
-        label: "Bases solicitadas",
+        label: ehAtu ? "Bases envolvidas" : "Bases solicitadas",
         value: h.bases?.length || 0,
       }),
       /*#__PURE__*/ React.createElement(KpiCard, {
@@ -15175,7 +15437,7 @@ function avisoFonteExterna(descricao) {
       /*#__PURE__*/ React.createElement(
         "div",
         { className: "homolog-bases-section-head" },
-        /*#__PURE__*/ React.createElement("h3", null, "Bases para homologação"),
+        /*#__PURE__*/ React.createElement("h3", null, ehAtu ? "Bases envolvidas" : "Bases para homologação"),
         !editandoBases &&
           /*#__PURE__*/ React.createElement(
             "button",
@@ -15448,7 +15710,7 @@ function avisoFonteExterna(descricao) {
     /*#__PURE__*/ React.createElement(
       "section",
       { className: "section-block homolog-detail-card" },
-      /*#__PURE__*/ React.createElement("h3", null, "Link da homologação"),
+      /*#__PURE__*/ React.createElement("h3", null, ehAtu ? "Link da atualização" : "Link da homologação"),
       /*#__PURE__*/ React.createElement(
         "div",
         { className: "homolog-link-row" },
@@ -15601,21 +15863,33 @@ function avisoFonteExterna(descricao) {
   );
 }
 /** HomologacaoView: tela de nível superior do módulo — mantém toda a
- *  navegação interna (lista ↔ detalhe, abrir/fechar modal) em estado
- *  próprio, sem tocar no roteamento do GrupoprimaPortal. Mesmo padrão de
- *  persistência best-effort de ConferenceQueueView/AuditLogView: usa a
+ *  navegação interna (aba ↔ aba, lista ↔ detalhe, abrir/fechar modal) em
+ *  estado próprio, sem tocar no roteamento do GrupoprimaPortal. Mesmo padrão
+ *  de persistência best-effort de ConferenceQueueView/AuditLogView: usa a
  *  capability "db" quando disponível; em memória, para a sessão atual,
- *  quando não. */ function HomologacaoView({ currentUser, onNotify, onView, companies }) {
+ *  quando não.
+ *
+ *  Duas abas (2026-10-20), sobre a MESMA coleção "homologacoes", separadas
+ *  pelo campo `fluxo` (ver homologacaoFluxoDe): "Homologação" (novos
+ *  clientes) e "Atualização de Homologação" (nova demanda documental de
+ *  cliente já cadastrado). Indicadores, filtros e listagem de cada aba só
+ *  enxergam os registros do próprio fluxo. */ function HomologacaoView({ currentUser, onNotify, onView, companies }) {
+  const h = React.createElement;
   const [items, setItems] = useState([]);
   const [dbBacked, setDbBacked] = useState(false);
   const [selectedId, setSelectedId] = useState(null);
-  const [modalOpen, setModalOpen] = useState(false);
+  const [aba, setAba] = useState("homologacao");
+  const [modalFluxo, setModalFluxo] = useState(null);
   const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
-  const [filtroCliente, setFiltroCliente] = useState("");
-  const [filtroConsultor, setFiltroConsultor] = useState("");
-  const [filtroStatus, setFiltroStatus] = useState("");
-  const [filtroInicio, setFiltroInicio] = useState("");
-  const [filtroFim, setFiltroFim] = useState(""); // itemsMemoria: cópia local que preserva os anexos com bytes reais desta
+  const FILTROS_VAZIOS = { cliente: "", consultor: "", status: "", tipo: "", inicio: "", fim: "" };
+  const [filtrosPorAba, setFiltrosPorAba] = useState({
+    homologacao: { ...FILTROS_VAZIOS },
+    atualizacao: { ...FILTROS_VAZIOS },
+  });
+  const filtros = filtrosPorAba[aba];
+  function setFiltro(campo, valor) {
+    setFiltrosPorAba((prev) => ({ ...prev, [aba]: { ...prev[aba], [campo]: valor } }));
+  } // itemsMemoria: cópia local que preserva os anexos com bytes reais desta
   // sessão (_localFile/_localUrl) — a versão em "db" nunca carrega esses
   // campos (não são serializáveis nem devem ser compartilhados).
   const itemsMemoriaRef = useRef({});
@@ -15670,15 +15944,22 @@ function avisoFonteExterna(descricao) {
   }
   function handleCreate(item) {
     persist(item);
-    setModalOpen(false);
-    logDocumentAction("criou_homologacao", {
+    setModalFluxo(null);
+    const fluxoItem = homologacaoFluxoDe(item);
+    logDocumentAction(homologAuditAction(fluxoItem, "criou_homologacao"), {
       homologacao: item.cliente,
       consultor: item.consultor?.nome,
+      ...(fluxoItem === "atualizacao" ? { tipoAtualizacao: item.tipoAtualizacao } : {}),
     });
-    // Avisa os admins ativos por e-mail (pedido da Iasmin, 2026-09-29) —
-    // fire-and-forget, nunca bloqueia a criação em si.
+    // Avisa por e-mail (pedido da Iasmin, 2026-09-29) — fire-and-forget,
+    // nunca bloqueia a criação em si.
     notificarHomologacao("nova_solicitacao", item);
-    onNotify?.(`Homologação de "${item.cliente}" registrada.`, "info");
+    onNotify?.(
+      fluxoItem === "atualizacao"
+        ? `Atualização de homologação de "${item.cliente}" registrada.`
+        : `Homologação de "${item.cliente}" registrada.`,
+      "info",
+    );
   }
   function handleUpdate(id, patch) {
     const atual =
@@ -15707,67 +15988,80 @@ function avisoFonteExterna(descricao) {
         return db.collection("homologacoes").doc(id).delete().catch(() => {});
       })
       .catch(() => {});
-    logDocumentAction("excluiu_homologacao", {
+    const fluxoItem = homologacaoFluxoDe(item);
+    logDocumentAction(homologAuditAction(fluxoItem, "excluiu_homologacao"), {
       homologacao: item?.cliente || "(sem cliente)",
     });
     onNotify?.(
-      `Homologação de "${item?.cliente || "cliente"}" foi excluída.`,
+      fluxoItem === "atualizacao"
+        ? `Atualização de "${item?.cliente || "cliente"}" foi excluída.`
+        : `Homologação de "${item?.cliente || "cliente"}" foi excluída.`,
       "info",
     );
   }
+  const fluxoMeta = HOMOLOGACAO_FLUXOS[aba];
+  // Só os registros do fluxo da aba ativa alimentam indicadores, filtros e tabela.
+  const itemsAba = useMemo(
+    () => items.filter((it) => homologacaoFluxoDe(it) === aba),
+    [items, aba],
+  );
+  const contagemPorAba = useMemo(() => {
+    const c = { homologacao: 0, atualizacao: 0 };
+    items.forEach((it) => {
+      c[homologacaoFluxoDe(it)]++;
+    });
+    return c;
+  }, [items]);
+  const clientesCadastrados = useMemo(() => clientesHomologadosDe(items), [items]);
   const consultores = useMemo(
     () =>
       [
-        ...new Set(items.map((it) => it.consultor?.nome).filter(Boolean)),
+        ...new Set(itemsAba.map((it) => it.consultor?.nome).filter(Boolean)),
       ].sort(),
-    [items],
+    [itemsAba],
   );
-  const filtered = items.filter((it) => {
-    if (
-      filtroCliente &&
-      !normalize(it.cliente).includes(normalize(filtroCliente))
-    )
-      return false;
-    if (filtroConsultor && it.consultor?.nome !== filtroConsultor) return false;
-    if (filtroStatus && it.status !== filtroStatus) return false;
-    if (
-      filtroInicio &&
-      new Date(it.dataSolicitacao) < new Date(filtroInicio + "T00:00:00")
-    )
-      return false;
-    if (
-      filtroFim &&
-      new Date(it.dataSolicitacao) > new Date(filtroFim + "T23:59:59")
-    )
-      return false;
-    return true;
-  });
+  const filtered = itemsAba
+    .filter((it) => {
+      if (filtros.cliente && !normalize(it.cliente).includes(normalize(filtros.cliente)))
+        return false;
+      if (filtros.consultor && it.consultor?.nome !== filtros.consultor) return false;
+      if (filtros.status && it.status !== filtros.status) return false;
+      if (aba === "atualizacao" && filtros.tipo && it.tipoAtualizacao !== filtros.tipo)
+        return false;
+      if (
+        filtros.inicio &&
+        new Date(it.dataSolicitacao) < new Date(filtros.inicio + "T00:00:00")
+      )
+        return false;
+      if (
+        filtros.fim &&
+        new Date(it.dataSolicitacao) > new Date(filtros.fim + "T23:59:59")
+      )
+        return false;
+      return true;
+    })
+    .sort((a, b) => String(b.dataSolicitacao).localeCompare(String(a.dataSolicitacao)));
   function clearFilters() {
-    setFiltroCliente("");
-    setFiltroConsultor("");
-    setFiltroStatus("");
-    setFiltroInicio("");
-    setFiltroFim("");
+    setFiltrosPorAba((prev) => ({ ...prev, [aba]: { ...FILTROS_VAZIOS } }));
   }
+  const filtrosAtivos = Object.values(filtros).some(Boolean);
   const totais = useMemo(() => {
-    let novas = 0,
-      andamento = 0,
+    let andamento = 0,
       concluidas = 0,
       atrasadas = 0;
-    items.forEach((it) => {
+    itemsAba.forEach((it) => {
       const { atrasada } = computePrazoInfo(it.prazoRetorno, it.status);
-      if (it.status === "nova") novas++;
       if (it.status === "andamento") andamento++;
       if (it.status === "concluida") concluidas++;
       if (atrasada) atrasadas++;
     });
-    return { novas, andamento, concluidas, atrasadas, total: items.length };
-  }, [items]);
+    return { andamento, concluidas, atrasadas, total: itemsAba.length };
+  }, [itemsAba]);
   const selected =
     items.find((it) => it.id === selectedId) ||
     (selectedId ? itemsMemoriaRef.current[selectedId] : null);
   if (selected) {
-    return /*#__PURE__*/ React.createElement(HomologacaoDetailView, {
+    return h(HomologacaoDetailView, {
       homolog: selected,
       currentUser: currentUser,
       onBack: () => setSelectedId(null),
@@ -15778,380 +16072,379 @@ function avisoFonteExterna(descricao) {
       companies: companies,
     });
   }
-  return /*#__PURE__*/ React.createElement(
+  const ehAtu = aba === "atualizacao";
+  const abaIcones = { homologacao: UserPlus, atualizacao: RefreshCw };
+  function onTabKeyDown(ev) {
+    if (ev.key !== "ArrowRight" && ev.key !== "ArrowLeft") return;
+    ev.preventDefault();
+    const proxima = aba === "homologacao" ? "atualizacao" : "homologacao";
+    setAba(proxima);
+    setMobileFiltersOpen(false);
+    const el = document.getElementById("homolog-tab-" + proxima);
+    if (el) el.focus();
+  }
+  return h(
     "div",
-    { className: "view" },
-    /*#__PURE__*/ React.createElement(
+    { className: "view homolog-view" },
+    h(
       "header",
-      { className: "view-header view-header-compact" },
-      /*#__PURE__*/ React.createElement(
+      { className: "view-header view-header-compact homolog-page-head" },
+      h(
         "div",
         null,
-        /*#__PURE__*/ React.createElement(
-          "p",
-          { className: "eyebrow-pill" },
-          "Comercial",
-        ),
-        /*#__PURE__*/ React.createElement("h1", null, "Homologação"),
-        /*#__PURE__*/ React.createElement(
+        h("p", { className: "eyebrow-pill" }, "Comercial"),
+        h("h1", null, "Homologação"),
+        h(
           "p",
           { className: "lede" },
-          "Acompanhamento das homologações de novos clientes, da solicitação até a conclusão.",
+          "Novos clientes e atualizações documentais de clientes já cadastrados, em um só lugar.",
         ),
       ),
     ),
-    /*#__PURE__*/ React.createElement(
+    h(
       "div",
-      { className: "kpi-hero-row" },
-      /*#__PURE__*/ React.createElement(
-        "div",
-        { className: "kpi-card kpi-card-hero kpi-accent" },
-        /*#__PURE__*/ React.createElement(
-          "div",
-          { className: "kpi-top" },
-          /*#__PURE__*/ React.createElement(Clock, {
-            size: 18,
-            strokeWidth: 2.25,
-          }),
-          /*#__PURE__*/ React.createElement(
-            "span",
-            { className: "kpi-label" },
-            "Em andamento",
-          ),
-        ),
-        /*#__PURE__*/ React.createElement(
-          "div",
-          { className: "kpi-value" },
-          totais.andamento,
-        ),
-      ),
-      /*#__PURE__*/ React.createElement(
-        "div",
-        { className: "kpi-card kpi-card-hero" },
-        /*#__PURE__*/ React.createElement(
-          "div",
-          { className: "kpi-top" },
-          /*#__PURE__*/ React.createElement(CheckCircle2, {
-            size: 18,
-            strokeWidth: 2.25,
-          }),
-          /*#__PURE__*/ React.createElement(
-            "span",
-            { className: "kpi-label" },
-            "Concluídas",
-          ),
-        ),
-        /*#__PURE__*/ React.createElement(
-          "div",
-          { className: "kpi-value" },
-          totais.concluidas,
-        ),
-      ),
+      { className: "homolog-tabs", role: "tablist", "aria-label": "Processos de homologação", onKeyDown: onTabKeyDown },
+      Object.values(HOMOLOGACAO_FLUXOS).map((f) => {
+        const ativo = f.key === aba;
+        const TabIcon = abaIcones[f.key];
+        return h(
+          "button",
+          {
+            key: f.key,
+            type: "button",
+            role: "tab",
+            id: "homolog-tab-" + f.key,
+            "aria-selected": ativo,
+            "aria-controls": "homolog-panel",
+            tabIndex: ativo ? 0 : -1,
+            className: "homolog-tab" + (ativo ? " active" : ""),
+            onClick: () => {
+              setAba(f.key);
+              setMobileFiltersOpen(false);
+            },
+          },
+          h(TabIcon, { size: 16 }),
+          f.tabCurta
+            ? h(
+                "span",
+                { className: "homolog-tab-label" },
+                h("span", { className: "homolog-tab-full" }, f.tab),
+                h("span", { className: "homolog-tab-short", "aria-hidden": "true" }, f.tabCurta),
+              )
+            : h("span", { className: "homolog-tab-label" }, f.tab),
+          h("span", { className: "homolog-tab-count" }, contagemPorAba[f.key]),
+        );
+      }),
     ),
-    /*#__PURE__*/ React.createElement(
+    h(
       "div",
-      { className: "kpi-grid kpi-grid-4" },
-      /*#__PURE__*/ React.createElement(
+      { id: "homolog-panel", role: "tabpanel", "aria-labelledby": "homolog-tab-" + aba, className: "homolog-panel homolog-panel-" + aba },
+      h(
+        "div",
+        { className: "homolog-section-head" },
+        h(
+          "div",
+          { className: "homolog-section-title" },
+          h("h2", null, fluxoMeta.titulo),
+          h("p", null, fluxoMeta.descricao),
+        ),
+        h(
+          "button",
+          {
+            type: "button",
+            className: "homolog-cta",
+            onClick: () => setModalFluxo(aba),
+          },
+          h(Plus, { size: 16, strokeWidth: 2.5 }),
+          fluxoMeta.botao,
+        ),
+      ),
+      h(
+        "div",
+        { className: "kpi-grid kpi-grid-5 homolog-kpis" },
+        h(KpiCard, {
+          icon: Clock,
+          label: "Em andamento",
+          value: totais.andamento,
+          tone: "accent",
+        }),
+        h(KpiCard, {
+          icon: CheckCircle2,
+          label: "Concluídas",
+          value: totais.concluidas,
+        }),
+        h(KpiCard, {
+          icon: AlertOctagon,
+          label: "Atrasadas",
+          value: totais.atrasadas,
+          tone: totais.atrasadas > 0 ? "danger" : "default",
+        }),
+        h(KpiCard, {
+          icon: Package,
+          label: ehAtu ? "Total de atualizações" : "Total",
+          value: totais.total,
+        }),
+        h(KpiCard, {
+          icon: Building2,
+          label: "Consultores ativos",
+          value: consultores.length,
+        }),
+      ),
+      h(
         "button",
         {
           type: "button",
-          className: "kpi-new-homolog-btn",
-          onClick: () => setModalOpen(true),
+          className: "filters-btn mobile-only",
+          "aria-expanded": mobileFiltersOpen,
+          onClick: () => setMobileFiltersOpen((v) => !v),
         },
-        /*#__PURE__*/ React.createElement(Plus, { size: 14 }),
-        " Nova homologação",
-      ),
-      /*#__PURE__*/ React.createElement(KpiCard, {
-        icon: AlertOctagon,
-        label: "Atrasadas",
-        value: totais.atrasadas,
-        tone: totais.atrasadas > 0 ? "danger" : "default",
-      }),
-      /*#__PURE__*/ React.createElement(KpiCard, {
-        icon: Package,
-        label: "Total",
-        value: totais.total,
-      }),
-      /*#__PURE__*/ React.createElement(KpiCard, {
-        icon: Building2,
-        label: "Consultores ativos",
-        value: consultores.length,
-      }),
-    ),
-    /*#__PURE__*/ React.createElement(
-      "button",
-      {
-        type: "button",
-        className: "filters-btn mobile-only",
-        "aria-expanded": mobileFiltersOpen,
-        onClick: () => setMobileFiltersOpen((v) => !v),
-      },
-      /*#__PURE__*/ React.createElement(SlidersHorizontal, { size: 15 }),
-      " Filtros",
-    ),
-    /*#__PURE__*/ React.createElement(
-      "div",
-      {
-        className:
-          "filters-bar homolog-filters-bar" +
-          (mobileFiltersOpen ? " mobile-open" : ""),
-      },
-      /*#__PURE__*/ React.createElement(
-        "div",
-        { className: "filters-bar-head" },
-        /*#__PURE__*/ React.createElement(SlidersHorizontal, { size: 15 }),
+        h(SlidersHorizontal, { size: 15 }),
         " Filtros",
       ),
-      /*#__PURE__*/ React.createElement(
+      h(
         "div",
-        { className: "filters-bar-fields" },
-        /*#__PURE__*/ React.createElement(
-          "label",
-          { className: "filter-field" },
-          /*#__PURE__*/ React.createElement("span", null, "Cliente"),
-          /*#__PURE__*/ React.createElement("input", {
-            placeholder: "Filtrar por cliente...",
-            value: filtroCliente,
-            onChange: (e) => setFiltroCliente(e.target.value),
-          }),
-        ),
-        /*#__PURE__*/ React.createElement(
-          "label",
-          { className: "filter-field" },
-          /*#__PURE__*/ React.createElement("span", null, "Consultor"),
-          /*#__PURE__*/ React.createElement(
-            "select",
-            {
-              value: filtroConsultor,
-              onChange: (e) => setFiltroConsultor(e.target.value),
-            },
-            /*#__PURE__*/ React.createElement("option", { value: "" }, "Todos"),
-            consultores.map((c) =>
-              /*#__PURE__*/ React.createElement(
-                "option",
-                { key: c, value: c },
-                c,
-              ),
-            ),
-          ),
-        ),
-        /*#__PURE__*/ React.createElement(
-          "label",
-          { className: "filter-field" },
-          /*#__PURE__*/ React.createElement("span", null, "Status"),
-          /*#__PURE__*/ React.createElement(
-            "select",
-            {
-              value: filtroStatus,
-              onChange: (e) => setFiltroStatus(e.target.value),
-            },
-            /*#__PURE__*/ React.createElement("option", { value: "" }, "Todos"),
-            Object.entries(HOMOLOGACAO_STATUS_META).map(([k, m]) =>
-              /*#__PURE__*/ React.createElement(
-                "option",
-                { key: k, value: k },
-                m.label,
-              ),
-            ),
-          ),
-        ),
-        /*#__PURE__*/ React.createElement(
-          "label",
-          { className: "filter-field filter-field-date" },
-          /*#__PURE__*/ React.createElement("span", null, "Solicitada de"),
-          /*#__PURE__*/ React.createElement("input", {
-            type: "date",
-            value: filtroInicio,
-            onChange: (e) => setFiltroInicio(e.target.value),
-          }),
-        ),
-        /*#__PURE__*/ React.createElement(
-          "label",
-          { className: "filter-field filter-field-date" },
-          /*#__PURE__*/ React.createElement("span", null, "até"),
-          /*#__PURE__*/ React.createElement("input", {
-            type: "date",
-            value: filtroFim,
-            onChange: (e) => setFiltroFim(e.target.value),
-          }),
-        ),
-      ),
-      /*#__PURE__*/ React.createElement(
-        "button",
         {
-          className: "filters-clear-btn filters-clear-inline",
-          onClick: clearFilters,
+          className:
+            "filters-bar homolog-filters-bar" +
+            (mobileFiltersOpen ? " mobile-open" : ""),
         },
-        "Limpar filtros",
-      ),
-    ),
-    /*#__PURE__*/ React.createElement(
-      "div",
-      { className: "table-wrap desktop-only" },
-      /*#__PURE__*/ React.createElement(
-        "table",
-        { className: "company-table" },
-        /*#__PURE__*/ React.createElement(
-          "thead",
-          null,
-          /*#__PURE__*/ React.createElement(
-            "tr",
-            null,
-            /*#__PURE__*/ React.createElement("th", null, "Data solicitação"),
-            /*#__PURE__*/ React.createElement("th", null, "Consultor"),
-            /*#__PURE__*/ React.createElement("th", null, "Cliente"),
-            /*#__PURE__*/ React.createElement("th", null, "Status"),
-            /*#__PURE__*/ React.createElement("th", null, "Prazo"),
-            /*#__PURE__*/ React.createElement("th", null, "Link"),
-          ),
-        ),
-        /*#__PURE__*/ React.createElement(
-          "tbody",
-          null,
-          filtered.map((it) => {
-            const { atrasada } = computePrazoInfo(it.prazoRetorno, it.status);
-            return /*#__PURE__*/ React.createElement(
-              "tr",
-              {
-                key: it.id,
-                onClick: () => setSelectedId(it.id),
-                style: { cursor: "pointer" },
-              },
-              /*#__PURE__*/ React.createElement(
-                "td",
-                { className: "mono" },
-                isoDateToBR(it.dataSolicitacao.slice(0, 10)),
-              ),
-              /*#__PURE__*/ React.createElement("td", null, it.consultor?.nome),
-              /*#__PURE__*/ React.createElement("td", null, it.cliente),
-              /*#__PURE__*/ React.createElement(
-                "td",
-                null,
-                /*#__PURE__*/ React.createElement(HomologacaoStatusBadge, {
-                  status: it.status,
-                  atrasada: atrasada,
-                }),
-              ),
-              /*#__PURE__*/ React.createElement(
-                "td",
-                { className: "mono" },
-                isoDateToBR(it.prazoRetorno),
-              ),
-              /*#__PURE__*/ React.createElement(
-                "td",
-                { onClick: (e) => e.stopPropagation() },
-                it.linkHomologacao
-                  ? /*#__PURE__*/ React.createElement(
-                      "a",
-                      {
-                        href: it.linkHomologacao,
-                        target: "_blank",
-                        rel: "noreferrer",
-                        className: "link-btn",
-                      },
-                      "Abrir ",
-                      /*#__PURE__*/ React.createElement(ChevronRight, {
-                        size: 13,
-                      }),
-                    )
-                  : "—",
-              ),
-            );
-          }),
-        ),
-      ),
-      filtered.length === 0 &&
-        /*#__PURE__*/ React.createElement(
+        h(
           "div",
-          { className: "empty-state" },
-          "Nenhuma homologação encontrada para os filtros selecionados.",
+          { className: "filters-bar-head" },
+          h(SlidersHorizontal, { size: 15 }),
+          " Filtros",
         ),
-    ),
-    /*#__PURE__*/ React.createElement(
-      "div",
-      { className: "company-cards mobile-only" },
-      filtered.map((it) => {
-        const { atrasada } = computePrazoInfo(it.prazoRetorno, it.status);
-        return /*#__PURE__*/ React.createElement(
+        h(
           "div",
-          {
-            key: it.id,
-            className: "company-card-mobile",
-            onClick: () => setSelectedId(it.id),
-          },
-          /*#__PURE__*/ React.createElement(
-            "div",
-            { className: "company-card-mobile-top" },
-            /*#__PURE__*/ React.createElement(
-              "span",
-              { className: "company-mini-tag" },
-              it.cliente,
-            ),
-            /*#__PURE__*/ React.createElement(HomologacaoStatusBadge, {
-              status: it.status,
-              atrasada: atrasada,
+          { className: "filters-bar-fields" },
+          h(
+            "label",
+            { className: "filter-field" },
+            h("span", null, "Cliente"),
+            h("input", {
+              placeholder: "Filtrar por cliente...",
+              value: filtros.cliente,
+              onChange: (e) => setFiltro("cliente", e.target.value),
             }),
           ),
-          /*#__PURE__*/ React.createElement(
-            "div",
-            { className: "company-card-mobile-row" },
-            /*#__PURE__*/ React.createElement("span", null, "Consultor"),
-            /*#__PURE__*/ React.createElement("span", null, it.consultor?.nome),
-          ),
-          /*#__PURE__*/ React.createElement(
-            "div",
-            { className: "company-card-mobile-row" },
-            /*#__PURE__*/ React.createElement("span", null, "Solicitada"),
-            /*#__PURE__*/ React.createElement(
-              "span",
-              null,
-              isoDateToBR(it.dataSolicitacao.slice(0, 10)),
+          h(
+            "label",
+            { className: "filter-field" },
+            h("span", null, "Consultor"),
+            h(
+              "select",
+              {
+                value: filtros.consultor,
+                onChange: (e) => setFiltro("consultor", e.target.value),
+              },
+              h("option", { value: "" }, "Todos"),
+              consultores.map((c) => h("option", { key: c, value: c }, c)),
             ),
           ),
-          /*#__PURE__*/ React.createElement(
-            "div",
-            { className: "company-card-mobile-row" },
-            /*#__PURE__*/ React.createElement("span", null, "Prazo"),
-            /*#__PURE__*/ React.createElement(
-              "span",
-              null,
-              isoDateToBR(it.prazoRetorno),
-            ),
-          ),
-          // Link "Abrir" (2026-10-01, paridade mobile/desktop — a tabela
-          // desktop tem uma coluna "Link" com atalho direto; sem isso o
-          // card mobile não tinha; o link ainda fica acessível abrindo o
-          // card e indo até o detalhe, mas o atalho direto faltava).
-          it.linkHomologacao &&
-            /*#__PURE__*/ React.createElement(
-              "div",
-              { className: "company-card-mobile-row" },
-              /*#__PURE__*/ React.createElement("span", null, "Link"),
-              /*#__PURE__*/ React.createElement(
-                "a",
-                {
-                  href: it.linkHomologacao,
-                  target: "_blank",
-                  rel: "noreferrer",
-                  className: "link-btn",
-                  onClick: (e) => e.stopPropagation(),
-                },
-                "Abrir ",
-                /*#__PURE__*/ React.createElement(ChevronRight, { size: 13 }),
+          h(
+            "label",
+            { className: "filter-field" },
+            h("span", null, "Status"),
+            h(
+              "select",
+              {
+                value: filtros.status,
+                onChange: (e) => setFiltro("status", e.target.value),
+              },
+              h("option", { value: "" }, "Todos"),
+              Object.entries(HOMOLOGACAO_STATUS_META).map(([k, m]) =>
+                h("option", { key: k, value: k }, m.label),
               ),
             ),
-        );
-      }),
-      filtered.length === 0 &&
-        /*#__PURE__*/ React.createElement(
-          "div",
-          { className: "empty-state" },
-          "Nenhuma homologação encontrada.",
+          ),
+          ehAtu &&
+            h(
+              "label",
+              { className: "filter-field" },
+              h("span", null, "Tipo"),
+              h(
+                "select",
+                {
+                  value: filtros.tipo,
+                  onChange: (e) => setFiltro("tipo", e.target.value),
+                },
+                h("option", { value: "" }, "Todos"),
+                HOMOLOGACAO_TIPOS_ATUALIZACAO.map((t) =>
+                  h("option", { key: t, value: t }, t),
+                ),
+              ),
+            ),
+          h(
+            "label",
+            { className: "filter-field filter-field-date" },
+            h("span", null, "Solicitada de"),
+            h("input", {
+              type: "date",
+              value: filtros.inicio,
+              onChange: (e) => setFiltro("inicio", e.target.value),
+            }),
+          ),
+          h(
+            "label",
+            { className: "filter-field filter-field-date" },
+            h("span", null, "até"),
+            h("input", {
+              type: "date",
+              value: filtros.fim,
+              onChange: (e) => setFiltro("fim", e.target.value),
+            }),
+          ),
         ),
+        h(
+          "button",
+          {
+            className: "filters-clear-btn filters-clear-inline",
+            onClick: clearFilters,
+            disabled: !filtrosAtivos,
+          },
+          "Limpar filtros",
+        ),
+      ),
+      h(
+        "div",
+        { className: "table-wrap desktop-only homolog-table-wrap" },
+        h(
+          "table",
+          { className: "company-table homolog-table" },
+          h(
+            "thead",
+            null,
+            h(
+              "tr",
+              null,
+              h("th", null, "Data solicitação"),
+              h("th", null, "Consultor"),
+              h("th", null, "Cliente"),
+              ehAtu && h("th", null, "Tipo de atualização"),
+              h("th", null, "Status"),
+              h("th", null, "Prazo"),
+              h("th", null, "Link"),
+            ),
+          ),
+          h(
+            "tbody",
+            null,
+            filtered.map((it) => {
+              const { atrasada } = computePrazoInfo(it.prazoRetorno, it.status);
+              return h(
+                "tr",
+                {
+                  key: it.id,
+                  onClick: () => setSelectedId(it.id),
+                  style: { cursor: "pointer" },
+                },
+                h(
+                  "td",
+                  { className: "mono" },
+                  isoDateToBR(it.dataSolicitacao.slice(0, 10)),
+                ),
+                h("td", null, it.consultor?.nome),
+                h("td", { className: "homolog-cell-cliente" }, it.cliente),
+                ehAtu && h("td", null, it.tipoAtualizacao || "—"),
+                h(
+                  "td",
+                  null,
+                  h(HomologacaoStatusBadge, {
+                    status: it.status,
+                    atrasada: atrasada,
+                  }),
+                ),
+                h("td", { className: "mono" }, isoDateToBR(it.prazoRetorno)),
+                h(
+                  "td",
+                  { onClick: (e) => e.stopPropagation() },
+                  h(HomologacaoLinkCell, { link: it.linkHomologacao }),
+                ),
+              );
+            }),
+          ),
+        ),
+        filtered.length === 0 &&
+          h(
+            "div",
+            { className: "empty-state" },
+            itemsAba.length === 0
+              ? ehAtu
+                ? "Nenhuma atualização registrada ainda. Use “Solicite uma atualização!” para criar a primeira."
+                : "Nenhuma homologação registrada ainda."
+              : fluxoMeta.vazio,
+          ),
+      ),
+      h(
+        "div",
+        { className: "company-cards mobile-only" },
+        filtered.map((it) => {
+          const { atrasada } = computePrazoInfo(it.prazoRetorno, it.status);
+          return h(
+            "div",
+            {
+              key: it.id,
+              className: "company-card-mobile",
+              onClick: () => setSelectedId(it.id),
+            },
+            h(
+              "div",
+              { className: "company-card-mobile-top" },
+              h("span", { className: "company-mini-tag" }, it.cliente),
+              h(HomologacaoStatusBadge, {
+                status: it.status,
+                atrasada: atrasada,
+              }),
+            ),
+            ehAtu &&
+              h(
+                "div",
+                { className: "company-card-mobile-row" },
+                h("span", null, "Tipo"),
+                h("span", null, it.tipoAtualizacao || "—"),
+              ),
+            h(
+              "div",
+              { className: "company-card-mobile-row" },
+              h("span", null, "Consultor"),
+              h("span", null, it.consultor?.nome),
+            ),
+            h(
+              "div",
+              { className: "company-card-mobile-row" },
+              h("span", null, "Solicitada"),
+              h("span", null, isoDateToBR(it.dataSolicitacao.slice(0, 10))),
+            ),
+            h(
+              "div",
+              { className: "company-card-mobile-row" },
+              h("span", null, "Prazo"),
+              h("span", null, isoDateToBR(it.prazoRetorno)),
+            ),
+            // Link "Abrir" (2026-10-01, paridade mobile/desktop).
+            it.linkHomologacao &&
+              h(
+                "div",
+                { className: "company-card-mobile-row" },
+                h("span", null, "Link"),
+                h(HomologacaoLinkCell, { link: it.linkHomologacao }),
+              ),
+          );
+        }),
+        filtered.length === 0 &&
+          h(
+            "div",
+            { className: "empty-state" },
+            ehAtu ? "Nenhuma atualização encontrada." : "Nenhuma homologação encontrada.",
+          ),
+      ),
     ),
-    modalOpen &&
-      /*#__PURE__*/ React.createElement(NovaHomologacaoModal, {
-        onClose: () => setModalOpen(false),
+    modalFluxo &&
+      h(NovaHomologacaoModal, {
+        key: modalFluxo,
+        fluxo: modalFluxo,
+        clientesCadastrados: clientesCadastrados,
+        onClose: () => setModalFluxo(null),
         onCreate: handleCreate,
         currentUser: currentUser,
       }),
@@ -31663,6 +31956,55 @@ function GrupoprimaPortal() {
 
         .kpi-new-homolog-btn { display: flex; align-items: center; gap: 8px; background: var(--azul); color: var(--verde); border: none; border-radius: 10px; padding: 13px 15px; font-weight: 700; font-size: 13.5px; cursor: pointer; text-align: left; transition: background 0.15s; }
         .kpi-new-homolog-btn:hover { background: var(--azul-2); }
+
+        /* ---- Homologação: abas internas, cabeçalho da aba, botão de ação e link do Drive (2026-10-20) ---- */
+        .homolog-page-head { margin-bottom: 14px; }
+        .homolog-tabs { display: flex; gap: 6px; border-bottom: 1px solid var(--cinza-frio); margin: 0 0 22px; overflow-x: auto; scrollbar-width: none; }
+        .homolog-tabs::-webkit-scrollbar { display: none; }
+        .homolog-tab { display: inline-flex; align-items: center; gap: 8px; padding: 11px 18px 12px; background: none; border: none; border-bottom: 3px solid transparent; margin-bottom: -1px; border-radius: 9px 9px 0 0; color: var(--carvao); font-family: inherit; font-weight: 700; font-size: 13.5px; cursor: pointer; white-space: nowrap; transition: color 0.15s, background 0.15s, border-color 0.15s; }
+        .homolog-tab:hover { color: var(--texto); background: rgba(107,254,156,0.07); }
+        .homolog-tab:focus-visible { outline: 2px solid var(--foco); outline-offset: -2px; }
+        .homolog-tab.active { color: var(--texto); background: rgba(107,254,156,0.12); border-bottom-color: var(--verde); font-weight: 800; }
+        .homolog-tab-count { min-width: 22px; padding: 1px 7px; border-radius: 999px; background: rgba(120,140,155,0.18); color: var(--carvao); font-size: 11px; font-weight: 800; text-align: center; line-height: 1.5; }
+        .homolog-tab.active .homolog-tab-count { background: var(--verde); color: var(--azul); }
+        .homolog-section-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 0 0 16px; flex-wrap: wrap; }
+        .homolog-section-title h2 { margin: 0 0 3px; font-family: 'Archivo', sans-serif; font-weight: 800; font-size: 20px; color: var(--texto); letter-spacing: -0.01em; }
+        .homolog-section-title p { margin: 0; font-size: 13px; color: var(--carvao); }
+        .homolog-cta { display: inline-flex; align-items: center; justify-content: center; gap: 8px; background: var(--verde); color: var(--azul); border: none; border-radius: 10px; padding: 12px 20px; font-family: inherit; font-weight: 800; font-size: 14px; cursor: pointer; white-space: nowrap; box-shadow: 0 2px 12px rgba(107,254,156,0.2); transition: filter 0.15s, transform 0.15s, box-shadow 0.15s; }
+        .homolog-cta:hover { filter: brightness(0.95); box-shadow: 0 4px 16px rgba(107,254,156,0.28); }
+        .homolog-cta:active { transform: translateY(1px); }
+        .homolog-cta:focus-visible { outline: 2px solid var(--foco); outline-offset: 2px; }
+        .homolog-kpis { margin-bottom: 16px; }
+        .homolog-filters-bar { margin: 0 0 18px; }
+        .homolog-table-wrap .company-table td { vertical-align: middle; }
+        .homolog-cell-cliente { font-weight: 600; }
+        .homolog-link { display: inline-flex; align-items: center; gap: 6px; color: var(--texto); font-weight: 700; font-size: 12.5px; text-decoration: underline; text-underline-offset: 3px; line-height: 1; }
+        .homolog-link:hover { text-decoration-thickness: 2px; }
+        .homolog-link:focus-visible { outline: 2px solid var(--foco); outline-offset: 3px; border-radius: 3px; }
+        .gdrive-icon { display: block; flex-shrink: 0; }
+        .homolog-link-empty { color: var(--carvao); }
+        .homolog-dup-hint { color: #C98A00; margin-top: 6px; }
+        .homolog-tipo-line strong { color: var(--texto); }
+        @media (max-width: 1100px) {
+          .homolog-kpis { grid-template-columns: repeat(6, 1fr); }
+          .homolog-kpis > :nth-child(-n+3) { grid-column: span 2; }
+          .homolog-kpis > :nth-child(n+4) { grid-column: span 3; }
+        }
+        @media (max-width: 767px) {
+          .homolog-kpis { grid-template-columns: repeat(2, 1fr); }
+          .homolog-kpis > :nth-child(n) { grid-column: auto; }
+          .homolog-kpis > :last-child { grid-column: 1 / -1; }
+        }
+        .homolog-tab-short { display: none; }
+        @media (max-width: 767px) {
+          .homolog-tabs { gap: 2px; }
+          .homolog-tab { flex: 1 1 0; justify-content: center; padding: 10px 8px 11px; font-size: 13px; }
+          .homolog-tab-full { display: none; }
+          .homolog-tab-short { display: inline; }
+          .homolog-section-head { align-items: stretch; }
+          .homolog-section-title { flex: 1 1 100%; }
+          .homolog-cta { width: 100%; }
+        }
         .kpi-card-hero .kpi-value { font-size: clamp(28px, 6vw, 38px); }
 
         .alert-list { margin-bottom: 30px; display: flex; flex-direction: column; gap: 8px; }
@@ -31823,7 +32165,7 @@ function GrupoprimaPortal() {
         .central-op-send { display: flex; align-items: center; justify-content: center; background: var(--azul); color: #fff; border: none; width: 30px; height: 30px; border-radius: 7px; cursor: pointer; flex-shrink: 0; }
         .central-op-send:disabled { opacity: 0.35; cursor: default; }
 
-        .empresa-card-unica { background: var(--card-bg); border: 1px solid var(--cinza-frio); border-radius: 14px; padding: 26px; width: 100%; display: flex; flex-direction: column; gap: 20px; }
+        .empresa-card-unica { position: relative; background: var(--card-bg); border: 1px solid var(--cinza-frio); border-radius: 14px; padding: 26px; width: 100%; display: flex; flex-direction: column; gap: 20px; }
         .empresa-card-unica-head { display: flex; align-items: center; gap: 14px; color: var(--texto); }
         .empresa-card-unica-head h2 { margin: 0; font-size: 18px; letter-spacing: 0.01em; color: var(--texto); }
         .empresa-card-unica-head p { margin: 2px 0 0; font-size: 12.5px; color: var(--carvao); }
@@ -31832,6 +32174,9 @@ function GrupoprimaPortal() {
         .empresa-card-unica-stats strong { font-size: 22px; font-weight: 900; color: var(--texto); }
         .empresa-card-unica-stats span { font-size: 11px; color: var(--carvao); text-transform: uppercase; letter-spacing: 0.03em; }
         .empresa-card-unica-btn { align-self: flex-start; }
+        .empresa-card-unica-collapse { position: absolute; top: 10px; right: 12px; width: 28px; height: 28px; display: inline-flex; align-items: center; justify-content: center; background: var(--branco-frio); border: 1px solid var(--cinza-frio); border-radius: 50%; color: var(--texto); cursor: pointer; z-index: 2; }
+        .empresa-card-unica-collapse:hover { border-color: var(--texto); }
+        .empresa-card-unica-collapse:focus-visible { outline: 2px solid var(--foco); outline-offset: 2px; }
         /* Meu Perfil em telas largas: seções em duas colunas balanceadas, em vez de
            uma única coluna esticada. */
         @media (min-width: 1100px) {
@@ -31845,7 +32190,7 @@ function GrupoprimaPortal() {
           .empresa-card-unica { display: grid; grid-template-columns: minmax(0, 1.1fr) auto minmax(0, 1fr); align-items: center; gap: 22px 40px; padding: 28px 32px; }
           .empresa-card-unica-stats { border-top: none; border-bottom: none; border-left: 1px solid var(--cinza-frio); border-right: 1px solid var(--cinza-frio); padding: 4px 40px; gap: 40px; }
           .empresa-card-unica-actions { justify-content: flex-end; }
-          .empresa-card-unica > :nth-child(n+4) { grid-column: 1 / -1; }
+          .empresa-card-unica > :nth-child(n+5) { grid-column: 1 / -1; }
         }
         .empresa-card-unica-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
         .empresa-card-unica-corp-toggle { display: flex; align-items: center; gap: 7px; background: var(--card-bg); color: var(--texto); border: 1.5px solid var(--cinza-frio); border-radius: 10px; padding: 10px 14px; font-weight: 700; font-size: 12.5px; cursor: pointer; transition: border-color 0.15s, background 0.15s; }
