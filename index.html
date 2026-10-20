@@ -14129,19 +14129,28 @@ function clientesHomologadosDe(items) {
    Uma Homologação "cancelada" (decisão comercial) nunca é reaberta pelo lote.
    ========================================================================= */
 const LOTE_TIPOS_SOLICITACAO = {
-  homologacao: { label: "Homologação", sub: "Processo de um novo cliente. Aparece na aba Homologação.", curto: "Homologação" },
+  // "Lote de Documentos" (2026-10-20): ferramenta independente de coleta
+  // documental — usa o mesmo mecanismo de seleção/ZIP, mas NUNCA cria registro
+  // em Homologação nem em Atualização de Homologação. A chave interna continua
+  // "coleta" para preservar os registros já gravados com essa modalidade.
+  // A ORDEM das chaves define a ordem dos cards no formulário.
+  coleta: {
+    label: "Lote de Documentos",
+    sub: "Reúna os documentos necessários para cada cliente, confira os arquivos disponíveis, inclua documentos que precisam ser preenchidos e gere um pacote ZIP organizado para download.",
+    curto: "Lote",
+    regra: "Fica registrado somente nesta página — não cria registro em Homologação nem em Atualização de Homologação.",
+  },
+  homologacao: {
+    label: "Homologação",
+    sub: "Para iniciar o cadastro e a homologação de um novo cliente, reunindo as documentações exigidas para o processo.",
+    curto: "Homologação",
+    regra: "Também é registrada na aba Homologação, para acompanhar andamento, prazo e conclusão.",
+  },
   atualizacao: {
     label: "Atualização de Homologação",
-    sub: "Nova demanda documental de um cliente já cadastrado. Aparece na aba Atualização de Homologação.",
+    sub: "Para atender a novas exigências documentais ou atualizar documentos de clientes que já passaram pelo processo de cadastro e homologação.",
     curto: "Atualização",
-  },
-  // Terceira modalidade (2026-10-20): ferramenta independente de coleta
-  // documental — usa o mesmo mecanismo de seleção/ZIP, mas NUNCA cria
-  // registro em Homologação nem em Atualização de Homologação.
-  coleta: {
-    label: "Consulta e Coleta de Documentos",
-    sub: "Localizar, reunir e baixar documentos (ZIP), sem criar registro em Homologação.",
-    curto: "Coleta",
+    regra: "Também é registrada na aba Atualização de Homologação, para acompanhar andamento, prazo e conclusão.",
   },
 };
 function loteGeraHomologacao(tipo) {
@@ -14433,11 +14442,11 @@ function LoteHomologacaoCard({ item, companies, onUpdate, onAbrir, currentUser }
     "div",
     { className: "integ-card-head" },
     ehColeta ? h(FolderArchive, { size: 15 }) : h(UserPlus, { size: 15 }),
-    h("span", null, ehColeta ? "Consulta e Coleta de Documentos" : "Acompanhamento em Homologação"),
+    h("span", null, ehColeta ? "Lote de Documentos" : "Acompanhamento em Homologação"),
   );
   let corpo;
   if (ehColeta) {
-    corpo = h("p", { className: "integ-card-text" }, "Coleta documental independente: esta solicitação não gera registro nas abas Homologação ou Atualização de Homologação e não entra nos indicadores delas.");
+    corpo = h("p", { className: "integ-card-text" }, "Lote de Documentos: esta solicitação fica registrada somente aqui, não gera registro nas abas Homologação ou Atualização de Homologação e não entra nos indicadores delas.");
   } else if (!item.tipoSolicitacao) {
     corpo = h(
       "div",
@@ -14461,7 +14470,7 @@ function LoteHomologacaoCard({ item, companies, onUpdate, onAbrir, currentUser }
             { className: "integ-card-row" },
             h("button", { type: "button", className: "doc-view-btn", onClick: () => classificar("homologacao") }, "Classificar como Homologação"),
             h("button", { type: "button", className: "doc-view-btn", onClick: () => setEscolhendoAtu(true) }, "Classificar como Atualização de Homologação"),
-            h("button", { type: "button", className: "doc-view-btn", onClick: () => classificar("coleta") }, "Classificar como Consulta e Coleta (sem Homologação)"),
+            h("button", { type: "button", className: "doc-view-btn", onClick: () => classificar("coleta") }, "Classificar como Lote de Documentos (sem Homologação)"),
           ),
       erro && h("p", { className: "integ-card-erro" }, erro),
     );
@@ -25003,7 +25012,7 @@ function EnvioLoteFormModal({ companies, onClose, onCreate, clientesCadastrados 
     e.preventDefault();
     setErro(null);
     if (!tipoSolicitacao) {
-      setErro("Selecione o tipo de solicitação: Homologação, Atualização de Homologação ou Consulta e Coleta de Documentos.");
+      setErro("Selecione o tipo de solicitação: Lote de Documentos, Homologação ou Atualização de Homologação.");
       return;
     }
     const origemSel = tipoSolicitacao === "atualizacao" ? clientesCadastrados.find((c) => c.id === clienteOrigemId) : null;
@@ -25084,12 +25093,12 @@ function EnvioLoteFormModal({ companies, onClose, onCreate, clientesCadastrados 
             "div",
             { className: "docs-modal-title" },
             React.createElement(FolderArchive, { size: 16 }),
-            " Nova solicitação de envio em lote",
+            " Solicite as Documentações",
           ),
           React.createElement(
             "div",
             { className: "docs-modal-sub" },
-            "Informe o cliente, as filiais/bases envolvidas e a lista de documentações exigidas — a solicitação fica salva com histórico completo, mesmo antes de processar.",
+            "Escolha a modalidade, informe o cliente, as bases e os documentos necessários. A solicitação fica salva com histórico completo, mesmo antes de processar.",
           ),
         ),
         React.createElement(
@@ -25135,6 +25144,14 @@ function EnvioLoteFormModal({ companies, onClose, onCreate, clientesCadastrados 
               ),
             ),
           ),
+          tipoSolicitacao &&
+            LOTE_TIPOS_SOLICITACAO[tipoSolicitacao] &&
+            React.createElement(
+              "p",
+              { className: "lote-tipo-nota", role: "status" },
+              React.createElement(CheckCircle2, { size: 14 }),
+              LOTE_TIPOS_SOLICITACAO[tipoSolicitacao].regra,
+            ),
         ),
         tipoSolicitacao === "atualizacao"
           ? React.createElement(
@@ -26796,19 +26813,19 @@ function EnvioLoteView({ currentUser, onNotify, onView, companies, registroAlvo,
         React.createElement(
           "p",
           { className: "lede" },
-          "Monte a lista de documentações exigidas por um cliente, cruze com o catálogo real e acompanhe recebimento, processamento e geração do pacote final — com histórico completo.",
+          "Selecione os documentos necessários para cada cliente, confira os arquivos disponíveis, inclua documentos que precisam ser preenchidos e reúna tudo em um pacote ZIP organizado para download.",
         ),
+      ),
+      React.createElement(
+        "button",
+        { type: "button", className: "homolog-cta lote-cta", onClick: () => setModalOpen(true), "data-testid": "lote-nova" },
+        React.createElement(Plus, { size: 16, strokeWidth: 2.5 }),
+        "Solicite as Documentações",
       ),
     ),
     React.createElement(
       "div",
-      { className: "kpi-grid kpi-grid-4" },
-      React.createElement(
-        "button",
-        { type: "button", className: "kpi-new-homolog-btn", onClick: () => setModalOpen(true) },
-        React.createElement(Plus, { size: 14 }),
-        " Nova solicitação",
-      ),
+      { className: "kpi-grid kpi-grid-3 lote-kpis" },
       React.createElement(KpiCard, { icon: Loader2, label: "Em processamento", value: totais.processando }),
       React.createElement(KpiCard, { icon: CheckCircle2, label: "Concluídas", value: totais.concluidas }),
       React.createElement(KpiCard, {
@@ -33362,7 +33379,12 @@ function GrupoprimaPortal() {
         .homolog-cell-cliente { font-weight: 600; }
         .lote-origem-chip { display: inline-block; margin-left: 8px; padding: 1px 8px; border-radius: 999px; font-size: 10.5px; font-weight: 700; color: var(--carvao); background: rgba(107,254,156,0.18); border: 1px solid rgba(107,254,156,0.45); vertical-align: middle; white-space: nowrap; }
         .lote-tipo-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-        .lote-tipo-grid .lote-tipo-card:nth-child(3) { grid-column: 1 / -1; }
+        .lote-tipo-grid .lote-tipo-card:nth-child(1) { grid-column: 1 / -1; }
+        .lote-tipo-nota { display: flex; align-items: flex-start; gap: 7px; margin: 10px 0 0; font-size: 12px; font-weight: 600; color: var(--texto); line-height: 1.4; }
+        .lote-tipo-nota svg { flex: none; margin-top: 1px; }
+        .kpi-grid-3 { grid-template-columns: repeat(3, 1fr); margin-bottom: 0; }
+        .lote-cta { align-self: center; flex: none; }
+        .lote-kpis { margin-top: 2px; }
         .lote-tipo-tag-coleta { background: rgba(120,160,255,0.16); border-color: rgba(120,160,255,0.45); }
         .lote-add-cliente-btn { display: inline-flex; align-items: center; gap: 6px; background: none; border: 1px dashed var(--cinza-frio); border-radius: 9px; padding: 8px 12px; color: var(--carvao); font-family: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer; text-align: left; }
         .lote-add-cliente-btn:hover { border-color: var(--azul-2); color: var(--texto); }
@@ -34483,7 +34505,9 @@ function GrupoprimaPortal() {
         /* ---- Celular: colunas únicas/duplas, mais compacto, sem colunas apertadas ---- */
         @media (max-width: 767px) {
           .view-header { flex-wrap: wrap; }
-          .kpi-grid, .kpi-grid-5 { grid-template-columns: repeat(2, 1fr); gap: 8px; }
+          .kpi-grid, .kpi-grid-5, .kpi-grid-3 { grid-template-columns: repeat(2, 1fr); gap: 8px; }
+          .kpi-grid-3 > :nth-child(3) { grid-column: 1 / -1; }
+          .lote-cta { width: 100%; }
           .company-mini-grid { grid-template-columns: 1fr; }
           .company-meta-grid { grid-template-columns: 1fr; }
           .desktop-only { display: none !important; }
