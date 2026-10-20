@@ -3338,6 +3338,8 @@ const AUDIT_ACTION_LABELS = {
   revelou_credenciais_homologacao: "Revelou credenciais (homologação)",
   excluiu_homologacao: "Excluiu homologação",
   reabriu_homologacao: "Reabriu homologação",
+  editou_homologacao: "Editou homologação",
+  editou_homologacao_atualizacao: "Editou atualização de homologação",
   anexou_arquivo_resposta_homologacao: "Anexou arquivo de resposta (homologação)",
   // Aba "Atualização de Homologação" (2026-10-20): mesmas ações, sufixo
   // "_atualizacao" (ver homologAuditAction) — nunca misturadas com as de
@@ -6755,7 +6757,7 @@ function matchChecklistItemToCompany(item, company) {
       match:
         /sub\w* (uma )?homolog|cri\w+ (uma )?homolog|nova homolog|abr\w* (uma )?homolog|cadastr\w+ (uma )?homolog/,
       answer:
-        'Para criar uma nova homologação: 1. Vá em Homologação (menu lateral). 2. Na aba "Homologação", clique no botão "Solicite sua homologação!", no alto da tela (para nova demanda documental de um cliente já cadastrado, use a aba "Atualização de Homologação" e o botão "Solicite uma atualização!"). 3. Informe o cliente e o prazo de retorno (campos obrigatórios). 4. Selecione a(s) base(s)/filial(is) envolvidas. 5. Escolha o formato de envio (e-mail ou plataforma do cliente — se for plataforma, informe o login de acesso). 6. Se quiser, adicione observações e anexe arquivos (arraste e solte ou selecione). 7. Clique em salvar para criar a homologação — ela entra automaticamente com status "Nova", e você pode acompanhar e atualizar o status depois dentro do próprio registro.',
+        'Para criar uma nova homologação: 1. Vá em Homologação (menu lateral). 2. Na aba "Homologação", clique no botão "Solicite sua homologação!", no alto da tela (para nova demanda documental de um cliente já cadastrado, use a aba "Atualização de Homologação" e o botão "Solicite uma atualização!"). 3. Informe o cliente e o prazo de retorno (campos obrigatórios). 4. Em "Quais bases serão cadastradas?", selecione a(s) base(s). 5. Escolha o formato de envio: "Direto ao consultor comercial" (padrão), "E-mail do cliente" (informe o e-mail do cliente e, se quiser, e-mails em cópia) ou "Plataforma do cliente" (informe a URL, o login e a senha). 6. Se quiser, registre as observações importantes e anexe RFI, NDA, prints de e-mail ou outros documentos (arraste e solte ou selecione). 7. Clique em salvar para criar a homologação — ela entra automaticamente com status "Nova", e você pode acompanhar e atualizar o status depois dentro do próprio registro.',
     },
   ];
 function answerPortalQuestion(text) {
@@ -14115,8 +14117,7 @@ function clientesHomologadosDe(items) {
     "Bahia (Filial 0013)",
     "São Paulo (Filial 0007)",
     "Espírito Santo (Filial 0010)",
-    "Nextflow",
-  ];
+  ]; // "Nextflow" saiu da lista (2026-10-20): só as bases oficiais da Grupoprima podem ser escolhidas. Solicitações antigas que já o têm continuam exibindo-o.
 const HOMOLOGACAO_STATUS_META = {
   nova: { label: "Nova", className: "status-nova" },
   andamento: { label: "Em andamento", className: "status-andamento" },
@@ -14423,6 +14424,11 @@ function HomologacaoStatusBadge({ status, atrasada }) {
       ),
     ),
     /*#__PURE__*/ React.createElement(
+      "p",
+      { className: "homolog-bases-hint" },
+      "Existe algum RFI, NDA, print de e-mail ou outro documento relevante para a homologação? Anexe aqui para manter todas as informações importantes reunidas na solicitação.",
+    ),
+    /*#__PURE__*/ React.createElement(
       "div",
       {
         className: "homolog-dropzone",
@@ -14514,428 +14520,780 @@ function HomologacaoStatusBadge({ status, atrasada }) {
       ),
   );
 }
-/** NovaHomologacaoModal: formulário de solicitação. `consultor` (nome +
- *  e-mail) e `dataSolicitacao` são preenchidos automaticamente a partir
- *  de quem está logada — nunca pedidos por campo. */ function NovaHomologacaoModal({
+/* ---- Formulário de Homologação: modalidades de envio, e-mails e cofre de credenciais (2026-10-20) ----
+   formatoEnvio (seleção única):
+     "consultor"     — Direto ao consultor comercial (padrão; mantém o fluxo atual).
+     "email_cliente" — E-mail do cliente (+ CC opcionais): só REGISTRA os
+                       destinatários na solicitação; nenhum e-mail ao cliente é
+                       enviado por este cadastro (não existe essa integração).
+     "plataforma"    — Plataforma do cliente: URL + login + senha.
+     "email"         — valor ANTIGO ("E-mail", sem endereço): continua sendo exibido
+                       como "E-mail"; ao editar, vira "consultor". Nada é migrado.
+   Login e senha da plataforma ficam no cofre criptografado do backend
+   (ver COFRE DE CREDENCIAIS em index.js); a solicitação guarda só a URL e
+   `credenciaisProtegidas: true`. */
+const HOMOLOGACAO_FORMATOS = [
+  { key: "consultor", label: "Direto ao consultor comercial", dica: "A documentação e as orientações seguem para o consultor comercial responsável." },
+  { key: "email_cliente", label: "E-mail do cliente", dica: "Informe quem recebe as documentações. Os endereços ficam registrados na solicitação." },
+  { key: "plataforma", label: "Plataforma do cliente", dica: "Dados de acesso à plataforma onde as documentações serão enviadas." },
+];
+const HOMOLOGACAO_MAX_EMAILS_CC = 10;
+function homologacaoFormatoLabel(formato) {
+  if (formato === "consultor") return "Consultor comercial";
+  if (formato === "email_cliente") return "E-mail do cliente";
+  if (formato === "plataforma") return "Plataforma";
+  return "E-mail"; // valor antigo
+}
+function isEmailValido(valor) {
+  return /^[^\s@,;<>()[\]\\]+@[^\s@,;<>()[\]\\]+\.[^\s@,;<>()[\]\\]{2,}$/.test(String(valor || "").trim());
+}
+function parseListaEmails(texto) {
+  return String(texto || "")
+    .split(/[\s,;]+/)
+    .map((x) => x.trim())
+    .filter(Boolean);
+}
+/** normalizarUrlPlataforma: aceita "portal.cliente.com/login" (assume https),
+ *  recusa qualquer esquema que não seja http/https (nunca javascript:). */
+function normalizarUrlPlataforma(texto) {
+  let bruto = String(texto || "").trim();
+  if (!bruto) return null;
+  if (!/^[a-z][a-z0-9+.-]*:/i.test(bruto)) bruto = "https://" + bruto;
+  try {
+    const u = new URL(bruto);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+    if (!u.hostname || (u.hostname.indexOf(".") === -1 && u.hostname !== "localhost")) return null;
+    return u.toString();
+  } catch (err) {
+    return null;
+  }
+}
+/** homologacaoBasesOpcoes: bases oficiais da Grupoprima (as mesmas já
+ *  cadastradas no portal). Bases antigas já gravadas numa solicitação
+ *  (ex.: "Nextflow") continuam aparecendo APENAS nessa solicitação, para
+ *  nunca serem apagadas sem querer ao editar. */
+function homologacaoBasesOpcoes(companies, selecionadas) {
+  const oficiais = HOMOLOGACAO_BASES.filter(
+    (b) => !companies || companies.length === 0 || resolveCompanyFromHomologacaoBase(b, companies),
+  );
+  const extras = (selecionadas || []).filter((b) => !oficiais.includes(b));
+  return [...oficiais, ...extras];
+}
+/** homologCredenciaisApi: cofre do backend. Nunca lança — devolve { ok } /
+ *  { ok:false, motivo }. Login/senha nunca são logados. */
+let homologCofreConfigurado = null;
+const homologCredenciaisApi = {
+  _headers() {
+    return { "Content-Type": "application/json", "X-Portal-Key": DRIVE_PROXY_KEY };
+  },
+  async status() {
+    if (homologCofreConfigurado !== null) return homologCofreConfigurado;
+    try {
+      const r = await fetch(`${DRIVE_PROXY_URL}/api/homologacao/credenciais/status`, { headers: this._headers() });
+      const j = await r.json();
+      homologCofreConfigurado = !!(j && j.ok && j.configurado);
+    } catch (err) {
+      return false; // não memoriza falha de rede
+    }
+    return homologCofreConfigurado;
+  },
+  async salvar(id, { login, senha }) {
+    try {
+      const r = await fetch(`${DRIVE_PROXY_URL}/api/homologacao/${encodeURIComponent(id)}/credenciais`, {
+        method: "PUT",
+        headers: this._headers(),
+        body: JSON.stringify({ login: login || undefined, senha: senha || undefined }),
+      });
+      const j = await r.json().catch(() => ({}));
+      return r.ok && j.ok ? { ok: true } : { ok: false, motivo: j.motivo || "falha" };
+    } catch (err) {
+      return { ok: false, motivo: "rede" };
+    }
+  },
+  async revelar(id, solicitanteEmail) {
+    try {
+      const r = await fetch(`${DRIVE_PROXY_URL}/api/homologacao/${encodeURIComponent(id)}/credenciais/revelar`, {
+        method: "POST",
+        headers: this._headers(),
+        body: JSON.stringify({ solicitanteEmail }),
+      });
+      const j = await r.json().catch(() => ({}));
+      return r.ok && j.ok ? { ok: true, login: j.login || "", senha: j.senha || "" } : { ok: false, motivo: j.motivo || "falha", message: j.message };
+    } catch (err) {
+      return { ok: false, motivo: "rede" };
+    }
+  },
+  async remover(id) {
+    try {
+      await fetch(`${DRIVE_PROXY_URL}/api/homologacao/${encodeURIComponent(id)}/credenciais`, {
+        method: "DELETE",
+        headers: this._headers(),
+      });
+    } catch (err) {
+      /* best-effort */
+    }
+  },
+};
+/** HomologacaoEmailsCopia: campo de e-mails em cópia (CC) — digite e
+ *  Enter/vírgula/ponto e vírgula/espaço (ou cole vários de uma vez), cada
+ *  endereço vira uma etiqueta removível. */
+function HomologacaoEmailsCopia({ valor, onAdicionar, onRemover, texto, setTexto, invalido }) {
+  const h = React.createElement;
+  function onKeyDown(ev) {
+    if (ev.key === "Enter" || ev.key === "," || ev.key === ";") {
+      ev.preventDefault();
+      onAdicionar(texto);
+    } else if (ev.key === "Backspace" && !texto && valor.length > 0) {
+      onRemover(valor[valor.length - 1]);
+    }
+  }
+  return h(
+    "div",
+    { className: "homolog-cc" },
+    h(
+      "div",
+      { className: "homolog-cc-row" },
+      h("input", {
+        type: "text",
+        inputMode: "email",
+        autoComplete: "off",
+        value: texto,
+        placeholder: "email@cliente.com — Enter para adicionar",
+        "aria-label": "Adicionar e-mail em cópia",
+        "aria-invalid": invalido ? "true" : undefined,
+        onChange: (e) => setTexto(e.target.value),
+        onKeyDown: onKeyDown,
+        onPaste: (e) => {
+          const t = e.clipboardData && e.clipboardData.getData("text");
+          if (t && /[\s,;]/.test(t.trim())) {
+            e.preventDefault();
+            onAdicionar(t);
+          }
+        },
+      }),
+      h(
+        "button",
+        { type: "button", className: "homolog-cc-add", onClick: () => onAdicionar(texto), disabled: !texto.trim() },
+        h(Plus, { size: 14 }),
+        " Adicionar",
+      ),
+    ),
+    valor.length > 0 &&
+      h(
+        "ul",
+        { className: "homolog-cc-chips", "aria-label": "E-mails em cópia" },
+        valor.map((em) =>
+          h(
+            "li",
+            { key: em, className: "homolog-cc-chip" },
+            h("span", null, em),
+            h(
+              "button",
+              { type: "button", onClick: () => onRemover(em), "aria-label": "Remover " + em },
+              h(X, { size: 12 }),
+            ),
+          ),
+        ),
+      ),
+  );
+}
+/** NovaHomologacaoModal: formulário de solicitação (criar) e de edição
+ *  (`editando` = registro existente, `onSave` = grava o patch). `consultor`
+ *  (nome + e-mail) e `dataSolicitacao` são preenchidos automaticamente a
+ *  partir de quem está logada — nunca pedidos por campo. */ function NovaHomologacaoModal({
   onClose,
   onCreate,
+  onSave,
+  onNotify,
   currentUser,
   fluxo = "homologacao",
   clientesCadastrados = [],
+  editando = null,
+  companies = [],
 }) {
-  const ehAtualizacao = fluxo === "atualizacao";
-  const fluxoMeta = HOMOLOGACAO_FLUXOS[fluxo] || HOMOLOGACAO_FLUXOS.homologacao;
-  const [tipoAtualizacao, setTipoAtualizacao] = useState("");
-  const [clienteOrigemId, setClienteOrigemId] = useState("");
-  const [cliente, setCliente] = useState("");
-  const [prazoRetorno, setPrazoRetorno] = useState("");
-  const [bases, setBases] = useState([]);
-  const [formatoEnvio, setFormatoEnvio] = useState("email");
-  const [login, setLogin] = useState("");
+  const h = React.createElement;
+  const ehEdicao = !!editando;
+  const ehAtualizacao = (editando ? homologacaoFluxoDe(editando) : fluxo) === "atualizacao";
+  const acAnt = (editando && editando.acessoPlataforma) || null;
+  const formatoAnterior = editando ? editando.formatoEnvio : null;
+  const formatoInicial =
+    !editando || formatoAnterior === "email" || !formatoAnterior ? "consultor" : formatoAnterior;
+  // Já havia acesso à plataforma nesta solicitação: login/senha ficam "mantidos"
+  // (em branco = não mudar). Para registros antigos, a senha nunca foi guardada
+  // e o login aparece pré-preenchido; nada é exigido de novo só para editar bases.
+  const credenciaisAnteriores = !!(editando && formatoAnterior === "plataforma" && acAnt);
+  const [tipoAtualizacao, setTipoAtualizacao] = useState(editando?.tipoAtualizacao || "");
+  const [clienteOrigemId, setClienteOrigemId] = useState(editando?.clienteOrigemId || "");
+  const [cliente, setCliente] = useState(editando?.cliente || "");
+  const [prazoRetorno, setPrazoRetorno] = useState(editando?.prazoRetorno || "");
+  const [bases, setBases] = useState(editando?.bases || []);
+  const [formatoEnvio, setFormatoEnvio] = useState(formatoInicial);
+  const [emailCliente, setEmailCliente] = useState(editando?.emailCliente || "");
+  const [emailsCopia, setEmailsCopia] = useState(editando?.emailsCopia || []);
+  const [emailCopiaTexto, setEmailCopiaTexto] = useState("");
+  const [urlPlataforma, setUrlPlataforma] = useState(acAnt?.url || "");
+  const [login, setLogin] = useState(acAnt && !acAnt.credenciaisProtegidas ? acAnt.login || "" : "");
   const [senha, setSenha] = useState("");
   const [senhaVisivel, setSenhaVisivel] = useState(false);
-  const [observacoes, setObservacoes] = useState("");
-  const [anexos, setAnexos] = useState([]);
-  const [erro, setErro] = useState(null);
+  const [observacoes, setObservacoes] = useState(editando?.observacoes || "");
+  const [anexos, setAnexos] = useState(editando?.anexos || []);
+  const [erroInfo, setErroInfo] = useState(null);
+  const [salvando, setSalvando] = useState(false);
+  const [cofreOk, setCofreOk] = useState(homologCofreConfigurado);
+  const erroRef = useRef(null);
+  const fluxoMeta = HOMOLOGACAO_FLUXOS[ehAtualizacao ? "atualizacao" : "homologacao"];
+  const opcoesBases = useMemo(() => homologacaoBasesOpcoes(companies, editando?.bases), [companies, editando]);
+  useEffect(() => {
+    if (formatoEnvio !== "plataforma" || cofreOk !== null) return;
+    let cancelado = false;
+    homologCredenciaisApi.status().then((ok) => {
+      if (!cancelado) setCofreOk(ok);
+    });
+    return () => {
+      cancelado = true;
+    };
+  }, [formatoEnvio, cofreOk]);
+  useEffect(() => {
+    if (erroInfo && erroRef.current && erroRef.current.scrollIntoView) {
+      erroRef.current.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    }
+  }, [erroInfo]);
+  function falha(msg, campo) {
+    setErroInfo({ msg, campo: campo || null });
+  }
   function toggleBase(base) {
     setBases((prev) =>
       prev.includes(base) ? prev.filter((b) => b !== base) : [...prev, base],
     );
   }
-  function handleSubmit(e) {
+  /** adicionarCopias: aceita um ou vários endereços; devolve false se algum for inválido. */
+  function adicionarCopias(texto) {
+    const partes = parseListaEmails(texto);
+    if (partes.length === 0) return true;
+    const invalido = partes.find((x) => !isEmailValido(x));
+    if (invalido) {
+      falha(`O e-mail em cópia "${invalido}" não está em um formato válido.`, "cc");
+      return false;
+    }
+    const novos = [];
+    const baseSet = new Set(emailsCopia.map((e) => e.toLowerCase()));
+    partes.forEach((p) => {
+      const em = p.toLowerCase();
+      if (!baseSet.has(em)) {
+        baseSet.add(em);
+        novos.push(em);
+      }
+    });
+    if (emailsCopia.length + novos.length > HOMOLOGACAO_MAX_EMAILS_CC) {
+      falha(`Máximo de ${HOMOLOGACAO_MAX_EMAILS_CC} e-mails em cópia.`, "cc");
+      return false;
+    }
+    setEmailsCopia((prev) => [...prev, ...novos]);
+    setEmailCopiaTexto("");
+    setErroInfo(null);
+    return true;
+  }
+  async function handleSubmit(e) {
     e.preventDefault();
+    if (salvando) return;
     const origem = ehAtualizacao
       ? clientesCadastrados.find((c) => c.id === clienteOrigemId)
       : null;
+    if (ehAtualizacao && !ehEdicao) {
+      if (!origem) return falha("Selecione um cliente já cadastrado.", "cliente");
+    }
     if (ehAtualizacao) {
-      if (!origem) {
-        setErro("Selecione um cliente já cadastrado.");
-        return;
-      }
-      if (!tipoAtualizacao) {
-        setErro("Informe o tipo de atualização.");
-        return;
-      }
+      if (!tipoAtualizacao) return falha("Informe o tipo de atualização.", "tipo");
     } else if (!cliente.trim()) {
-      setErro("Informe o cliente.");
-      return;
+      return falha("Informe o cliente.", "cliente");
     }
-    if (!prazoRetorno) {
-      setErro("Informe o prazo de retorno.");
-      return;
-    }
-    if (formatoEnvio === "plataforma" && !login.trim()) {
-      setErro("Informe o login de acesso à plataforma do cliente.");
-      return;
-    }
+    if (!prazoRetorno) return falha("Informe o prazo de retorno.", "prazo");
     if (anexos.some((a) => a.enviando)) {
-      setErro(
+      return falha(
         "Aguarde o envio dos anexos terminar antes de salvar (evita gravar a homologação antes do arquivo real ser confirmado).",
+        "anexos",
       );
-      return;
     }
-    setErro(null);
-    const id = generateHomologacaoId();
-    const agora = new Date();
-    if (formatoEnvio === "plataforma" && senha) homologSenhasSessao[id] = senha;
-    const item = {
-      id,
-      fluxo: ehAtualizacao ? "atualizacao" : "homologacao",
-      ...(ehAtualizacao ? { tipoAtualizacao, clienteOrigemId: origem.id } : {}),
-      cliente: ehAtualizacao ? origem.nome : cliente.trim(),
-      consultor: {
-        nome: currentUser?.nome || "Usuário do portal",
-        email: currentUser?.email || "",
-      },
-      dataSolicitacao: agora.toISOString(),
-      prazoRetorno,
-      bases,
-      formatoEnvio,
-      acessoPlataforma:
-        formatoEnvio === "plataforma"
-          ? { login: login.trim(), temSenha: !!senha }
-          : null,
-      observacoes: observacoes.trim(),
-      anexos: anexos.map(({ _localFile, _localUrl, enviando, ...meta }) => meta), // nunca persiste o File/blob URL, nem o selo transitório "enviando"
-      status: "nova",
-      linkHomologacao: "",
-      dataConclusao: null,
-      historico: [
-        {
-          at: agora.toISOString(),
-          usuario: currentUser?.nome || "Usuário do portal",
-          evento: "criada",
-          de: null,
-          para: "nova",
+    // ---- validação por modalidade (só a escolhida é exigida) ----
+    let emailPrincipal = null;
+    let copiaFinal = [];
+    let urlFinal = null;
+    if (formatoEnvio === "email_cliente") {
+      emailPrincipal = emailCliente.trim().toLowerCase();
+      if (!emailPrincipal) return falha("Informe o e-mail do cliente.", "emailCliente");
+      if (!isEmailValido(emailPrincipal)) return falha("O e-mail do cliente não está em um formato válido.", "emailCliente");
+      copiaFinal = [...emailsCopia];
+      const pendentes = parseListaEmails(emailCopiaTexto);
+      const invalidoPend = pendentes.find((x) => !isEmailValido(x));
+      if (invalidoPend) return falha(`O e-mail em cópia "${invalidoPend}" não está em um formato válido.`, "cc");
+      pendentes.forEach((p) => {
+        const em = p.toLowerCase();
+        if (!copiaFinal.includes(em)) copiaFinal.push(em);
+      });
+      if (copiaFinal.length > HOMOLOGACAO_MAX_EMAILS_CC) return falha(`Máximo de ${HOMOLOGACAO_MAX_EMAILS_CC} e-mails em cópia.`, "cc");
+    }
+    if (formatoEnvio === "plataforma") {
+      const legadoSemUrl = ehEdicao && formatoAnterior === "plataforma" && !acAnt?.url;
+      urlFinal = normalizarUrlPlataforma(urlPlataforma);
+      if (!urlFinal && !(legadoSemUrl && !urlPlataforma.trim())) {
+        return falha(
+          urlPlataforma.trim()
+            ? "Informe uma URL válida para a plataforma (ex.: https://portal.cliente.com)."
+            : "Informe a URL da plataforma do cliente.",
+          "url",
+        );
+      }
+      if (!credenciaisAnteriores) {
+        if (!login.trim()) return falha("Informe o login ou usuário de acesso à plataforma.", "login");
+        if (!senha) return falha("Informe a senha de acesso à plataforma.", "senha");
+      }
+    }
+    setErroInfo(null);
+    setSalvando(true);
+    try {
+      const id = editando ? editando.id : generateHomologacaoId();
+      const agora = new Date();
+      // ---- credenciais (cofre do backend) ----
+      let acessoPlataforma = null;
+      let avisoCofre = null;
+      if (formatoEnvio === "plataforma") {
+        let protegidas = !!acAnt?.credenciaisProtegidas;
+        let loginRegistro = acAnt && !acAnt.credenciaisProtegidas ? acAnt.login || "" : "";
+        let temSenha = !!acAnt?.temSenha || protegidas;
+        const loginAnterior = acAnt && !acAnt.credenciaisProtegidas ? acAnt.login || "" : "";
+        const trocou = !!((login.trim() && login.trim() !== loginAnterior) || senha);
+        if (trocou) {
+          const r = await homologCredenciaisApi.salvar(id, { login: login.trim(), senha });
+          if (r.ok) {
+            temSenha = !!senha || protegidas;
+            protegidas = true;
+            loginRegistro = "";
+            delete homologSenhasSessao[id];
+          } else if (protegidas) {
+            // Já havia credenciais no cofre e a atualização falhou: não troca por um estado pior.
+            setSalvando(false);
+            return falha("Não foi possível atualizar as credenciais agora. Tente novamente em instantes.", "senha");
+          } else {
+            // Sem cofre (não configurado/fora do ar): comportamento antigo, avisado.
+            if (login.trim()) loginRegistro = login.trim();
+            if (senha) {
+              homologSenhasSessao[id] = senha;
+              temSenha = true;
+            }
+            avisoCofre =
+              "O cofre de credenciais não está disponível: a senha ficou apenas em memória nesta sessão e some ao recarregar a página.";
+          }
+        }
+        acessoPlataforma = {
+          ...(urlFinal ? { url: urlFinal } : {}),
+          ...(protegidas ? { credenciaisProtegidas: true } : { login: loginRegistro }),
+          temSenha,
+        };
+      } else if (credenciaisAnteriores) {
+        // Saiu da modalidade "Plataforma": não deixa segredo sobrando.
+        if (acAnt?.credenciaisProtegidas) homologCredenciaisApi.remover(id);
+        delete homologSenhasSessao[id];
+      }
+      const anexosMeta = anexos;
+      const campos = {
+        cliente: ehAtualizacao ? (origem ? origem.nome : editando.cliente) : cliente.trim(),
+        prazoRetorno,
+        bases,
+        formatoEnvio,
+        emailCliente: formatoEnvio === "email_cliente" ? emailPrincipal : null,
+        emailsCopia: formatoEnvio === "email_cliente" ? copiaFinal : [],
+        acessoPlataforma,
+        observacoes: observacoes.trim(),
+        anexos: anexosMeta,
+        ...(ehAtualizacao ? { tipoAtualizacao } : {}),
+      };
+      if (ehEdicao) {
+        onSave?.(editando.id, {
+          ...campos,
+          historico: [
+            ...(editando.historico || []),
+            { at: agora.toISOString(), usuario: currentUser?.nome || "Usuário do portal", evento: "editada" },
+          ],
+        });
+        if (avisoCofre) onNotify?.(avisoCofre, "info");
+        return;
+      }
+      const item = {
+        id,
+        fluxo: ehAtualizacao ? "atualizacao" : "homologacao",
+        ...(ehAtualizacao ? { clienteOrigemId: origem.id } : {}),
+        consultor: {
+          nome: currentUser?.nome || "Usuário do portal",
+          email: currentUser?.email || "",
         },
-      ],
-    }; // anexos com bytes reais desta sessão continuam disponíveis para Ver/Baixar
-    // enquanto a página não recarrega — mantidos só na cópia em memória (`onCreate`
-    // grava a versão completa localmente; a versão persistida em "db" usa `item.anexos`,
-    // já sem os campos locais).
-    onCreate({ ...item, anexos });
+        dataSolicitacao: agora.toISOString(),
+        ...campos,
+        anexos: anexosMeta.map(({ _localFile, _localUrl, enviando, ...meta }) => meta), // nunca persiste o File/blob URL, nem o selo transitório "enviando"
+        status: "nova",
+        linkHomologacao: "",
+        dataConclusao: null,
+        historico: [
+          {
+            at: agora.toISOString(),
+            usuario: currentUser?.nome || "Usuário do portal",
+            evento: "criada",
+            de: null,
+            para: "nova",
+          },
+        ],
+      }; // anexos com bytes reais desta sessão continuam disponíveis para Ver/Baixar
+      // enquanto a página não recarrega — mantidos só na cópia em memória (`onCreate`
+      // grava a versão completa localmente; a versão persistida em "db" usa `item.anexos`,
+      // já sem os campos locais).
+      onCreate({ ...item, anexos: anexosMeta });
+      if (avisoCofre) onNotify?.(avisoCofre, "info");
+    } finally {
+      setSalvando(false);
+    }
   }
-  return /*#__PURE__*/ React.createElement(
+  const campoErro = (campo) => (erroInfo && erroInfo.campo === campo ? " homolog-field-error" : "");
+  const formatoMeta = HOMOLOGACAO_FORMATOS.find((f) => f.key === formatoEnvio);
+  const tituloModal = ehEdicao
+    ? ehAtualizacao
+      ? "Editar atualização de homologação"
+      : "Editar homologação"
+    : ehAtualizacao
+      ? "Nova atualização de homologação"
+      : "Nova homologação";
+  const rotuloSubmit = salvando
+    ? "Salvando..."
+    : anexos.some((a) => a.enviando)
+      ? "Enviando anexos..."
+      : ehEdicao
+        ? "Salvar alterações"
+        : ehAtualizacao
+          ? "Registrar atualização"
+          : "Registrar homologação";
+  return h(
     "div",
     { className: "docs-modal-overlay", onClick: onClose },
-    /*#__PURE__*/ React.createElement(
+    h(
       "div",
       {
-        className: "docs-modal homolog-form-modal",
+        className: "docs-modal homolog-form-modal homolog-new-modal",
+        role: "dialog",
+        "aria-modal": "true",
+        "aria-label": tituloModal,
         onClick: (e) => e.stopPropagation(),
       },
-      /*#__PURE__*/ React.createElement(
+      h(
         "div",
         { className: "docs-modal-head" },
-        /*#__PURE__*/ React.createElement(
+        h(
           "div",
           null,
-          /*#__PURE__*/ React.createElement(
-            "div",
-            { className: "docs-modal-title" },
-            /*#__PURE__*/ React.createElement(Plus, { size: 16 }),
-            ehAtualizacao ? " Nova atualização de homologação" : " Nova homologação",
-          ),
-          /*#__PURE__*/ React.createElement(
+          h("div", { className: "docs-modal-title" }, h(ehEdicao ? Pencil : Plus, { size: 16 }), " " + tituloModal),
+          h(
             "div",
             { className: "docs-modal-sub" },
             "Consultor: ",
-            currentUser?.nome,
+            ehEdicao ? editando.consultor?.nome : currentUser?.nome,
             " · ",
-            new Date().toLocaleDateString("pt-BR"),
+            (ehEdicao ? new Date(editando.dataSolicitacao) : new Date()).toLocaleDateString("pt-BR"),
           ),
         ),
-        /*#__PURE__*/ React.createElement(
+        h(
           "button",
-          {
-            className: "icon-btn-dark",
-            onClick: onClose,
-            "aria-label": "Fechar",
-          },
-          /*#__PURE__*/ React.createElement(X, { size: 18 }),
+          { className: "icon-btn-dark", onClick: onClose, "aria-label": "Fechar", type: "button" },
+          h(X, { size: 18 }),
         ),
       ),
-      /*#__PURE__*/ React.createElement(
+      h(
         "form",
-        { className: "docs-modal-body", onSubmit: handleSubmit },
-        erro &&
-          /*#__PURE__*/ React.createElement(
+        {
+          className: "docs-modal-body",
+          onSubmit: handleSubmit,
+          noValidate: true,
+          // Corrigiu algo: o aviso/realce de erro anterior sai do caminho.
+          onChange: () => {
+            if (erroInfo) setErroInfo(null);
+          },
+        },
+        erroInfo &&
+          h(
             "div",
-            { className: "login-error" },
-            /*#__PURE__*/ React.createElement(AlertTriangle, { size: 14 }),
+            { className: "login-error", role: "alert", ref: erroRef },
+            h(AlertTriangle, { size: 14 }),
             " ",
-            erro,
+            erroInfo.msg,
           ),
         ehAtualizacao
-          ? /*#__PURE__*/ React.createElement(
+          ? h(
               React.Fragment,
               null,
-              /*#__PURE__*/ React.createElement(
+              h(
                 "div",
-                { className: "homolog-field" },
-                /*#__PURE__*/ React.createElement("label", null, "Cliente já cadastrado"),
-                /*#__PURE__*/ React.createElement(
-                  "select",
-                  {
-                    value: clienteOrigemId,
-                    onChange: (e) => setClienteOrigemId(e.target.value),
-                    autoFocus: true,
-                  },
-                  /*#__PURE__*/ React.createElement("option", { value: "" }, "Selecione o cliente..."),
-                  clientesCadastrados.map((c) =>
-                    /*#__PURE__*/ React.createElement(
-                      "option",
-                      { key: c.id, value: c.id },
-                      c.nome + " — " + (HOMOLOGACAO_STATUS_META[c.status]?.label || c.status),
+                { className: "homolog-field" + campoErro("cliente") },
+                h("label", null, "Cliente já cadastrado"),
+                ehEdicao
+                  ? h("input", { type: "text", value: editando.cliente, disabled: true })
+                  : h(
+                      "select",
+                      {
+                        value: clienteOrigemId,
+                        onChange: (e) => setClienteOrigemId(e.target.value),
+                        autoFocus: true,
+                      },
+                      h("option", { value: "" }, "Selecione o cliente..."),
+                      clientesCadastrados.map((c) =>
+                        h(
+                          "option",
+                          { key: c.id, value: c.id },
+                          c.nome + " — " + (HOMOLOGACAO_STATUS_META[c.status]?.label || c.status),
+                        ),
+                      ),
                     ),
-                  ),
-                ),
-                clientesCadastrados.length === 0 &&
-                  /*#__PURE__*/ React.createElement(
+                !ehEdicao &&
+                  clientesCadastrados.length === 0 &&
+                  h(
                     "p",
                     { className: "homolog-bases-hint" },
                     "Nenhum cliente cadastrado ainda. Registre o cliente primeiro na aba Homologação.",
                   ),
               ),
-              /*#__PURE__*/ React.createElement(
+              h(
                 "div",
-                { className: "homolog-field" },
-                /*#__PURE__*/ React.createElement("label", null, "Tipo de atualização"),
-                /*#__PURE__*/ React.createElement(
+                { className: "homolog-field" + campoErro("tipo") },
+                h("label", null, "Tipo de atualização"),
+                h(
                   "select",
-                  {
-                    value: tipoAtualizacao,
-                    onChange: (e) => setTipoAtualizacao(e.target.value),
-                  },
-                  /*#__PURE__*/ React.createElement("option", { value: "" }, "Selecione..."),
-                  HOMOLOGACAO_TIPOS_ATUALIZACAO.map((t) =>
-                    /*#__PURE__*/ React.createElement("option", { key: t, value: t }, t),
-                  ),
+                  { value: tipoAtualizacao, onChange: (e) => setTipoAtualizacao(e.target.value) },
+                  h("option", { value: "" }, "Selecione..."),
+                  HOMOLOGACAO_TIPOS_ATUALIZACAO.map((t) => h("option", { key: t, value: t }, t)),
                 ),
               ),
             )
-          : /*#__PURE__*/ React.createElement(
+          : h(
               "div",
-              { className: "homolog-field" },
-              /*#__PURE__*/ React.createElement("label", null, "Cliente"),
-              /*#__PURE__*/ React.createElement("input", {
+              { className: "homolog-field" + campoErro("cliente") },
+              h("label", null, "Cliente"),
+              h("input", {
                 type: "text",
                 value: cliente,
                 onChange: (e) => setCliente(e.target.value),
                 placeholder: "Razão social ou nome fantasia do cliente",
-                autoFocus: true,
+                autoFocus: !ehEdicao,
               }),
-              cliente.trim() &&
+              !ehEdicao &&
+                cliente.trim() &&
                 clientesCadastrados.some((c) => normalize(c.nome) === normalize(cliente)) &&
-                /*#__PURE__*/ React.createElement(
+                h(
                   "p",
                   { className: "homolog-bases-hint homolog-dup-hint" },
                   "Este cliente já está cadastrado. Para novos documentos ou atualizações dele, use a aba Atualização de Homologação.",
                 ),
             ),
-        /*#__PURE__*/ React.createElement(
+        h(
           "div",
-          { className: "homolog-field" },
-          /*#__PURE__*/ React.createElement("label", null, "Prazo de retorno"),
-          /*#__PURE__*/ React.createElement("input", {
-            type: "date",
-            value: prazoRetorno,
-            onChange: (e) => setPrazoRetorno(e.target.value),
-          }),
+          { className: "homolog-field" + campoErro("prazo") },
+          h("label", null, "Prazo de retorno"),
+          h("input", { type: "date", value: prazoRetorno, onChange: (e) => setPrazoRetorno(e.target.value) }),
         ),
-        /*#__PURE__*/ React.createElement(
+        h(
           "div",
           { className: "homolog-field" },
-          /*#__PURE__*/ React.createElement(
-            "label",
-            null,
-            ehAtualizacao ? "Bases envolvidas na atualização" : "Bases solicitadas para homologação",
-          ),
-          /*#__PURE__*/ React.createElement(
+          h("label", null, ehAtualizacao ? "Quais bases serão atualizadas?" : "Quais bases serão cadastradas?"),
+          h(
             "p",
             { className: "homolog-bases-hint" },
-            ehAtualizacao
-              ? "Informe as unidades às quais esta atualização documental se aplica. Este campo permite selecionar uma ou mais unidades."
-              : "Informe as unidades solicitadas pelo cliente para homologação e/ou levantamento de dados. Este campo permite selecionar uma ou mais unidades.",
+            "Selecione uma ou mais bases.",
           ),
-          /*#__PURE__*/ React.createElement(
+          h(
             "div",
             { className: "homolog-bases-grid" },
-            HOMOLOGACAO_BASES.map((base) =>
-              /*#__PURE__*/ React.createElement(
+            opcoesBases.map((base) =>
+              h(
                 "label",
-                {
-                  key: base,
-                  className:
-                    "homolog-base-chip" +
-                    (bases.includes(base) ? " active" : ""),
-                },
-                /*#__PURE__*/ React.createElement("input", {
-                  type: "checkbox",
-                  checked: bases.includes(base),
-                  onChange: () => toggleBase(base),
-                }),
+                { key: base, className: "homolog-base-chip" + (bases.includes(base) ? " active" : "") },
+                h("input", { type: "checkbox", checked: bases.includes(base), onChange: () => toggleBase(base) }),
                 base,
               ),
             ),
           ),
         ),
-        /*#__PURE__*/ React.createElement(
+        h(
           "div",
           { className: "homolog-field" },
-          /*#__PURE__*/ React.createElement("label", null, "Formato de envio"),
-          /*#__PURE__*/ React.createElement(
+          h("label", { id: "homolog-formato-label" }, "Formato de envio"),
+          h(
             "div",
-            { className: "homolog-radio-group" },
-            /*#__PURE__*/ React.createElement(
-              "label",
-              {
-                className:
-                  "homolog-radio" + (formatoEnvio === "email" ? " active" : ""),
-              },
-              /*#__PURE__*/ React.createElement("input", {
-                type: "radio",
-                name: "formatoEnvio",
-                checked: formatoEnvio === "email",
-                onChange: () => setFormatoEnvio("email"),
-              }),
-              " E-mail",
-            ),
-            /*#__PURE__*/ React.createElement(
-              "label",
-              {
-                className:
-                  "homolog-radio" +
-                  (formatoEnvio === "plataforma" ? " active" : ""),
-              },
-              /*#__PURE__*/ React.createElement("input", {
-                type: "radio",
-                name: "formatoEnvio",
-                checked: formatoEnvio === "plataforma",
-                onChange: () => setFormatoEnvio("plataforma"),
-              }),
-              " Plataforma do cliente",
-            ),
-          ),
-        ),
-        formatoEnvio === "plataforma" &&
-          /*#__PURE__*/ React.createElement(
-            React.Fragment,
-            null,
-            /*#__PURE__*/ React.createElement(
-              "div",
-              { className: "homolog-field" },
-              /*#__PURE__*/ React.createElement(
+            { className: "homolog-radio-group homolog-radio-group-3", role: "radiogroup", "aria-labelledby": "homolog-formato-label" },
+            HOMOLOGACAO_FORMATOS.map((f) =>
+              h(
                 "label",
-                null,
-                "Login de acesso",
-              ),
-              /*#__PURE__*/ React.createElement("input", {
-                type: "text",
-                value: login,
-                onChange: (e) => setLogin(e.target.value),
-                placeholder: "Login na plataforma do cliente",
-                autoComplete: "off",
-              }),
-            ),
-            /*#__PURE__*/ React.createElement(
-              "div",
-              { className: "homolog-field" },
-              /*#__PURE__*/ React.createElement(
-                "label",
-                null,
-                "Senha de acesso",
-              ),
-              /*#__PURE__*/ React.createElement(
-                "div",
-                {
-                  className: "login-field-input-wrap",
-                  style: { paddingLeft: 0 },
-                },
-                /*#__PURE__*/ React.createElement("input", {
-                  type: senhaVisivel ? "text" : "password",
-                  value: senha,
-                  onChange: (e) => setSenha(e.target.value),
-                  placeholder: "Senha na plataforma do cliente",
-                  autoComplete: "new-password",
-                  style: { paddingLeft: 13 },
-                }),
-                /*#__PURE__*/ React.createElement(
-                  "button",
-                  {
-                    type: "button",
-                    className: "login-password-toggle",
-                    onClick: () => setSenhaVisivel((v) => !v),
-                    "aria-label": senhaVisivel
-                      ? "Ocultar senha"
-                      : "Mostrar senha",
+                { key: f.key, className: "homolog-radio" + (formatoEnvio === f.key ? " active" : "") },
+                h("input", {
+                  type: "radio",
+                  name: "formatoEnvio",
+                  checked: formatoEnvio === f.key,
+                  onChange: () => {
+                    setFormatoEnvio(f.key);
+                    setErroInfo(null);
                   },
-                  senhaVisivel
-                    ? /*#__PURE__*/ React.createElement(EyeOff, { size: 15 })
-                    : /*#__PURE__*/ React.createElement(Eye, { size: 15 }),
-                ),
-              ),
-              /*#__PURE__*/ React.createElement(
-                "div",
-                { className: "homolog-security-note" },
-                /*#__PURE__*/ React.createElement(Lock, { size: 13 }),
-                /*#__PURE__*/ React.createElement(
-                  "span",
-                  null,
-                  "Esta senha nunca é salva de forma permanente: fica só em memória, nesta sessão, e some se a página recarregar. Sem um backend seguro conectado, o portal não finge guardá-la — a equipe responsável poderá revelá-la enquanto esta sessão estiver aberta.",
-                ),
+                }),
+                f.label,
               ),
             ),
           ),
-        /*#__PURE__*/ React.createElement(
+          formatoMeta && h("p", { className: "homolog-bases-hint homolog-formato-dica" }, formatoMeta.dica),
+        ),
+        formatoEnvio === "email_cliente" &&
+          h(
+            "div",
+            { className: "homolog-envio-panel" },
+            h(
+              "div",
+              { className: "homolog-field" + campoErro("emailCliente") },
+              h("label", null, "E-mail do cliente"),
+              h("input", {
+                type: "text",
+                inputMode: "email",
+                autoComplete: "off",
+                value: emailCliente,
+                onChange: (e) => setEmailCliente(e.target.value),
+                placeholder: "contato@cliente.com.br",
+                "aria-invalid": erroInfo && erroInfo.campo === "emailCliente" ? "true" : undefined,
+              }),
+            ),
+            h(
+              "div",
+              { className: "homolog-field" + campoErro("cc") },
+              h(
+                "label",
+                null,
+                "E-mails em cópia (CC) ",
+                h("span", { className: "homolog-field-hint" }, "(opcional)"),
+              ),
+              h(HomologacaoEmailsCopia, {
+                valor: emailsCopia,
+                texto: emailCopiaTexto,
+                setTexto: setEmailCopiaTexto,
+                onAdicionar: adicionarCopias,
+                onRemover: (em) => setEmailsCopia((prev) => prev.filter((x) => x !== em)),
+                invalido: erroInfo && erroInfo.campo === "cc",
+              }),
+            ),
+            h(
+              "p",
+              { className: "homolog-bases-hint homolog-panel-nota" },
+              "Os endereços ficam registrados nesta solicitação. Este cadastro não envia e-mail ao cliente.",
+            ),
+          ),
+        formatoEnvio === "plataforma" &&
+          h(
+            "div",
+            { className: "homolog-envio-panel" },
+            h(
+              "div",
+              { className: "homolog-field" + campoErro("url") },
+              h("label", null, "URL da plataforma"),
+              h("input", {
+                type: "text",
+                inputMode: "url",
+                autoComplete: "off",
+                value: urlPlataforma,
+                onChange: (e) => setUrlPlataforma(e.target.value),
+                placeholder: "https://portal.cliente.com.br",
+                "aria-invalid": erroInfo && erroInfo.campo === "url" ? "true" : undefined,
+              }),
+            ),
+            h(
+              "div",
+              { className: "homolog-panel-grid" },
+              h(
+                "div",
+                { className: "homolog-field" + campoErro("login") },
+                h("label", null, "Login ou usuário"),
+                h("input", {
+                  type: "text",
+                  value: login,
+                  onChange: (e) => setLogin(e.target.value),
+                  placeholder: credenciaisAnteriores ? "Mantido — preencha para substituir" : "Usuário na plataforma",
+                  autoComplete: "off",
+                }),
+              ),
+              h(
+                "div",
+                { className: "homolog-field" + campoErro("senha") },
+                h("label", null, "Senha"),
+                h(
+                  "div",
+                  { className: "homolog-pass-wrap" },
+                  h("input", {
+                    type: senhaVisivel ? "text" : "password",
+                    value: senha,
+                    onChange: (e) => setSenha(e.target.value),
+                    placeholder: credenciaisAnteriores ? "Mantida — preencha para substituir" : "Senha na plataforma",
+                    autoComplete: "new-password",
+                  }),
+                  h(
+                    "button",
+                    {
+                      type: "button",
+                      className: "homolog-pass-toggle",
+                      onClick: () => setSenhaVisivel((v) => !v),
+                      "aria-label": senhaVisivel ? "Ocultar senha" : "Mostrar senha",
+                      "aria-pressed": senhaVisivel,
+                    },
+                    senhaVisivel ? h(EyeOff, { size: 15 }) : h(Eye, { size: 15 }),
+                  ),
+                ),
+              ),
+            ),
+            h(
+              "div",
+              { className: "homolog-security-note" },
+              h(Lock, { size: 13 }),
+              h(
+                "span",
+                null,
+                cofreOk === false
+                  ? "O cofre de credenciais não está configurado no servidor: a senha fica só em memória nesta sessão e some ao recarregar a página. Peça ao responsável técnico para ativá-lo."
+                  : "Login e senha são criptografados no servidor e nunca aparecem em listas, indicadores ou histórico. Só a equipe responsável consegue revelá-los.",
+              ),
+            ),
+          ),
+        h(
           "div",
           { className: "homolog-field" },
-          /*#__PURE__*/ React.createElement(
+          h(
             "label",
             null,
-            "Observações ",
-            /*#__PURE__*/ React.createElement(
-              "span",
-              { className: "homolog-field-hint" },
-              "(opcional)",
-            ),
+            "Observações importantes ",
+            h("span", { className: "homolog-field-hint" }, "(opcional)"),
           ),
-          /*#__PURE__*/ React.createElement("textarea", {
+          h("textarea", {
             value: observacoes,
             onChange: (e) => setObservacoes(e.target.value),
-            placeholder: "Contexto adicional para a equipe responsável",
+            placeholder: "Envie tudo o que for relevante para a homologação.",
           }),
         ),
-        /*#__PURE__*/ React.createElement(HomologacaoAnexosPicker, {
+        h(HomologacaoAnexosPicker, {
           anexos: anexos,
           setAnexos: setAnexos,
-          onNotify: setErro ? (msg) => setErro(msg) : undefined,
+          onNotify: (msg) => falha(msg, "anexos"),
         }),
-        /*#__PURE__*/ React.createElement(
+        h(
           "div",
           { className: "homolog-form-actions" },
-          /*#__PURE__*/ React.createElement(
+          h(
             "button",
-            {
-              type: "button",
-              className: "filters-clear-btn",
-              onClick: onClose,
-              style: { flex: "none" },
-            },
+            { type: "button", className: "filters-clear-btn", onClick: onClose, style: { flex: "none" } },
             "Cancelar",
           ),
-          /*#__PURE__*/ React.createElement(
+          h(
             "button",
             {
               type: "submit",
               className: "doc-download-btn",
-              disabled: anexos.some((a) => a.enviando) || (ehAtualizacao && clientesCadastrados.length === 0),
+              disabled: salvando || anexos.some((a) => a.enviando) || (ehAtualizacao && !ehEdicao && clientesCadastrados.length === 0),
             },
-            anexos.some((a) => a.enviando)
-              ? "Enviando anexos..."
-              : ehAtualizacao
-                ? "Registrar atualização"
-                : "Registrar homologação",
+            rotuloSubmit,
           ),
         ),
       ),
@@ -15043,6 +15401,102 @@ function avisoFonteExterna(descricao) {
   });
   return { numerados, ambiguosInformados, naoLocalizados };
 }
+/** HomologacaoEnvioDetalhe: cartões do detalhe conforme a modalidade de
+ *  envio — "E-mail do cliente" (destinatários registrados) e "Acesso à
+ *  plataforma do cliente" (URL visível; login/senha mascarados, revelados só
+ *  pela equipe responsável). */
+function HomologacaoEnvioDetalhe({ homolog: h, isAdmin, revelando, credRevelada, senhaRevelada, onRevelar, onOcultar }) {
+  const e = React.createElement;
+  const linha = (rotulo, conteudo) =>
+    e("div", { className: "homolog-credenciais-row" }, e("span", null, rotulo), e("span", null, conteudo));
+  if (h.formatoEnvio === "email_cliente") {
+    const cc = h.emailsCopia || [];
+    return e(
+      "section",
+      { className: "section-block homolog-detail-card" },
+      e("h3", null, "Envio por e-mail do cliente"),
+      e(
+        "div",
+        { className: "homolog-credenciais" },
+        linha("E-mail do cliente", h.emailCliente || "—"),
+        linha("Em cópia (CC)", cc.length ? cc.join(", ") : "—"),
+        e(
+          "div",
+          { className: "homolog-security-note" },
+          e(Mail, { size: 13 }),
+          e(
+            "span",
+            null,
+            "Destinatários registrados nesta solicitação. Nenhum e-mail ao cliente é enviado automaticamente por este cadastro.",
+          ),
+        ),
+      ),
+    );
+  }
+  const ac = h.acessoPlataforma;
+  if (h.formatoEnvio !== "plataforma" || !ac) return null;
+  const protegidas = !!ac.credenciaisProtegidas;
+  const revelado = protegidas ? !!credRevelada : senhaRevelada;
+  const loginTxt = protegidas ? (credRevelada ? credRevelada.login || "—" : "••••••••") : ac.login || "—";
+  const senhaTxt = revelado
+    ? protegidas
+      ? credRevelada.senha || "—"
+      : homologSenhasSessao[h.id] ||
+        "(não disponível nesta sessão — foi definida em outra sessão, ou a página foi recarregada)"
+    : "••••••••";
+  return e(
+    "section",
+    { className: "section-block homolog-detail-card" },
+    e("h3", null, "Acesso à plataforma do cliente"),
+    e(
+      "div",
+      { className: "homolog-credenciais" },
+      linha(
+        "URL",
+        ac.url
+          ? e(
+              "a",
+              { href: ac.url, target: "_blank", rel: "noopener noreferrer", className: "homolog-link" },
+              e("span", null, ac.url),
+              e(ChevronRight, { size: 13 }),
+            )
+          : "—",
+      ),
+      linha("Login", loginTxt),
+      linha("Senha", senhaTxt),
+      isAdmin &&
+        !revelado &&
+        e(
+          "button",
+          { className: "mini-download-btn", style: { alignSelf: "flex-start" }, onClick: onRevelar, disabled: revelando },
+          revelando ? e(Loader2, { size: 13, className: "spin" }) : e(Eye, { size: 13 }),
+          " Revelar credenciais",
+        ),
+      isAdmin &&
+        revelado &&
+        e(
+          "button",
+          { className: "mini-download-btn", style: { alignSelf: "flex-start" }, onClick: onOcultar },
+          e(EyeOff, { size: 13 }),
+          " Ocultar credenciais",
+        ),
+      !isAdmin &&
+        e("p", { className: "empty-note", style: { margin: 0 } }, "Somente a equipe responsável pode revelar login e senha."),
+      e(
+        "div",
+        { className: "homolog-security-note" },
+        e(Lock, { size: 13 }),
+        e(
+          "span",
+          null,
+          protegidas
+            ? "Login e senha ficam criptografados no servidor. Reveladas ou não, nunca aparecem em auditoria, histórico ou na listagem geral."
+            : "Esta senha nunca fica salva de forma permanente — só em memória, nesta sessão de quem cadastrou (o cofre de credenciais não estava disponível). Reveladas ou não, nunca aparecem em auditoria, histórico ou na listagem geral.",
+        ),
+      ),
+    ),
+  );
+}
 /** HomologacaoDetailView: espelha o padrão visual de CompanyDetailView
  *  (back-btn + company-header). `onUpdate` grava um objeto TOTALMENTE
  *  MESCLADO (mesmo padrão de ConferenceQueueView) — nunca um patch parcial. */ function HomologacaoDetailView({
@@ -15056,6 +15510,9 @@ function avisoFonteExterna(descricao) {
   companies,
 }) {
   const [senhaRevelada, setSenhaRevelada] = useState(false);
+  const [credRevelada, setCredRevelada] = useState(null);
+  const [revelando, setRevelando] = useState(false);
+  const [editOpen, setEditOpen] = useState(false);
   const [linkEdit, setLinkEdit] = useState(h.linkHomologacao || "");
   const [editandoBases, setEditandoBases] = useState(false);
   const [basesEdit, setBasesEdit] = useState(h.bases || []);
@@ -15078,6 +15535,13 @@ function avisoFonteExterna(descricao) {
   // sempre foi exclusivo do Administrador, mesmo antes de existir o
   // perfil Comercial.
   const isAdmin = can(currentUser, "homologacoesInterno");
+  // Editar a solicitação: Administrador sempre; o consultor que a criou, enquanto ainda não estiver finalizada.
+  const ehDono =
+    !!h.consultor?.email &&
+    !!currentUser?.email &&
+    h.consultor.email.trim().toLowerCase() === currentUser.email.trim().toLowerCase();
+  const podeEditar =
+    isAdmin || (ehDono && (h.status === "nova" || h.status === "andamento"));
   const fluxoH = homologacaoFluxoDe(h);
   const fluxoMeta = HOMOLOGACAO_FLUXOS[fluxoH];
   const ehAtu = fluxoH === "atualizacao";
@@ -15156,12 +15620,43 @@ function avisoFonteExterna(descricao) {
       "info",
     );
   }
-  function handleRevelar() {
-    setSenhaRevelada(true);
+  async function handleRevelar() {
+    if (h.acessoPlataforma && h.acessoPlataforma.credenciaisProtegidas) {
+      // Credenciais no cofre criptografado do backend (ver COFRE DE CREDENCIAIS em index.js).
+      setRevelando(true);
+      const r = await homologCredenciaisApi.revelar(h.id, currentUser?.email);
+      setRevelando(false);
+      if (!r.ok) {
+        onNotify?.(
+          r.motivo === "nao_configurado"
+            ? "O cofre de credenciais não está configurado no servidor."
+            : r.motivo === "inexistente"
+              ? "Não há credenciais guardadas para esta solicitação."
+              : r.message || "Não foi possível revelar as credenciais agora.",
+          "error",
+        );
+        return;
+      }
+      setCredRevelada({ login: r.login, senha: r.senha });
+    } else {
+      setSenhaRevelada(true);
+    }
     onUpdate(h.id, { historico: pushHistorico("credenciais_reveladas") });
     logDocumentAction(auditA("revelou_credenciais_homologacao"), {
       homologacao: h.cliente,
     });
+  }
+  function handleOcultarCredenciais() {
+    setSenhaRevelada(false);
+    setCredRevelada(null);
+  }
+  function handleSalvarEdicao(id, patch) {
+    onUpdate(id, patch);
+    logDocumentAction(auditA("editou_homologacao"), { homologacao: h.cliente });
+    setCredRevelada(null);
+    setSenhaRevelada(false);
+    setEditOpen(false);
+    onNotify?.("Solicitação atualizada.", "info");
   }
   function handleSalvarLink() {
     onUpdate(h.id, { linkHomologacao: linkEdit.trim() });
@@ -15307,10 +15802,29 @@ function avisoFonteExterna(descricao) {
         " · Solicitada em ",
         formatAuditWhen(new Date(h.dataSolicitacao)),
       ),
+      !isAdmin &&
+        podeEditar &&
+        /*#__PURE__*/ React.createElement(
+          "div",
+          { className: "homolog-status-actions" },
+          /*#__PURE__*/ React.createElement(
+            "button",
+            { className: "doc-view-btn", onClick: () => setEditOpen(true) },
+            /*#__PURE__*/ React.createElement(Pencil, { size: 14 }),
+            " Editar solicitação",
+          ),
+        ),
       isAdmin &&
         /*#__PURE__*/ React.createElement(
           "div",
           { className: "homolog-status-actions" },
+          podeEditar &&
+            /*#__PURE__*/ React.createElement(
+              "button",
+              { className: "doc-view-btn", onClick: () => setEditOpen(true) },
+              /*#__PURE__*/ React.createElement(Pencil, { size: 14 }),
+              " Editar solicitação",
+            ),
           transicoes.map((t) =>
             /*#__PURE__*/ React.createElement(
               "button",
@@ -15418,7 +15932,7 @@ function avisoFonteExterna(descricao) {
       /*#__PURE__*/ React.createElement(KpiCard, {
         icon: Mail,
         label: "Formato de envio",
-        value: h.formatoEnvio === "plataforma" ? "Plataforma" : "E-mail",
+        value: homologacaoFormatoLabel(h.formatoEnvio),
       }),
       /*#__PURE__*/ React.createElement(KpiCard, {
         icon: Package,
@@ -15527,71 +16041,15 @@ function avisoFonteExterna(descricao) {
           ),
     ),
     h.formatoEnvio === "plataforma" &&
-      h.acessoPlataforma &&
-      /*#__PURE__*/ React.createElement(
-        "section",
-        { className: "section-block homolog-detail-card" },
-        /*#__PURE__*/ React.createElement(
-          "h3",
-          null,
-          "Acesso à plataforma do cliente",
-        ),
-        /*#__PURE__*/ React.createElement(
-          "div",
-          { className: "homolog-credenciais" },
-          /*#__PURE__*/ React.createElement(
-            "div",
-            { className: "homolog-credenciais-row" },
-            /*#__PURE__*/ React.createElement("span", null, "Login"),
-            /*#__PURE__*/ React.createElement(
-              "span",
-              null,
-              h.acessoPlataforma.login || "—",
-            ),
-          ),
-          /*#__PURE__*/ React.createElement(
-            "div",
-            { className: "homolog-credenciais-row" },
-            /*#__PURE__*/ React.createElement("span", null, "Senha"),
-            /*#__PURE__*/ React.createElement(
-              "span",
-              null,
-              senhaRevelada
-                ? homologSenhasSessao[h.id] ||
-                    "(não disponível nesta sessão — foi definida em outra sessão, ou a página foi recarregada)"
-                : "••••••••",
-            ),
-          ),
-          isAdmin &&
-            !senhaRevelada &&
-            /*#__PURE__*/ React.createElement(
-              "button",
-              {
-                className: "mini-download-btn",
-                style: { alignSelf: "flex-start" },
-                onClick: handleRevelar,
-              },
-              /*#__PURE__*/ React.createElement(Eye, { size: 13 }),
-              " Revelar credenciais",
-            ),
-          !isAdmin &&
-            /*#__PURE__*/ React.createElement(
-              "p",
-              { className: "empty-note", style: { margin: 0 } },
-              "Somente a equipe responsável pode revelar esta senha.",
-            ),
-          /*#__PURE__*/ React.createElement(
-            "div",
-            { className: "homolog-security-note" },
-            /*#__PURE__*/ React.createElement(Lock, { size: 13 }),
-            /*#__PURE__*/ React.createElement(
-              "span",
-              null,
-              "Esta senha nunca fica salva de forma permanente — só em memória, nesta sessão de quem cadastrou. Reveladas ou não, nunca aparecem em auditoria, histórico ou na listagem geral.",
-            ),
-          ),
-        ),
-      ),
+      /*#__PURE__*/ React.createElement(HomologacaoEnvioDetalhe, {
+        homolog: h,
+        isAdmin: isAdmin,
+        revelando: revelando,
+        credRevelada: credRevelada,
+        senhaRevelada: senhaRevelada,
+        onRevelar: handleRevelar,
+        onOcultar: handleOcultarCredenciais,
+      }),
     // Arquivos de resposta (2026-10-01, pedido explícito da Iasmin): área
     // pra anexar o que será devolvido ao solicitante pra finalizar a
     // homologação — formulário preenchido, PDF, pasta compactada, ou
@@ -15826,7 +16284,9 @@ function avisoFonteExterna(descricao) {
                 ? /*#__PURE__*/ React.createElement(Plus, { size: 14 })
                 : ev.evento === "credenciais_reveladas"
                   ? /*#__PURE__*/ React.createElement(Eye, { size: 14 })
-                  : ev.evento === "bases_alteradas"
+                  : ev.evento === "editada"
+                    ? /*#__PURE__*/ React.createElement(Pencil, { size: 14 })
+                    : ev.evento === "bases_alteradas"
                     ? /*#__PURE__*/ React.createElement(FileSearch, {
                         size: 14,
                       })
@@ -15849,6 +16309,8 @@ function avisoFonteExterna(descricao) {
                     `${ev.usuario} revelou as credenciais de acesso.`,
                   ev.evento === "bases_alteradas" &&
                     `${ev.usuario} atualizou as bases solicitadas.`,
+                  ev.evento === "editada" &&
+                    `${ev.usuario} editou os dados da solicitação.`,
                 ),
                 /*#__PURE__*/ React.createElement(
                   "div",
@@ -15860,6 +16322,15 @@ function avisoFonteExterna(descricao) {
           ),
       ),
     ),
+    editOpen &&
+      /*#__PURE__*/ React.createElement(NovaHomologacaoModal, {
+        editando: h,
+        onSave: handleSalvarEdicao,
+        onClose: () => setEditOpen(false),
+        onNotify: onNotify,
+        currentUser: currentUser,
+        companies: companies,
+      }),
   );
 }
 /** HomologacaoView: tela de nível superior do módulo — mantém toda a
@@ -15980,6 +16451,8 @@ function avisoFonteExterna(descricao) {
   function handleDelete(id) {
     const item = items.find((it) => it.id === id) || itemsMemoriaRef.current[id];
     delete itemsMemoriaRef.current[id];
+    delete homologSenhasSessao[id];
+    if (item?.acessoPlataforma?.credenciaisProtegidas) homologCredenciaisApi.remover(id); // não deixa segredo órfão no cofre
     setItems((prev) => prev.filter((it) => it.id !== id));
     setSelectedId(null);
     getDb()
@@ -16446,6 +16919,8 @@ function avisoFonteExterna(descricao) {
         clientesCadastrados: clientesCadastrados,
         onClose: () => setModalFluxo(null),
         onCreate: handleCreate,
+        onNotify: onNotify,
+        companies: companies,
         currentUser: currentUser,
       }),
   );
@@ -32752,6 +33227,39 @@ function GrupoprimaPortal() {
         .homolog-anexo-tamanho { color: var(--carvao); font-size: 11px; flex-shrink: 0; }
         .homolog-anexos-total { font-size: 11px; color: var(--carvao); margin: 8px 0 0; }
         .empty-note { font-size: 11.5px; color: var(--carvao); line-height: 1.5; margin: 10px 0 0; }
+        /* ---- Formulário de Homologação (2026-10-20): modalidades, painel de envio, CC e rodapé fixo ---- */
+        .homolog-new-modal .homolog-field { margin-bottom: 14px; }
+        .homolog-new-modal .homolog-form-actions { bottom: -16px; margin-bottom: -16px; padding-bottom: 16px; z-index: 3; box-shadow: 0 -10px 14px -10px rgba(0,0,0,0.35); }
+        .homolog-radio-group-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+        .homolog-radio-group-3 .homolog-radio { padding: 10px 11px; font-size: 12.5px; line-height: 1.25; }
+        .homolog-formato-dica { margin: 2px 0 0; }
+        .homolog-envio-panel { background: var(--branco-frio); border: 1px solid var(--cinza-frio); border-radius: 10px; padding: 14px 14px 4px; margin: 0 0 16px; }
+        .homolog-envio-panel .homolog-field { margin-bottom: 12px; }
+        .homolog-panel-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+        .homolog-panel-nota { margin: -2px 0 10px; }
+        .homolog-envio-panel .homolog-security-note { margin: 0 0 12px; }
+        .homolog-pass-wrap { position: relative; display: flex; align-items: center; }
+        .homolog-pass-wrap input { width: 100%; padding-right: 40px !important; }
+        .homolog-pass-toggle { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; background: none; border: none; border-radius: 6px; color: var(--carvao); cursor: pointer; }
+        .homolog-pass-toggle:hover, .homolog-pass-toggle:focus-visible { color: var(--texto); background: rgba(120,140,155,0.2); }
+        .homolog-cc-row { display: flex; gap: 8px; }
+        .homolog-cc-row input { flex: 1; min-width: 0; }
+        .homolog-cc-add { display: inline-flex; align-items: center; gap: 5px; flex: none; background: none; color: var(--texto); border: 1.5px solid var(--cinza-frio); border-radius: 9px; padding: 0 13px; font-family: inherit; font-weight: 700; font-size: 12.5px; cursor: pointer; }
+        .homolog-cc-add:hover:not(:disabled) { border-color: var(--texto); }
+        .homolog-cc-add:disabled { opacity: 0.45; cursor: default; }
+        .homolog-cc-chips { list-style: none; display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 0; padding: 0; }
+        .homolog-cc-chip { display: inline-flex; align-items: center; gap: 4px; max-width: 100%; background: rgba(107,254,156,0.16); border: 1px solid rgba(107,254,156,0.5); color: var(--texto); border-radius: 999px; padding: 3px 4px 3px 10px; font-size: 12px; font-weight: 600; }
+        .homolog-cc-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .homolog-cc-chip button { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border: none; border-radius: 50%; background: rgba(120,140,155,0.25); color: inherit; cursor: pointer; padding: 0; flex: none; }
+        .homolog-cc-chip button:hover { background: rgba(214,69,69,0.35); }
+        .homolog-field-error input, .homolog-field-error select, .homolog-field-error textarea { border-color: #D64545 !important; }
+        .homolog-field-error > label { color: #D64545; }
+        @media (max-width: 767px) {
+          .homolog-radio-group-3 { grid-template-columns: 1fr; }
+          .homolog-panel-grid { grid-template-columns: 1fr; gap: 0; }
+          .homolog-cc-row { flex-direction: column; }
+          .homolog-cc-add { justify-content: center; padding: 9px 13px; }
+        }
         .homolog-form-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 8px; padding-top: 16px; border-top: 1px solid var(--cinza-frio); position: sticky; bottom: 0; background: var(--card-bg); }
         .homolog-status-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
         .homolog-delete-btn { color: var(--vermelho, #b3261e); border-color: rgba(179,38,30,0.35); }
