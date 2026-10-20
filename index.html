@@ -3372,6 +3372,8 @@ const AUDIT_ACTION_LABELS = {
   gerou_pasta_drive_homologacao: "Gerou pasta do cliente no Drive (homologação)",
   gerou_pasta_drive_homologacao_atualizacao: "Gerou pasta do cliente no Drive (atualização de homologação)",
   anexou_arquivo_resposta_homologacao: "Anexou arquivo de resposta (homologação)",
+  marcou_arquivo_preenchido_homologacao: "Marcou arquivo do cliente como preenchido (homologação)",
+  marcou_arquivo_preenchido_homologacao_atualizacao: "Marcou arquivo do cliente como preenchido (atualização de homologação)",
   // Aba "Atualização de Homologação" (2026-10-20): mesmas ações, sufixo
   // "_atualizacao" (ver homologAuditAction) — nunca misturadas com as de
   // novos clientes na auditoria.
@@ -6418,6 +6420,28 @@ function currentDocsFor(docsFiltrados) {
  *  de validade); (3) documento sem validade conta como vigente; (4) a ordem
  *  original da lista é preservada. Tipos SEM_SUBSTITUICAO (cada documento é a
  *  própria família) e contratos sociais não são afetados. */
+/** apolicesGeraisVigentes (2026-10-20, pedido da Iasmin: "ao solicitar apólices no
+ *  lote ele só envia 2, enquanto o assistente envia as 3"): para o pedido GENÉRICO
+ *  de apólices (RCTR-C, RC-DC e RC-V), garante UMA seleção por tipo — nunca perde
+ *  um tipo inteiro. O chat não aplica o colapso de `currentDocsFor`
+ *  (`flag: "versao_anterior"` e "vencida na mesma família"), e é esse colapso que
+ *  fazia a RC-V sumir do lote. Regra: dentro de cada tipo, ignora as marcadas como
+ *  versão anterior (a menos que sejam as únicas), prefere as não vencidas e, se
+ *  todas estiverem vencidas, mantém só a mais recente. A ordem original é preservada. */
+function apolicesGeraisVigentes(docs) {
+  const tipos = ["Apólice RCTR-C", "Apólice RC-DC", "Apólice RC-V"];
+  const escolhidos = new Set();
+  tipos.forEach((label) => {
+    const aceitos = tipoLabelsAceitos(label);
+    const doTipo = docs.filter((d) => aceitos.includes(d.tipo));
+    if (doTipo.length === 0) return;
+    const semArquivada = doTipo.filter((d) => d.flag !== "versao_anterior");
+    const pool = semArquivada.length > 0 ? semArquivada : doTipo;
+    const vigentes = pool.filter((d) => computeDocStatus(d.validade) !== "vencido");
+    (vigentes.length > 0 ? vigentes : [sortDocumentsByVersion(pool)[0]]).forEach((d) => escolhidos.add(d));
+  });
+  return docs.filter((d) => escolhidos.has(d));
+}
 function soVigentesPorFamilia(docs) {
   const porFamilia = new Map();
   docs.forEach((d) => {
@@ -6636,6 +6660,7 @@ function matchChecklistItemToCompany(item, company) {
   }
   if (item.categoriaSugerida) {
     let brutos = docs.filter((d) => d.categoria === item.categoriaSugerida);
+    let apolicesGerais = false;
     // Seguros (pedido explícito da Iasmin, 2026-09-17): um item de checklist
     // que só identificou a CATEGORIA "seguros" (ex.: linha "seguro", sem
     // RCTR-C/RC-DC nem cliente citado) nunca deve incluir um seguro
@@ -6676,9 +6701,10 @@ function matchChecklistItemToCompany(item, company) {
             (d.subcategoria || "geral") !== "clientes_especificos" &&
             rotulosApoliceGeral.includes(d.tipo),
         );
+        apolicesGerais = true;
       }
     }
-    const atuais = currentDocsFor(brutos);
+    const atuais = apolicesGerais ? apolicesGeraisVigentes(brutos) : currentDocsFor(brutos);
     if (atuais.length === 0) return { status: "nao_localizado", candidatos: [] };
     return { status: "grupo", candidatos: atuais };
   }
@@ -14215,10 +14241,59 @@ async function enviarArquivosClienteLote(files, { cliente, loteId, usuarioNome }
 function homologacaoIdDoLote(loteId) {
   return "hm-" + loteId;
 }
-function statusHomologacaoDoLote(statusLote) {
-  if (statusLote === "concluido") return "concluida";
+function statusHomologacaoDoLote(statusLote, temArquivosParaPreencher) {
+  // Lote com "Arquivos do cliente para preenchimento" nunca é dado como
+  // concluído automaticamente: as documentações já estão processadas, mas o
+  // arquivo ainda precisa ser preenchido internamente (pedido da Iasmin,
+  // 2026-10-20). A conclusão passa a ser sempre manual nesse caso.
+  if (statusLote === "concluido") return temArquivosParaPreencher ? "andamento" : "concluida";
   if (!statusLote || statusLote === "pendente") return "nova";
   return "andamento";
+}
+/** mesclarArquivosPreenchimento: espelha lote.arquivosCliente no registro da
+ *  Homologação, preservando o andamento (aguardando/preenchido) já registrado. */
+function mesclarArquivosPreenchimento(arquivosCliente, existentes) {
+  const porId = new Map((existentes || []).map((a) => [a.id, a]));
+  return (arquivosCliente || []).map((a) => {
+    const e = porId.get(a.id) || {};
+    return {
+      id: a.id,
+      nome: a.nome,
+      tamanho: a.tamanho || 0,
+      tipo: a.tipo || "application/octet-stream",
+      driveFileId: a.driveFileId || null,
+      assetId: a.assetId || null,
+      status: e.status === "preenchido" ? "preenchido" : "aguardando",
+      preenchidoEm: e.preenchidoEm || null,
+      preenchidoPor: e.preenchidoPor || null,
+      respostaNome: e.respostaNome || null,
+    };
+  });
+}
+/** nomeBaseArquivoPreenchimento: nome sem extensão, acento, "preenchido"/"final"
+ *  e numeração "(2)" — para reconhecer a versão preenchida de um arquivo em branco. */
+function nomeBaseArquivoPreenchimento(nome) {
+  return String(nome || "")
+    .replace(/\.[A-Za-z0-9]{1,5}$/, "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/\(\d+\)/g, " ")
+    .replace(/\b(preenchid[oa]s?|final|finalizad[oa]|assinad[oa]|revisad[oa]|ok)\b/g, " ")
+    .replace(/[^a-z0-9]+/g, "");
+}
+function arquivoPreenchimentoCorrespondente(nomeResposta, arquivos) {
+  const base = nomeBaseArquivoPreenchimento(nomeResposta);
+  if (!base) return null;
+  const pend = (arquivos || []).filter((a) => a.status === "aguardando");
+  const exato = pend.find((a) => nomeBaseArquivoPreenchimento(a.nome) === base);
+  if (exato) return exato;
+  return (
+    pend.find((a) => {
+      const b = nomeBaseArquivoPreenchimento(a.nome);
+      return b.length >= 5 && base.length >= 5 && (b.startsWith(base) || base.startsWith(b));
+    }) || null
+  );
 }
 function resumoDoLote(lote) {
   let itensBase = 0;
@@ -14274,7 +14349,8 @@ async function sincronizarLoteInterno(lote, companies, ctx) {
   const agora = new Date().toISOString();
   const usuario = ctx.usuario || lote.usuarioSolicitante?.nome || "Usuário do portal";
   const resumo = resumoDoLote(lote);
-  const statusMapeado = statusHomologacaoDoLote(lote.status);
+  const arquivosPre = mesclarArquivosPreenchimento(lote.arquivosCliente, existente ? existente.arquivosPreenchimento : null);
+  const statusMapeado = statusHomologacaoDoLote(lote.status, arquivosPre.length > 0);
   const ehAtu = lote.tipoSolicitacao === "atualizacao";
   let registro;
   let eventoAuditoria = null;
@@ -14309,6 +14385,7 @@ async function sincronizarLoteInterno(lote, companies, ctx) {
       dataConclusao: statusMapeado === "concluida" ? lote.concluidoEm || agora : null,
       loteStatus: lote.status,
       loteResumo: resumo,
+      arquivosPreenchimento: arquivosPre,
       historico: [
         { at: lote.criadoEm || agora, usuario: lote.usuarioSolicitante?.nome || usuario, evento: "criada", de: null, para: statusMapeado, origem: "envio_lote" },
       ],
@@ -14318,16 +14395,36 @@ async function sincronizarLoteInterno(lote, companies, ctx) {
     const mudouResumo = JSON.stringify(existente.loteResumo || null) !== JSON.stringify(resumo);
     const mudouStatusLote = existente.loteStatus !== lote.status;
     registro = { ...existente };
-    let mudou = mudouResumo || mudouStatusLote;
-    if (mudouStatusLote && existente.status !== "cancelada" && statusMapeado !== existente.status) {
+    const mudouArquivos = JSON.stringify(existente.arquivosPreenchimento || []) !== JSON.stringify(arquivosPre);
+    let mudou = mudouResumo || mudouStatusLote || mudouArquivos;
+    const ultimoEvStatus = [...(existente.historico || [])].reverse().find((ev) => ev.evento === "status_alterado" || ev.evento === "criada");
+    // Só reabre uma homologação já "concluída" por causa dos arquivos quando
+    // a conclusão foi automática (envio em lote) — nunca uma conclusão manual.
+    const bloqueiaPorConclusaoManual =
+      !mudouStatusLote && existente.status === "concluida" && !(ultimoEvStatus && ultimoEvStatus.origem === "envio_lote");
+    if (
+      (mudouStatusLote || mudouArquivos) &&
+      !bloqueiaPorConclusaoManual &&
+      existente.status !== "cancelada" &&
+      statusMapeado !== existente.status
+    ) {
       registro.status = statusMapeado;
       registro.dataConclusao = statusMapeado === "concluida" ? lote.concluidoEm || agora : null;
       registro.historico = [
         ...(existente.historico || []),
-        { at: agora, usuario, evento: "status_alterado", de: existente.status, para: statusMapeado, origem: "envio_lote" },
+        {
+          at: agora,
+          usuario,
+          evento: "status_alterado",
+          de: existente.status,
+          para: statusMapeado,
+          origem: "envio_lote",
+          ...(arquivosPre.length > 0 && lote.status === "concluido" ? { motivo: "arquivos_para_preencher" } : {}),
+        },
       ];
       eventoAuditoria = "sincronizou_status_lote_homologacao";
     }
+    registro.arquivosPreenchimento = arquivosPre;
     if (!mudou) return { ok: true, criado: false, registro: existente };
     registro.loteStatus = lote.status;
     registro.loteResumo = resumo;
@@ -14392,7 +14489,7 @@ function LoteHomologacaoCard({ item, companies, onUpdate, onAbrir, currentUser }
   const podeAbrir = can(currentUser, "homologacoes");
   const ehColeta = item.tipoSolicitacao === "coleta";
   const resumo = resumoDoLote(item);
-  const assinatura = [item.tipoSolicitacao || "", item.homologacaoDesvinculada ? 1 : 0, item.status, resumo.itensBase, resumo.resolvidos, resumo.anexos, tentativa].join("|");
+  const assinatura = [item.tipoSolicitacao || "", item.homologacaoDesvinculada ? 1 : 0, item.status, resumo.itensBase, resumo.resolvidos, resumo.anexos, (item.arquivosCliente || []).length, tentativa].join("|");
   useEffect(() => {
     let cancel = false;
     if (ehColeta) {
@@ -16085,6 +16182,8 @@ function HomologacaoEnvioDetalhe({ homolog: h, isAdmin, revelando, credRevelada,
     h.status,
   );
   const transicoes = HOMOLOGACAO_TRANSICOES[h.status] || [];
+  const arquivosPre = h.arquivosPreenchimento || [];
+  const arquivosAguardando = arquivosPre.filter((a) => a.status === "aguardando");
   function pushHistorico(evento, extra = {}) {
     const entry = {
       at: new Date().toISOString(),
@@ -16095,6 +16194,13 @@ function HomologacaoEnvioDetalhe({ homolog: h, isAdmin, revelando, credRevelada,
     return [...(h.historico || []), entry];
   }
   function handleStatusChange(novoStatus) {
+    if (novoStatus === "concluida" && arquivosAguardando.length > 0) {
+      onNotify?.(
+        `Ainda há ${arquivosAguardando.length} arquivo(s) do cliente aguardando preenchimento. Anexe o arquivo preenchido em “Arquivos de resposta” (ou marque como preenchido) antes de concluir.`,
+        "error",
+      );
+      return;
+    }
     const patch = {
       status: novoStatus,
       dataConclusao:
@@ -16221,6 +16327,8 @@ function HomologacaoEnvioDetalhe({ homolog: h, isAdmin, revelando, credRevelada,
     const incoming = Array.from(fileList || []);
     if (incoming.length === 0) return;
     let atual = [...(h.anexosResposta || [])];
+    let preAtual = [...(h.arquivosPreenchimento || [])];
+    const substituidos = [];
     const aceitos = [];
     let totalProjetado = atual.reduce((s, a) => s + (a.tamanho || 0), 0);
     let vagas = HOMOLOGACAO_MAX_ANEXOS - atual.length;
@@ -16256,7 +16364,20 @@ function HomologacaoEnvioDetalhe({ homolog: h, isAdmin, revelando, credRevelada,
         enviadoEm: new Date().toISOString(),
       };
       atual = [...atual, novoItem];
-      onUpdate(h.id, { anexosResposta: atual });
+      const patchResp = { anexosResposta: atual };
+      // Versão preenchida de um arquivo do cliente: marca o arquivo em branco
+      // como preenchido (o preenchido passa a ser o que fica na pasta do Drive).
+      const corresp = res.ok ? arquivoPreenchimentoCorrespondente(file.name, preAtual) : null;
+      if (corresp) {
+        preAtual = preAtual.map((a) =>
+          a.id === corresp.id
+            ? { ...a, status: "preenchido", preenchidoEm: new Date().toISOString(), preenchidoPor: currentUser?.nome || "Usuário do portal", respostaNome: file.name }
+            : a,
+        );
+        patchResp.arquivosPreenchimento = preAtual;
+        substituidos.push(corresp.nome);
+      }
+      onUpdate(h.id, patchResp);
       if (!res.ok) {
         onNotify?.(
           `"${file.name}" anexado (não foi possível salvá-lo no repositório agora — tente reenviar depois).`,
@@ -16270,9 +16391,22 @@ function HomologacaoEnvioDetalhe({ homolog: h, isAdmin, revelando, credRevelada,
       quantidade: aceitos.length,
     });
     onNotify?.(
-      aceitos.length === 1 ? "1 arquivo de resposta anexado." : `${aceitos.length} arquivos de resposta anexados.`,
+      (aceitos.length === 1 ? "1 arquivo de resposta anexado." : `${aceitos.length} arquivos de resposta anexados.`) +
+        (substituidos.length ? ` Arquivo(s) do cliente marcado(s) como preenchido(s): ${substituidos.join(", ")}.` : ""),
       "info",
     );
+  }
+  function handleMarcarPreenchimento(a, preenchido) {
+    onUpdate(h.id, {
+      arquivosPreenchimento: arquivosPre.map((x) =>
+        x.id === a.id
+          ? preenchido
+            ? { ...x, status: "preenchido", preenchidoEm: new Date().toISOString(), preenchidoPor: currentUser?.nome || "Usuário do portal" }
+            : { ...x, status: "aguardando", preenchidoEm: null, preenchidoPor: null, respostaNome: null }
+          : x,
+      ),
+    });
+    logDocumentAction(auditA("marcou_arquivo_preenchido_homologacao"), { homologacao: h.cliente, arquivo: a.nome, preenchido: !!preenchido });
   }
   function handleRemoverAnexoResposta(anexo) {
     onUpdate(h.id, {
@@ -16601,6 +16735,53 @@ function HomologacaoEnvioDetalhe({ homolog: h, isAdmin, revelando, credRevelada,
         onRevelar: handleRevelar,
         onOcultar: handleOcultarCredenciais,
       }),
+    arquivosPre.length > 0 &&
+      /*#__PURE__*/ React.createElement(
+        "section",
+        { className: "section-block homolog-detail-card", "data-testid": "arquivos-preenchimento" },
+        /*#__PURE__*/ React.createElement("h3", null, "Arquivos para preenchimento"),
+        /*#__PURE__*/ React.createElement(
+          "p",
+          { className: "homolog-bases-hint" },
+          arquivosAguardando.length > 0
+            ? "O cliente enviou arquivo(s) para preenchimento. As documentações já foram processadas, mas esta solicitação só pode ser concluída depois que o arquivo for preenchido. Baixe, preencha e anexe a versão preenchida em “Arquivos de resposta” — ela substitui a versão em branco."
+            : "Todos os arquivos do cliente foram preenchidos. A versão preenchida está em “Arquivos de resposta” e na pasta do Drive desta solicitação.",
+        ),
+        /*#__PURE__*/ React.createElement(
+          "ul",
+          { className: "homolog-anexos-list" },
+          arquivosPre.map((a) =>
+            /*#__PURE__*/ React.createElement(
+              "li",
+              { key: a.id, className: "homolog-anexo-item", "data-testid": "arquivo-preenchimento" },
+              /*#__PURE__*/ React.createElement(FileText, { size: 14 }),
+              /*#__PURE__*/ React.createElement("span", { className: "homolog-anexo-nome" }, a.nome),
+              /*#__PURE__*/ React.createElement(
+                "span",
+                { className: "status-badge " + (a.status === "preenchido" ? "status-ok" : "status-andamento") },
+                a.status === "preenchido" ? "Preenchido" : "Aguardando preenchimento",
+              ),
+              /*#__PURE__*/ React.createElement(
+                "button",
+                { className: "mini-download-btn", onClick: () => viewHomologAnexo(a, { onView, onNotify }) },
+                /*#__PURE__*/ React.createElement(Eye, { size: 13 }),
+                " Ver",
+              ),
+              /*#__PURE__*/ React.createElement(
+                "button",
+                { className: "mini-download-btn", onClick: () => downloadHomologAnexo(a, { onNotify }) },
+                /*#__PURE__*/ React.createElement(Download, { size: 13 }),
+                " Baixar",
+              ),
+              /*#__PURE__*/ React.createElement(
+                "button",
+                { className: "mini-download-btn", "data-testid": "marcar-preenchido", onClick: () => handleMarcarPreenchimento(a, a.status !== "preenchido") },
+                a.status === "preenchido" ? "Reabrir" : "Marcar como preenchido",
+              ),
+            ),
+          ),
+        ),
+      ),
     // Arquivos de resposta (2026-10-01, pedido explícito da Iasmin): área
     // pra anexar o que será devolvido ao solicitante pra finalizar a
     // homologação — formulário preenchido, PDF, pasta compactada, ou
@@ -16861,7 +17042,7 @@ function HomologacaoEnvioDetalhe({ homolog: h, isAdmin, revelando, credRevelada,
                       ? `${ev.usuario} registrou esta solicitação pelo Envio de Documentações em Lote.`
                       : `${ev.usuario} registrou esta homologação.`),
                   ev.evento === "status_alterado" &&
-                    `${ev.usuario} alterou o status de "${HOMOLOGACAO_STATUS_META[ev.de]?.label || ev.de}" para "${HOMOLOGACAO_STATUS_META[ev.para]?.label || ev.para}"${ev.origem === "envio_lote" ? " (automático, acompanhando o envio em lote)" : ""}.`,
+                    `${ev.usuario} alterou o status de "${HOMOLOGACAO_STATUS_META[ev.de]?.label || ev.de}" para "${HOMOLOGACAO_STATUS_META[ev.para]?.label || ev.para}"${ev.origem === "envio_lote" ? (ev.motivo === "arquivos_para_preencher" ? " (automático: há arquivo do cliente aguardando preenchimento)" : " (automático, acompanhando o envio em lote)") : ""}.`,
                   ev.evento === "reaberta" &&
                     `${ev.usuario} reabriu a homologação (voltou para "${HOMOLOGACAO_STATUS_META[ev.para]?.label || ev.para}").`,
                   ev.evento === "credenciais_reveladas" &&
@@ -26666,7 +26847,7 @@ function EnvioLoteView({ currentUser, onNotify, onView, companies, registroAlvo,
   function agendarSync(item, onDone) {
     if (!item || !loteGeraHomologacao(item.tipoSolicitacao) || item.homologacaoDesvinculada) return;
     const r = resumoDoLote(item);
-    const sig = [item.tipoSolicitacao, item.status, r.itensBase, r.resolvidos, r.anexos].join("|");
+    const sig = [item.tipoSolicitacao, item.status, r.itensBase, r.resolvidos, r.anexos, (item.arquivosCliente || []).length].join("|");
     if (!onDone && sincAssinaturaRef.current[item.id] === sig) return;
     sincAssinaturaRef.current[item.id] = sig;
     sincronizarLoteComHomologacao(item, companies, { usuario: currentUser?.nome }).then((res) => {
