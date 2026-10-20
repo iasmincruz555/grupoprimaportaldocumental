@@ -3364,6 +3364,8 @@ const AUDIT_ACTION_LABELS = {
   concluiu_lote: "Concluiu solicitação de envio em lote",
   atualizou_solicitacao_lote: "Atualizou solicitação de envio em lote",
   excluiu_solicitacao_lote: "Excluiu solicitação de envio em lote",
+  adicionou_arquivo_cliente_lote: "Adicionou arquivo(s) do cliente para preenchimento (envio em lote)",
+  removeu_arquivo_cliente_lote: "Removeu arquivo do cliente (envio em lote)",
   classificou_solicitacao_lote: "Classificou solicitação de envio em lote (Homologação / Atualização)",
   registrou_lote_em_homologacao: "Registrou solicitação de envio em lote na área de Homologação",
   sincronizou_status_lote_homologacao: "Sincronizou o status do envio em lote com a Homologação",
@@ -14097,9 +14099,78 @@ function clientesHomologadosDe(items) {
    Uma Homologação "cancelada" (decisão comercial) nunca é reaberta pelo lote.
    ========================================================================= */
 const LOTE_TIPOS_SOLICITACAO = {
-  homologacao: { label: "Homologação", sub: "Novo cliente" },
-  atualizacao: { label: "Atualização de Homologação", sub: "Cliente já cadastrado" },
+  homologacao: { label: "Homologação", sub: "Processo de um novo cliente. Aparece na aba Homologação.", curto: "Homologação" },
+  atualizacao: {
+    label: "Atualização de Homologação",
+    sub: "Nova demanda documental de um cliente já cadastrado. Aparece na aba Atualização de Homologação.",
+    curto: "Atualização",
+  },
+  // Terceira modalidade (2026-10-20): ferramenta independente de coleta
+  // documental — usa o mesmo mecanismo de seleção/ZIP, mas NUNCA cria
+  // registro em Homologação nem em Atualização de Homologação.
+  coleta: {
+    label: "Consulta e Coleta de Documentos",
+    sub: "Localizar, reunir e baixar documentos (ZIP), sem criar registro em Homologação.",
+    curto: "Coleta",
+  },
 };
+function loteGeraHomologacao(tipo) {
+  return tipo === "homologacao" || tipo === "atualizacao";
+}
+const ZIP_PASTA_GRUPOPRIMA = "Documentos_Grupoprima";
+const ZIP_PASTA_CLIENTE = "Arquivos_para_Preenchimento";
+/** nomeUnicoNoZip: preserva o nome original; só acrescenta " (2)", " (3)"... antes
+ *  da extensão quando já existe um arquivo com o mesmo nome (sem diferenciar
+ *  maiúsculas/minúsculas) — nunca sobrescreve. */
+function nomeUnicoNoZip(nome, usados) {
+  const limpo = sanitizeClientNameForFilename(nome) || "arquivo";
+  const ponto = limpo.lastIndexOf(".");
+  const base = ponto > 0 ? limpo.slice(0, ponto) : limpo;
+  const ext = ponto > 0 ? limpo.slice(ponto) : "";
+  let candidato = base + ext;
+  let n = 2;
+  while (usados.has(candidato.toLowerCase())) {
+    candidato = `${base} (${n})${ext}`;
+    n++;
+  }
+  usados.add(candidato.toLowerCase());
+  return candidato;
+}
+/** docDoArquivoCliente: adapta um arquivo do cliente ao formato de documento
+ *  que fetchDocumentFile/viewDocument já entendem (nada de lógica nova). */
+function docDoArquivoCliente(a) {
+  return {
+    id: a.id,
+    categoria: null,
+    tipo: a.nome,
+    titulo: a.nome,
+    arquivo: { driveFileId: a.driveFileId || null, assetId: a.assetId || null, mimeType: a.tipo || null, nomeOriginal: a.nome },
+    __arquivoClienteLote: true,
+  };
+}
+/** enviarArquivosClienteLote: sobe cada arquivo do cliente para a pasta da
+ *  solicitação (mesma pasta/mecanismo dos anexos recebidos) e devolve os
+ *  registros — nunca marcados como documento da Grupoprima. */
+async function enviarArquivosClienteLote(files, { cliente, loteId, usuarioNome }) {
+  const entradas = [];
+  const falhas = [];
+  for (const file of files) {
+    const res = await tryPersistUploadedFile(file, { pasta: pastaLoteParaSolicitacao(cliente, loteId) });
+    if (!res.ok) falhas.push(file.name);
+    entradas.push({
+      id: `arq-cli-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
+      nome: file.name,
+      tamanho: file.size,
+      tipo: file.type || "application/octet-stream",
+      driveFileId: res.ok ? res.driveFileId || null : null,
+      assetId: res.ok ? res.assetId || null : null,
+      origem: "cliente",
+      enviadoPor: usuarioNome || "Usuário do portal",
+      enviadoEm: new Date().toISOString(),
+    });
+  }
+  return { entradas, falhas };
+}
 function homologacaoIdDoLote(loteId) {
   return "hm-" + loteId;
 }
@@ -14146,7 +14217,7 @@ function sincronizarLoteComHomologacao(lote, companies, ctx) {
   return p;
 }
 async function sincronizarLoteInterno(lote, companies, ctx) {
-  if (!lote || !lote.tipoSolicitacao) return { ok: false, motivo: "sem_tipo" };
+  if (!lote || !loteGeraHomologacao(lote.tipoSolicitacao)) return { ok: false, motivo: "sem_tipo" };
   if (lote.homologacaoDesvinculada || lotesDesvinculadosSessao.has(lote.id)) return { ok: false, motivo: "desvinculado" };
   const db = await getDb().catch(() => null);
   if (!db) return { ok: false, motivo: "sem_db" };
@@ -14262,7 +14333,7 @@ async function excluirHomologacaoDoLote(loteId) {
 function LoteTipoTag({ tipo }) {
   const meta = LOTE_TIPOS_SOLICITACAO[tipo];
   if (!meta) return null;
-  return React.createElement("span", { className: "lote-tipo-tag lote-tipo-tag-" + tipo }, tipo === "atualizacao" ? "Atualização" : "Homologação");
+  return React.createElement("span", { className: "lote-tipo-tag lote-tipo-tag-" + tipo }, meta.curto);
 }
 /** LoteHomologacaoCard: dentro do detalhe do lote — mostra/recupera o registro
  *  vinculado (idempotente) ou permite classificar um lote antigo. */
@@ -14276,10 +14347,15 @@ function LoteHomologacaoCard({ item, companies, onUpdate, onAbrir, currentUser }
   const [clienteSel, setClienteSel] = useState("");
   const [erro, setErro] = useState(null);
   const podeAbrir = can(currentUser, "homologacoes");
+  const ehColeta = item.tipoSolicitacao === "coleta";
   const resumo = resumoDoLote(item);
   const assinatura = [item.tipoSolicitacao || "", item.homologacaoDesvinculada ? 1 : 0, item.status, resumo.itensBase, resumo.resolvidos, resumo.anexos, tentativa].join("|");
   useEffect(() => {
     let cancel = false;
+    if (ehColeta) {
+      setCarregando(false);
+      return;
+    }
     setCarregando(true);
     (async () => {
       const db = await getDb().catch(() => null);
@@ -14292,7 +14368,7 @@ function LoteHomologacaoCard({ item, companies, onUpdate, onAbrir, currentUser }
       }
       if (cancel) return;
       setClientes(clientesHomologadosDe(lista));
-      if (item.tipoSolicitacao && !item.homologacaoDesvinculada) {
+      if (loteGeraHomologacao(item.tipoSolicitacao) && !item.homologacaoDesvinculada) {
         const r = await sincronizarLoteComHomologacao(item, companies, { usuario: currentUser?.nome });
         if (!cancel) setReg(r.ok ? r.registro : lista.find((x) => x.id === homologacaoIdDoLote(item.id)) || null);
       } else if (!cancel) {
@@ -14306,7 +14382,9 @@ function LoteHomologacaoCard({ item, companies, onUpdate, onAbrir, currentUser }
   }, [assinatura]);
   function classificar(tipo) {
     setErro(null);
-    if (tipo === "atualizacao") {
+    if (tipo === "coleta") {
+      onUpdate({ tipoSolicitacao: "coleta", homologacaoDesvinculada: false });
+    } else if (tipo === "atualizacao") {
       const origem = clientes.find((c) => c.id === clienteSel);
       if (!origem) return setErro("Selecione o cliente já cadastrado.");
       lotesDesvinculadosSessao.delete(item.id);
@@ -14321,13 +14399,20 @@ function LoteHomologacaoCard({ item, companies, onUpdate, onAbrir, currentUser }
     lotesDesvinculadosSessao.delete(item.id);
     onUpdate({ homologacaoDesvinculada: false });
   }
-  const titulo = h("div", { className: "integ-card-head" }, h(UserPlus, { size: 15 }), h("span", null, "Acompanhamento em Homologação"));
+  const titulo = h(
+    "div",
+    { className: "integ-card-head" },
+    ehColeta ? h(FolderArchive, { size: 15 }) : h(UserPlus, { size: 15 }),
+    h("span", null, ehColeta ? "Consulta e Coleta de Documentos" : "Acompanhamento em Homologação"),
+  );
   let corpo;
-  if (!item.tipoSolicitacao) {
+  if (ehColeta) {
+    corpo = h("p", { className: "integ-card-text" }, "Coleta documental independente: esta solicitação não gera registro nas abas Homologação ou Atualização de Homologação e não entra nos indicadores delas.");
+  } else if (!item.tipoSolicitacao) {
     corpo = h(
       "div",
       null,
-      h("p", { className: "integ-card-text" }, "Esta solicitação foi criada antes da integração e ainda não está classificada. Classifique para acompanhá-la também na área de Homologação (as demais funções não mudam)."),
+      h("p", { className: "integ-card-text" }, "Esta solicitação foi criada antes da integração e ainda não está classificada. Classifique para definir a finalidade (as demais funções não mudam)."),
       escolhendoAtu
         ? h(
             "div",
@@ -14346,6 +14431,7 @@ function LoteHomologacaoCard({ item, companies, onUpdate, onAbrir, currentUser }
             { className: "integ-card-row" },
             h("button", { type: "button", className: "doc-view-btn", onClick: () => classificar("homologacao") }, "Classificar como Homologação"),
             h("button", { type: "button", className: "doc-view-btn", onClick: () => setEscolhendoAtu(true) }, "Classificar como Atualização de Homologação"),
+            h("button", { type: "button", className: "doc-view-btn", onClick: () => classificar("coleta") }, "Classificar como Consulta e Coleta (sem Homologação)"),
           ),
       erro && h("p", { className: "integ-card-erro" }, erro),
     );
@@ -24616,6 +24702,13 @@ function analisarLote(solicitacao, { companies, permitirVencidos, excluirDocIds 
  *  "recebido", já que o documento foi localizado mas, por decisão de
  *  quem processou, não foi incluído. */
 async function processarLote(solicitacao, { companies, usuarioProcessamento, deps, permitirVencidos, excluirDocIds } = {}) {
+  const _fetchDocumentFile = (deps && deps.fetchDocumentFile) || fetchDocumentFile;
+  // Arquivos enviados PELO CLIENTE (formulários/RFIs/planilhas a preencher):
+  // nunca entram no cruzamento com o catálogo nem contam como documento da
+  // Grupoprima — só são anexados ao ZIP, numa pasta própria, sem alteração.
+  const arquivosClienteAtivos = (solicitacao.arquivosCliente || []).filter(
+    (a) => !(excluirDocIds && excluirDocIds.has(a.id)),
+  );
   const _tryPersistUploadedFile = (deps && deps.tryPersistUploadedFile) || tryPersistUploadedFile;
   const _createDocumentPackageMultiBase =
     (deps && deps.createDocumentPackageMultiBase) || createDocumentPackageMultiBase;
@@ -24679,7 +24772,7 @@ async function processarLote(solicitacao, { companies, usuarioProcessamento, dep
     permitirVencidos,
     excluirDocIds,
   });
-  if (!algumRecebivel) {
+  if (!algumRecebivel && arquivosClienteAtivos.length === 0) {
     return falhar(
       "recebimento",
       "Nenhuma documentação recebida (anexada) nem localizada automaticamente no catálogo — anexe ao menos um documento, marque algum item como recebido, ou aguarde a chegada de algum.",
@@ -24688,7 +24781,9 @@ async function processarLote(solicitacao, { companies, usuarioProcessamento, dep
   }
   marcarEtapa("recebimento", "ok");
 
-  const anexosPendentes = (solicitacao.anexosRecebidos || []).filter((a) => !a.driveFileId && !a.assetId);
+  const anexosPendentes = [...(solicitacao.anexosRecebidos || []), ...arquivosClienteAtivos].filter(
+    (a) => !a.driveFileId && !a.assetId,
+  );
   if (anexosPendentes.length > 0) {
     return falhar(
       "upload",
@@ -24699,7 +24794,7 @@ async function processarLote(solicitacao, { companies, usuarioProcessamento, dep
   marcarEtapa("upload", "ok");
   marcarEtapa("validacao", "ok");
 
-  if (entradasNumeradas.length === 0) {
+  if (entradasNumeradas.length === 0 && arquivosClienteAtivos.length === 0) {
     return falhar(
       "organizacao_classificacao",
       "Não foi possível organizar nenhum documento para compactar.",
@@ -24715,22 +24810,46 @@ async function processarLote(solicitacao, { companies, usuarioProcessamento, dep
   } catch (e) {
     return falhar("compactacao", (e && e.message) || "Falha ao montar o pacote de documentos.", itensAtualizados);
   }
-  if (!pkg || pkg.files.length === 0) {
+  if (!pkg || (pkg.files.length === 0 && arquivosClienteAtivos.length === 0)) {
     return falhar(
       "compactacao",
       "Nenhum dos arquivos originais foi encontrado no repositório para compactar.",
       itensAtualizados,
     );
   }
-  marcarEtapa(
-    "compactacao",
-    "ok",
-    pkg.failed.length > 0 ? `${pkg.failed.length} arquivo(s) não puderam ser incluídos.` : undefined,
-  );
+  // Arquivos do cliente: pasta própria, nome original preservado, nunca
+  // sobrescreve um arquivo de mesmo nome (acrescenta " (2)"...). Com arquivos
+  // do cliente, os documentos da Grupoprima passam para a pasta
+  // Documentos_Grupoprima; sem eles, o ZIP segue como sempre (lista única na raiz).
+  let arquivosZip = pkg.files;
+  const falhasCliente = [];
+  if (arquivosClienteAtivos.length > 0) {
+    const usados = new Set();
+    const extras = [];
+    for (const a of arquivosClienteAtivos) {
+      try {
+        const { bytes, filename } = await _fetchDocumentFile(docDoArquivoCliente(a));
+        extras.push({ name: `${ZIP_PASTA_CLIENTE}/${nomeUnicoNoZip(filename || a.nome, usados)}`, data: bytes });
+      } catch (e) {
+        falhasCliente.push(a.nome);
+      }
+    }
+    if (extras.length > 0) {
+      arquivosZip = [...pkg.files.map((f) => ({ ...f, name: `${ZIP_PASTA_GRUPOPRIMA}/${f.name}` })), ...extras];
+    }
+  }
+  if (arquivosZip.length === 0) {
+    return falhar("compactacao", "Nenhum dos arquivos originais foi encontrado no repositório para compactar.", itensAtualizados);
+  }
+  const detalhesCompactacao = [
+    pkg.failed.length > 0 ? `${pkg.failed.length} arquivo(s) não puderam ser incluídos.` : null,
+    falhasCliente.length > 0 ? `${falhasCliente.length} arquivo(s) do cliente não puderam ser incluídos (${falhasCliente.join(", ")}).` : null,
+  ].filter(Boolean);
+  marcarEtapa("compactacao", "ok", detalhesCompactacao.length > 0 ? detalhesCompactacao.join(" ") : undefined);
 
   let blob;
   try {
-    blob = _createZip(pkg.files);
+    blob = _createZip(arquivosZip);
   } catch (e) {
     return falhar("compactacao", (e && e.message) || "Falha ao compactar os documentos.", itensAtualizados);
   }
@@ -24812,6 +24931,12 @@ function LoteAnexoInlinePicker({ onFile, disabled, label }) {
  *  solicitação já criada, em EnvioLoteDetailView ("+ Adicionar
  *  documentação a esta solicitação"). */
 function EnvioLoteFormModal({ companies, onClose, onCreate, clientesCadastrados = [] }) {
+  // Arquivos enviados pelo cliente para preenchimento/assinatura (opcional;
+  // só aparece quando a pessoa pede) — ficam separados dos documentos da
+  // Grupoprima e vão para a pasta Arquivos_para_Preenchimento do ZIP.
+  const [arquivosCliente, setArquivosCliente] = useState([]);
+  const [mostrarArquivosCliente, setMostrarArquivosCliente] = useState(false);
+  const arquivosClienteInputRef = useRef(null);
   // tipoSolicitacao (2026-10-20): obrigatório — define em qual aba da
   // Homologação o acompanhamento comercial é registrado automaticamente.
   const [tipoSolicitacao, setTipoSolicitacao] = useState("");
@@ -24843,7 +24968,7 @@ function EnvioLoteFormModal({ companies, onClose, onCreate, clientesCadastrados 
     e.preventDefault();
     setErro(null);
     if (!tipoSolicitacao) {
-      setErro("Selecione o tipo de solicitação: Homologação ou Atualização de Homologação.");
+      setErro("Selecione o tipo de solicitação: Homologação, Atualização de Homologação ou Consulta e Coleta de Documentos.");
       return;
     }
     const origemSel = tipoSolicitacao === "atualizacao" ? clientesCadastrados.find((c) => c.id === clienteOrigemId) : null;
@@ -24853,7 +24978,7 @@ function EnvioLoteFormModal({ companies, onClose, onCreate, clientesCadastrados 
     }
     const clienteFinal = origemSel ? origemSel.nome : clienteNome.trim();
     if (!clienteFinal) {
-      setErro("Informe o nome do cliente.");
+      setErro(tipoSolicitacao === "coleta" ? "Informe o cliente ou a finalidade da solicitação." : "Informe o nome do cliente.");
       return;
     }
     if (baseIds.length === 0) {
@@ -24896,7 +25021,9 @@ function EnvioLoteFormModal({ companies, onClose, onCreate, clientesCadastrados 
     // checklist), pra "Ver solicitação original" em EnvioLoteDetailView
     // mostrar o pedido real do cliente, sem depender da interpretação do
     // portal.
-    onCreate({
+    setProcessando(true);
+    await onCreate({
+      arquivosClienteFiles: arquivosCliente,
       cliente: clienteFinal,
       tipoSolicitacao,
       clienteOrigemId: origemSel ? origemSel.id : null,
@@ -24997,7 +25124,7 @@ function EnvioLoteFormModal({ companies, onClose, onCreate, clientesCadastrados 
           : React.createElement(
               "div",
               { className: "homolog-field" },
-              React.createElement("label", null, "Nome do cliente"),
+              React.createElement("label", null, tipoSolicitacao === "coleta" ? "Cliente ou finalidade" : "Nome do cliente"),
               React.createElement(
                 "p",
                 { className: "homolog-bases-hint" },
@@ -25009,7 +25136,10 @@ function EnvioLoteFormModal({ companies, onClose, onCreate, clientesCadastrados 
                 type: "text",
                 value: clienteNome,
                 onChange: (e) => setClienteNome(e.target.value),
-                placeholder: "Razão social ou nome fantasia do cliente",
+                placeholder:
+                  tipoSolicitacao === "coleta"
+                    ? "Cliente ou finalidade (ex.: Cadastro de fornecedor — Nestlé)"
+                    : "Razão social ou nome fantasia do cliente",
               }),
               tipoSolicitacao === "homologacao" &&
                 clienteNome.trim() &&
@@ -25124,6 +25254,77 @@ function EnvioLoteFormModal({ companies, onClose, onCreate, clientesCadastrados 
         ),
         React.createElement(
           "div",
+          { className: "homolog-field" },
+          !mostrarArquivosCliente && arquivosCliente.length === 0
+            ? React.createElement(
+                "button",
+                { type: "button", className: "lote-add-cliente-btn", onClick: () => setMostrarArquivosCliente(true) },
+                React.createElement(Plus, { size: 13 }),
+                " O cliente enviou formulários ou arquivos para preencher ou assinar?",
+              )
+            : React.createElement(
+                React.Fragment,
+                null,
+                React.createElement("label", null, "Arquivos do cliente para preenchimento"),
+                React.createElement(
+                  "p",
+                  { className: "homolog-bases-hint" },
+                  "Formulários, RFIs, planilhas ou documentos para preencher/assinar. Vão no ZIP na pasta ",
+                  React.createElement("strong", null, ZIP_PASTA_CLIENTE),
+                  ", separados dos documentos da Grupoprima e sem alterar o original.",
+                ),
+                React.createElement(
+                  "div",
+                  {
+                    className: "homolog-dropzone",
+                    onDragOver: (e) => e.preventDefault(),
+                    onDrop: (e) => {
+                      e.preventDefault();
+                      const fs = Array.from(e.dataTransfer.files || []);
+                      if (fs.length) setArquivosCliente((prev) => [...prev, ...fs]);
+                    },
+                    onClick: () => arquivosClienteInputRef.current?.click(),
+                    role: "button",
+                    tabIndex: 0,
+                  },
+                  React.createElement(UploadCloud, { size: 20 }),
+                  React.createElement("span", null, "Arraste os arquivos aqui ou clique para selecionar"),
+                  React.createElement("input", {
+                    ref: arquivosClienteInputRef,
+                    type: "file",
+                    multiple: true,
+                    id: "lote-arquivos-cliente-input",
+                    hidden: true,
+                    onChange: (e) => {
+                      const fs = Array.from(e.target.files || []);
+                      e.target.value = "";
+                      if (fs.length) setArquivosCliente((prev) => [...prev, ...fs]);
+                    },
+                  }),
+                ),
+                arquivosCliente.map((f, i) =>
+                  React.createElement(
+                    "div",
+                    { key: f.name + i, className: "homolog-anexo-item" },
+                    React.createElement(FileText, { size: 14 }),
+                    React.createElement("span", { className: "homolog-anexo-nome" }, f.name),
+                    React.createElement("span", { className: "homolog-anexo-tamanho" }, formatBytes(f.size)),
+                    React.createElement(
+                      "button",
+                      {
+                        type: "button",
+                        className: "icon-btn-dark",
+                        "aria-label": "Remover " + f.name,
+                        onClick: () => setArquivosCliente((prev) => prev.filter((_, j) => j !== i)),
+                      },
+                      React.createElement(X, { size: 13 }),
+                    ),
+                  ),
+                ),
+              ),
+        ),
+        React.createElement(
+          "div",
           { className: "homolog-form-actions" },
           React.createElement(
             "button",
@@ -25133,7 +25334,7 @@ function EnvioLoteFormModal({ companies, onClose, onCreate, clientesCadastrados 
           React.createElement(
             "button",
             { type: "submit", className: "doc-download-btn", disabled: processando },
-            processando ? "Processando..." : "Criar solicitação",
+            processando ? (arquivosCliente.length ? "Enviando arquivos..." : "Processando...") : "Criar solicitação",
           ),
         ),
       ),
@@ -25306,6 +25507,10 @@ function EnvioLoteDetailView({ item, companies, onBack, onNotify, onView, onUpda
   // `previaDesmarcados` guarda os `doc.id` que a pessoa tirou da seleção.
   const [previaAberta, setPreviaAberta] = useState(false);
   const [previaDesmarcados, setPreviaDesmarcados] = useState(new Set());
+  const [mostrarAddCliente, setMostrarAddCliente] = useState(false);
+  const [enviandoArquivosCliente, setEnviandoArquivosCliente] = useState(false);
+  const arquivosClienteDetalheRef = useRef(null);
+  const arquivosCliente = item.arquivosCliente || [];
   // isAdmin: exclusão da solicitação restrita a Administrador (pedido
   // explícito da Iasmin, 2026-09-28), mesmo gate já usado pra excluir um
   // documento do catálogo (DocRowActions) — nunca aberto pros perfis
@@ -25381,6 +25586,24 @@ function EnvioLoteDetailView({ item, companies, onBack, onNotify, onView, onUpda
     });
     logDocumentAction("removeu_arquivo_lote", { cliente: item.cliente, arquivo: anexo.nome });
   }
+  async function handleAdicionarArquivosCliente(files) {
+    if (!files || files.length === 0) return;
+    setEnviandoArquivosCliente(true);
+    const envio = await enviarArquivosClienteLote(files, { cliente: item.cliente, loteId: item.id, usuarioNome: currentUser?.nome });
+    persistPatch({ arquivosCliente: [...arquivosCliente, ...envio.entradas] });
+    setEnviandoArquivosCliente(false);
+    logDocumentAction("adicionou_arquivo_cliente_lote", { cliente: item.cliente, quantidade: envio.entradas.length });
+    onNotify?.(
+      envio.falhas.length
+        ? `${envio.entradas.length} arquivo(s) adicionado(s); ${envio.falhas.length} não pôde(ram) ser salvo(s) no repositório agora — remova e reenvie antes de gerar o ZIP.`
+        : `${envio.entradas.length} arquivo(s) do cliente adicionado(s).`,
+      envio.falhas.length ? "error" : "info",
+    );
+  }
+  function handleRemoverArquivoCliente(a) {
+    persistPatch({ arquivosCliente: arquivosCliente.filter((x) => x.id !== a.id) });
+    logDocumentAction("removeu_arquivo_cliente_lote", { cliente: item.cliente, arquivo: a.nome });
+  }
   function handleAdicionarItem() {
     if (!novoItemNome.trim()) return;
     const tipos = tiposDistintosParaChecklist(novoItemNome.trim());
@@ -25443,7 +25666,7 @@ function EnvioLoteDetailView({ item, companies, onBack, onNotify, onView, onUpda
     // vencidos neste fluxo). Sem nenhum arquivo, segue direto pra
     // processarLote, que devolve a mensagem de erro de sempre.
     const previa = analisarLote(item, { companies }).entradasNumeradas;
-    if (previa.length === 0) {
+    if (previa.length === 0 && arquivosCliente.length === 0) {
       executarProcessamento(null, null);
       return;
     }
@@ -25521,6 +25744,19 @@ function EnvioLoteDetailView({ item, companies, onBack, onNotify, onView, onUpda
     const numeroFinal = new Map(finais.map((e) => [e.doc.id, e.numero]));
     return todas.map((e) => ({ ...e, numeroFinal: numeroFinal.get(e.doc.id) || null }));
   }, [previaAberta, previaDesmarcados, item, companies]);
+  // Documentações pedidas que NÃO foram encontradas no catálogo (sem anexo
+  // manual): avisadas claramente na pré-visualização do ZIP.
+  const previaNaoEncontrados = useMemo(() => {
+    if (!previaAberta) return [];
+    const r = analisarLote(item, { companies }).itensAtualizados;
+    const lista = [];
+    r.forEach((it) => {
+      Object.entries(it.statusPorBase || {}).forEach(([baseId, st]) => {
+        if (st === "pendente") lista.push(`${it.nome} (${companyLabelFor(companiesPorId.get(baseId)) || baseId})`);
+      });
+    });
+    return lista;
+  }, [previaAberta, item, companies]);
   const compilado = useMemo(() => {
     let solicitados = 0,
       recebidos = 0,
@@ -25616,7 +25852,7 @@ function EnvioLoteDetailView({ item, companies, onBack, onNotify, onView, onUpda
           React.createElement(
             "span",
             null,
-            `Excluir a solicitação de "${item.cliente}"? Isso remove o registro definitivamente (checklist, anexos recebidos e histórico de processamento)${item.tipoSolicitacao && !item.homologacaoDesvinculada ? " e também o acompanhamento vinculado na área de Homologação" : ""} e não pode ser desfeito. Os arquivos já enviados ao Drive não são apagados.`,
+            `Excluir a solicitação de "${item.cliente}"? Isso remove o registro definitivamente (checklist, anexos recebidos e histórico de processamento)${loteGeraHomologacao(item.tipoSolicitacao) && !item.homologacaoDesvinculada ? " e também o acompanhamento vinculado na área de Homologação" : ""} e não pode ser desfeito. Os arquivos já enviados ao Drive não são apagados.`,
           ),
           React.createElement(
             "div",
@@ -25865,7 +26101,7 @@ function EnvioLoteDetailView({ item, companies, onBack, onNotify, onView, onUpda
               React.createElement(
                 "span",
                 { className: "lote-previa-contador" },
-                `${previaLinhas.filter((l) => !previaDesmarcados.has(l.doc.id)).length} de ${previaLinhas.length} arquivo(s) selecionado(s)`,
+                `${previaLinhas.filter((l) => !previaDesmarcados.has(l.doc.id)).length + arquivosCliente.filter((a) => !previaDesmarcados.has(a.id)).length} de ${previaLinhas.length + arquivosCliente.length} arquivo(s) selecionado(s)`,
               ),
               React.createElement(
                 "button",
@@ -25881,11 +26117,21 @@ function EnvioLoteDetailView({ item, companies, onBack, onNotify, onView, onUpda
                 {
                   type: "button",
                   className: "mini-download-btn",
-                  onClick: () => setPreviaDesmarcados(new Set(previaLinhas.map((l) => l.doc.id))),
+                  onClick: () => setPreviaDesmarcados(new Set([...previaLinhas.map((l) => l.doc.id), ...arquivosCliente.map((a) => a.id)])),
                 },
                 "Desmarcar todos",
               ),
             ),
+            previaNaoEncontrados.length > 0 &&
+              React.createElement(
+                "div",
+                { className: "lote-previa-vencido lote-previa-naoenc" },
+                React.createElement(AlertTriangle, { size: 12 }),
+                ` Não encontrado(s) no catálogo (ficam como pendentes): ${previaNaoEncontrados.join("; ")}.`,
+              ),
+            arquivosCliente.length > 0 &&
+              previaLinhas.length > 0 &&
+              React.createElement("div", { className: "lote-previa-grupo" }, `Pasta ${ZIP_PASTA_GRUPOPRIMA}`),
             previaLinhas.map((l, idx) => {
               const marcado = !previaDesmarcados.has(l.doc.id);
               const vencido = l.doc.status === "vencido";
@@ -25939,10 +26185,39 @@ function EnvioLoteDetailView({ item, companies, onBack, onNotify, onView, onUpda
                 ),
               );
             }),
+            arquivosCliente.length > 0 &&
+              React.createElement("div", { className: "lote-previa-grupo" }, `Pasta ${ZIP_PASTA_CLIENTE} (arquivos do cliente)`),
+            arquivosCliente.map((a) => {
+              const marcado = !previaDesmarcados.has(a.id);
+              return React.createElement(
+                "div",
+                { key: a.id, className: "lote-previa-linha" + (marcado ? "" : " desmarcado") },
+                React.createElement("input", {
+                  type: "checkbox",
+                  checked: marcado,
+                  onChange: () => togglePreviaDoc(a.id),
+                  "aria-label": `Incluir ${a.nome} no ZIP`,
+                }),
+                React.createElement("span", { className: "lote-previa-num" }, "—"),
+                React.createElement(
+                  "div",
+                  { className: "lote-previa-info" },
+                  React.createElement("span", { className: "homolog-anexo-nome" }, a.nome),
+                  React.createElement("div", { className: "lote-previa-meta" }, `arquivo do cliente · ${formatBytes(a.tamanho)} · nome original preservado`),
+                ),
+                React.createElement(
+                  "button",
+                  { type: "button", className: "mini-download-btn", onClick: () => handleVer(docDoArquivoCliente(a)), title: "Visualizar arquivo" },
+                  React.createElement(Eye, { size: 13 }),
+                  " Ver",
+                ),
+              );
+            }),
             React.createElement(
               "p",
               { className: "homolog-bases-hint", style: { marginTop: 8 } },
-              "Arquivos desmarcados não entram no ZIP e a documentação correspondente fica com pendência. A numeração dos arquivos é refeita sem eles.",
+              "Arquivos desmarcados não entram no ZIP e a documentação correspondente fica com pendência. A numeração dos arquivos é refeita sem eles." +
+                (arquivosCliente.length > 0 ? ` Documentos da Grupoprima vão para ${ZIP_PASTA_GRUPOPRIMA} e arquivos do cliente para ${ZIP_PASTA_CLIENTE}.` : ""),
             ),
           ),
           React.createElement(
@@ -25959,9 +26234,11 @@ function EnvioLoteDetailView({ item, companies, onBack, onNotify, onView, onUpda
                 type: "button",
                 className: "doc-download-btn",
                 onClick: handleConfirmarPrevia,
-                disabled: previaLinhas.every((l) => previaDesmarcados.has(l.doc.id)),
+                disabled:
+                  previaLinhas.every((l) => previaDesmarcados.has(l.doc.id)) &&
+                  arquivosCliente.every((a) => previaDesmarcados.has(a.id)),
               },
-              `Gerar ZIP com ${previaLinhas.filter((l) => !previaDesmarcados.has(l.doc.id)).length} arquivo(s)`,
+              `Gerar ZIP com ${previaLinhas.filter((l) => !previaDesmarcados.has(l.doc.id)).length + arquivosCliente.filter((a) => !previaDesmarcados.has(a.id)).length} arquivo(s)`,
             ),
           ),
         ),
@@ -26021,6 +26298,85 @@ function EnvioLoteDetailView({ item, companies, onBack, onNotify, onView, onUpda
         ),
       ),
     ),
+    !mostrarAddCliente && arquivosCliente.length === 0
+      ? React.createElement(
+          "div",
+          { className: "lote-section" },
+          React.createElement(
+            "button",
+            { type: "button", className: "lote-add-cliente-btn", onClick: () => setMostrarAddCliente(true) },
+            React.createElement(Plus, { size: 13 }),
+            " O cliente enviou formulários ou arquivos para preencher ou assinar?",
+          ),
+        )
+      : React.createElement(
+          "div",
+          { className: "lote-section", id: "lote-arquivos-cliente" },
+          React.createElement("h3", null, "Arquivos do cliente para preenchimento"),
+          React.createElement(
+            "p",
+            { className: "homolog-bases-hint" },
+            "Formulários, RFIs, planilhas ou documentos enviados pelo cliente. Ficam identificados à parte dos documentos da Grupoprima e vão no ZIP na pasta ",
+            React.createElement("strong", null, ZIP_PASTA_CLIENTE),
+            ", com o nome e o conteúdo originais.",
+          ),
+          arquivosCliente.map((a) =>
+            React.createElement(
+              "div",
+              { key: a.id, className: "homolog-anexo-item" },
+              React.createElement(FileText, { size: 14 }),
+              React.createElement("span", { className: "homolog-anexo-nome" }, a.nome),
+              React.createElement("span", { className: "homolog-anexo-tamanho" }, formatBytes(a.tamanho)),
+              !a.driveFileId && !a.assetId &&
+                React.createElement("span", { className: "lote-previa-vencido" }, "não salvo no repositório — remova e reenvie"),
+              React.createElement(
+                "button",
+                { type: "button", className: "mini-download-btn", onClick: () => handleVer(docDoArquivoCliente(a)) },
+                React.createElement(Eye, { size: 13 }),
+                " Ver",
+              ),
+              React.createElement(
+                "button",
+                { type: "button", className: "mini-download-btn", onClick: () => handleBaixar(docDoArquivoCliente(a)) },
+                React.createElement(Download, { size: 13 }),
+                " Baixar",
+              ),
+              React.createElement(
+                "button",
+                { type: "button", className: "icon-btn-dark", "aria-label": "Remover " + a.nome, onClick: () => handleRemoverArquivoCliente(a) },
+                React.createElement(X, { size: 13 }),
+              ),
+            ),
+          ),
+          React.createElement(
+            "div",
+            { style: { marginTop: 8 } },
+            React.createElement(
+              "button",
+              {
+                type: "button",
+                className: "mini-download-btn",
+                disabled: enviandoArquivosCliente,
+                onClick: () => arquivosClienteDetalheRef.current?.click(),
+              },
+              enviandoArquivosCliente ? React.createElement(Loader2, { size: 13, className: "spin" }) : React.createElement(UploadCloud, { size: 13 }),
+              " ",
+              enviandoArquivosCliente ? "Enviando..." : "Adicionar arquivos do cliente",
+            ),
+            React.createElement("input", {
+              ref: arquivosClienteDetalheRef,
+              id: "lote-arquivos-cliente-detalhe-input",
+              type: "file",
+              multiple: true,
+              hidden: true,
+              onChange: (e) => {
+                const fs = Array.from(e.target.files || []);
+                e.target.value = "";
+                handleAdicionarArquivosCliente(fs);
+              },
+            }),
+          ),
+        ),
     (item.etapasProcessamento || []).length > 0 &&
       React.createElement(
         "div",
@@ -26189,7 +26545,7 @@ function EnvioLoteView({ currentUser, onNotify, onView, companies, registroAlvo,
    *  resolvidos ou anexos); a criação do registro é idempotente (id
    *  determinístico), então reabrir/regravar nunca duplica. */
   function agendarSync(item, onDone) {
-    if (!item || !item.tipoSolicitacao || item.homologacaoDesvinculada) return;
+    if (!item || !loteGeraHomologacao(item.tipoSolicitacao) || item.homologacaoDesvinculada) return;
     const r = resumoDoLote(item);
     const sig = [item.tipoSolicitacao, item.status, r.itensBase, r.resolvidos, r.anexos].join("|");
     if (!onDone && sincAssinaturaRef.current[item.id] === sig) return;
@@ -26234,7 +26590,7 @@ function EnvioLoteView({ currentUser, onNotify, onView, companies, registroAlvo,
         return db.collection("batch_document_submissions").doc(id).delete().catch(() => {});
       })
       .catch(() => {});
-    if (item?.tipoSolicitacao) {
+    if (loteGeraHomologacao(item?.tipoSolicitacao)) {
       excluirHomologacaoDoLote(id);
       logDocumentAction("excluiu_homologacao_vinculada_lote", { cliente: item.cliente });
     }
@@ -26246,8 +26602,16 @@ function EnvioLoteView({ currentUser, onNotify, onView, companies, registroAlvo,
       "info",
     );
   }
-  function handleCreate({ cliente, tipoSolicitacao, clienteOrigemId, baseIds, itens, textoSolicitacaoOriginal, arquivoSolicitacaoOriginalNome }) {
+  async function handleCreate({ cliente, tipoSolicitacao, clienteOrigemId, baseIds, itens, textoSolicitacaoOriginal, arquivoSolicitacaoOriginalNome, arquivosClienteFiles }) {
     const id = generateLoteId();
+    let arquivosCliente = [];
+    if (arquivosClienteFiles && arquivosClienteFiles.length > 0) {
+      const envio = await enviarArquivosClienteLote(arquivosClienteFiles, { cliente, loteId: id, usuarioNome: currentUser?.nome });
+      arquivosCliente = envio.entradas;
+      if (envio.falhas.length > 0) {
+        onNotify?.(`${envio.falhas.length} arquivo(s) do cliente não puderam ser salvos no repositório agora (${envio.falhas.join(", ")}). Reenvie-os na solicitação antes de gerar o ZIP.`, "error");
+      }
+    }
     const agora = new Date().toISOString();
     const documentacoesSolicitadas = itens.map((it) => {
       const basesAplicaveis = it.valePorTodasAsBases ? companies.map((c) => c.id) : baseIds;
@@ -26292,8 +26656,16 @@ function EnvioLoteView({ currentUser, onNotify, onView, companies, registroAlvo,
       // aba; `homologacaoId` é o id determinístico do registro vinculado.
       tipoSolicitacao,
       clienteOrigemId: clienteOrigemId || null,
-      homologacaoId: homologacaoIdDoLote(id),
+      ...(loteGeraHomologacao(tipoSolicitacao) ? { homologacaoId: homologacaoIdDoLote(id) } : {}),
+      arquivosCliente,
     };
+    if (arquivosCliente.length > 0) {
+      logDocumentAction("adicionou_arquivo_cliente_lote", { cliente, quantidade: arquivosCliente.length });
+    }
+    if (!loteGeraHomologacao(tipoSolicitacao)) {
+      persist(item);
+      onNotify?.(`Solicitação de coleta "${cliente}" criada com ${documentacoesSolicitadas.length} documentação(ões).`, "info");
+    } else
     persist(item, (res) => {
       if (res && res.ok) {
         onNotify?.(
@@ -33013,6 +33385,12 @@ function GrupoprimaPortal() {
         .homolog-cell-cliente { font-weight: 600; }
         .lote-origem-chip { display: inline-block; margin-left: 8px; padding: 1px 8px; border-radius: 999px; font-size: 10.5px; font-weight: 700; color: var(--carvao); background: rgba(107,254,156,0.18); border: 1px solid rgba(107,254,156,0.45); vertical-align: middle; white-space: nowrap; }
         .lote-tipo-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+        .lote-tipo-grid .lote-tipo-card:nth-child(3) { grid-column: 1 / -1; }
+        .lote-tipo-tag-coleta { background: rgba(120,160,255,0.16); border-color: rgba(120,160,255,0.45); }
+        .lote-add-cliente-btn { display: inline-flex; align-items: center; gap: 6px; background: none; border: 1px dashed var(--cinza-frio); border-radius: 9px; padding: 8px 12px; color: var(--carvao); font-family: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer; text-align: left; }
+        .lote-add-cliente-btn:hover { border-color: var(--azul-2); color: var(--texto); }
+        .lote-previa-grupo { font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.03em; color: var(--carvao); margin: 10px 0 4px; }
+        .lote-previa-naoenc { margin-bottom: 8px; line-height: 1.45; }
         .lote-tipo-card { position: relative; display: flex; flex-direction: column; gap: 2px; text-align: left; padding: 11px 14px 11px 40px; border: 1.5px solid var(--cinza-frio); border-radius: 10px; background: var(--card-bg); color: var(--texto); cursor: pointer; font-family: inherit; transition: border-color 0.15s, background 0.15s; }
         .lote-tipo-card::before { content: ""; position: absolute; left: 14px; top: 50%; width: 14px; height: 14px; margin-top: -7px; border-radius: 50%; border: 2px solid var(--cinza-frio); box-sizing: border-box; }
         .lote-tipo-card strong { font-size: 13px; font-weight: 700; }
