@@ -31748,25 +31748,25 @@ function GrupoprimaPortal() {
         .bm-svg { display: block; width: 100%; height: auto; }
         @media (min-width: 1500px) { .bm-stage { max-width: 520px; } }
         /* Paleta do mapa (ideia do demonstrativo da Grupoprima, nas cores do
-           portal): Matriz em degradê verde-limão, Filiais no verde da marca,
-           demais estados atendidos num azul-petróleo suave e estados sem
-           atendimento em cinza discreto. */
-        .bm-state { stroke: var(--card-bg); stroke-width: 1; stroke-linejoin: round; }
-        .bm-state-op { fill: #CFE3EC; }
-        .bm-state-off { fill: #E6E7EA; }
-        .portal-root[data-theme="dark"] .bm-state-op { fill: #2B5A74; }
-        .portal-root[data-theme="dark"] .bm-state-off { fill: rgba(255,255,255,0.06); }
-        .bm-tone-filial { --bm-dot: #0E7A41; --bm-fill: #3FD487; --bm-fill-strong: #2DC476; }
-        .bm-tone-matriz { --bm-dot: #566E12; --bm-fill: url(#bm-grad-matriz); --bm-fill-strong: url(#bm-grad-matriz); }
-        .portal-root[data-theme="dark"] .bm-tone-filial { --bm-dot: #FFFFFF; --bm-fill: #3FCB85; --bm-fill-strong: #6BFE9C; }
-        .portal-root[data-theme="dark"] .bm-tone-matriz { --bm-dot: #FFFFFF; }
+           portal), com preenchimento translúcido e contorno colorido: Matriz em
+           verde-limão, Filiais no verde da marca, demais estados atendidos num
+           azul-petróleo sutil e estados sem atendimento quase apagados. */
+        .bm-state { stroke-width: 0.9; stroke-linejoin: round; }
+        .bm-state-op { fill: rgba(10,74,107,0.08); stroke: rgba(10,74,107,0.26); }
+        .bm-state-off { fill: rgba(92,95,97,0.05); stroke: var(--cinza-frio); }
+        .portal-root[data-theme="dark"] .bm-state-op { fill: rgba(111,187,227,0.11); stroke: rgba(111,187,227,0.32); }
+        .portal-root[data-theme="dark"] .bm-state-off { fill: rgba(255,255,255,0.03); stroke: rgba(255,255,255,0.1); }
+        .bm-tone-filial { --bm-dot: #1FAE63; --bm-fill: rgba(31,174,99,0.24); --bm-fill-strong: rgba(31,174,99,0.44); }
+        .bm-tone-matriz { --bm-dot: #7FA02A; --bm-fill: rgba(141,181,46,0.32); --bm-fill-strong: rgba(141,181,46,0.52); }
+        .portal-root[data-theme="dark"] .bm-tone-filial { --bm-dot: #6BFE9C; --bm-fill: rgba(107,254,156,0.22); --bm-fill-strong: rgba(107,254,156,0.42); }
+        .portal-root[data-theme="dark"] .bm-tone-matriz { --bm-dot: #D6EC5A; --bm-fill: rgba(214,236,90,0.28); --bm-fill-strong: rgba(214,236,90,0.48); }
         .bm-hit { cursor: pointer; outline: none; }
-        .bm-state-base { fill: var(--bm-fill); stroke: var(--card-bg); stroke-width: 0.9; transition: filter 0.15s, stroke-width 0.15s; }
-        .bm-hit:hover .bm-state-base, .bm-hit.is-active .bm-state-base { filter: brightness(1.08) saturate(1.1); }
+        .bm-state-base { fill: var(--bm-fill); stroke: var(--bm-dot); stroke-width: 1; transition: fill 0.15s, stroke-width 0.15s; }
+        .bm-hit:hover .bm-state-base, .bm-hit.is-active .bm-state-base { fill: var(--bm-fill-strong); stroke-width: 1.8; }
         .bm-active-outline { fill: none; stroke: var(--bm-dot); stroke-width: 2.2; stroke-linejoin: round; }
         .bm-hit:focus-visible .bm-state-base { stroke: var(--foco); stroke-width: 2.6; }
-        .bm-dot-svg { fill: #003753; stroke: #fff; stroke-width: 1.6; }
-        .bm-matriz-ring { fill: none; stroke: #003753; stroke-width: 1.5; }
+        .bm-dot-svg { fill: var(--bm-dot); stroke: var(--card-bg); stroke-width: 1.6; }
+        .bm-matriz-ring { fill: none; stroke: var(--bm-dot); stroke-width: 1.5; }
         .bm-pulse { fill: var(--bm-dot); opacity: 0.25; transform-box: fill-box; transform-origin: center; animation: bmPulse 1.4s ease-out infinite; }
         @keyframes bmPulse { from { transform: scale(0.6); opacity: 0.4; } to { transform: scale(1.25); opacity: 0; } }
         @media (prefers-reduced-motion: reduce) { .bm-pulse { animation: none; } }
@@ -31778,12 +31778,14 @@ function GrupoprimaPortal() {
         .bm-tip-city { font-size: 13px; font-weight: 800; margin: 1px 0 2px; }
         .bm-tip-foot { font-size: 11px; opacity: 0.85; display: flex; align-items: center; }
         .bm-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; flex-shrink: 0; }
-        .bm-dot-filial { background: #3FD487; }
-        .bm-dot-matriz { background: linear-gradient(135deg, #8DB52E, #E3EF63); }
-        .bm-dot-op { background: #CFE3EC; }
-        .bm-dot-off { background: #E6E7EA; box-shadow: inset 0 0 0 1px rgba(0,55,83,0.18); }
-        .portal-root[data-theme="dark"] .bm-dot-op { background: #2B5A74; }
-        .portal-root[data-theme="dark"] .bm-dot-off { background: rgba(255,255,255,0.14); box-shadow: none; }
+        .bm-dot-filial { background: #1FAE63; }
+        .bm-dot-matriz { background: #7FA02A; box-shadow: 0 0 0 2px rgba(127,160,42,0.3); }
+        .bm-dot-op { background: rgba(10,74,107,0.3); }
+        .bm-dot-off { background: var(--cinza-frio); }
+        .portal-root[data-theme="dark"] .bm-dot-filial { background: #6BFE9C; }
+        .portal-root[data-theme="dark"] .bm-dot-matriz { background: #D6EC5A; box-shadow: 0 0 0 2px rgba(214,236,90,0.3); }
+        .portal-root[data-theme="dark"] .bm-dot-op { background: rgba(111,187,227,0.5); }
+        .portal-root[data-theme="dark"] .bm-dot-off { background: rgba(255,255,255,0.14); }
         .status-neutro { background: var(--branco-frio); color: var(--texto); border: 1px solid var(--cinza-frio); }
         .base-badges { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; }
         .base-badges-compact .status-badge { font-size: 10.5px; padding: 3px 8px; }
