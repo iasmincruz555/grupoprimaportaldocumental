@@ -3469,6 +3469,7 @@ const AUDIT_ACTION_LABELS = {
   editou_homologacao: "Editou homologação",
   editou_homologacao_atualizacao: "Editou atualização de homologação",
   gerou_pasta_drive_homologacao: "Gerou pasta do cliente no Drive (homologação)",
+  publicou_lote_pasta_drive_homologacao: "Publicou as documentações do lote na pasta do Drive da homologação",
   gerou_pasta_drive_homologacao_atualizacao: "Gerou pasta do cliente no Drive (atualização de homologação)",
   anexou_arquivo_resposta_homologacao: "Anexou arquivo de resposta (homologação)",
   marcou_arquivo_preenchido_homologacao: "Marcou arquivo do cliente como preenchido (homologação)",
@@ -14457,7 +14458,176 @@ function sincronizarLoteComHomologacao(lote, companies, ctx) {
   sincLotePendentes[lote.id] = p;
   return p;
 }
+/* ---- Publicação das documentações do lote na pasta do Drive da Homologação ----
+   Pedido da Iasmin, 2026-10-21: ao concluir a homologação, as documentações
+   enviadas em lote ficam disponíveis no link do Drive da Homologação (a pasta
+   do cliente, HOMOLOGAÇÃO - ARQUIVOS DE RESPOSTA / CONSULTOR / Cliente):
+   o ZIP na raiz da pasta e os documentos individuais em "Documentações em
+   lote". Arquivos que o cliente enviou para preenchimento não entram aqui.
+   Idempotente: `lotePublicado` guarda a versão do ZIP já publicada e os nomes
+   já enviados (o upload do Drive nunca sobrescreve — repetir duplicaria). */
+const NOME_SUBPASTA_DOCS_LOTE_HOMOLOGACAO = "Documentações em lote";
+const publicandoLotesSessao = new Set();
+function mimePorExtensaoLote(nome) {
+  const ext = (String(nome).split(".").pop() || "").toLowerCase();
+  const mapa = {
+    pdf: "application/pdf",
+    png: "image/png",
+    jpg: "image/jpeg",
+    jpeg: "image/jpeg",
+    doc: "application/msword",
+    docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    xls: "application/vnd.ms-excel",
+    xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    zip: "application/zip",
+  };
+  return mapa[ext] || "application/octet-stream";
+}
+/** publicacaoLotePendente: há ZIP gerado que ainda não foi (totalmente) copiado? */
+function publicacaoLotePendente(registro, lote) {
+  if (!registro || !lote || registro.origem !== "envio_lote") return false;
+  const zips = lote.versoesZip || [];
+  if (zips.length === 0) return false;
+  const pub = registro.lotePublicado;
+  return !(pub && pub.versao === zips.length && pub.completo);
+}
+/** publicarLoteNaPastaDrive: devolve { ok, lotePublicado, enviados, falhas }.
+ *  Nunca lança. Não grava o registro — quem chama grava (ver chamadores). */
+async function publicarLoteNaPastaDrive(registro, lote) {
+  const base = { ok: false, lotePublicado: null, enviados: 0, falhas: 0 };
+  if (!DRIVE_PROXY_URL || !window.JSZip) return { ...base, motivo: "indisponivel" };
+  if (!publicacaoLotePendente(registro, lote)) return { ...base, ok: true, motivo: "nada_a_fazer" };
+  if (publicandoLotesSessao.has(lote.id)) return { ...base, motivo: "em_andamento" };
+  publicandoLotesSessao.add(lote.id);
+  try {
+    const zips = lote.versoesZip || [];
+    const ultima = zips[zips.length - 1];
+    const anterior = registro.lotePublicado && registro.lotePublicado.versao === zips.length ? registro.lotePublicado : null;
+    const jaEnviados = new Set((anterior && anterior.enviados) || []);
+    const pastaBase = pastaHomologacaoCliente(registro.cliente, registro.consultor);
+    const { bytes } = await fetchDocumentFile({
+      id: `zip-${lote.id}-${ultima.versao}`,
+      tipo: ultima.zipFileName,
+      arquivo: {
+        driveFileId: ultima.driveFileId || null,
+        assetId: ultima.assetId || null,
+        mimeType: "application/zip",
+        nomeOriginal: ultima.zipFileName,
+      },
+    });
+    const tarefas = [];
+    tarefas.push({ chave: `zip:${ultima.zipFileName}`, nome: ultima.zipFileName, bytes, pasta: pastaBase });
+    const zip = await window.JSZip.loadAsync(bytes);
+    const entradas = [];
+    zip.forEach((caminho, entrada) => {
+      if (entrada.dir) return;
+      const partes = caminho.split("/").filter(Boolean);
+      if (partes[0] === ZIP_PASTA_CLIENTE) return; // arquivos do cliente ficam de fora
+      const nome = partes[partes.length - 1];
+      if (nome) entradas.push({ caminho, nome, entrada });
+    });
+    for (const e of entradas) {
+      tarefas.push({
+        chave: `doc:${e.caminho}`,
+        nome: e.nome,
+        pasta: `${pastaBase}/${NOME_SUBPASTA_DOCS_LOTE_HOMOLOGACAO}`,
+        entrada: e.entrada,
+      });
+    }
+    const enviados = [...jaEnviados];
+    let falhas = 0;
+    let novos = 0;
+    for (const t of tarefas) {
+      if (jaEnviados.has(t.chave)) continue;
+      try {
+        const dados = t.bytes || (await t.entrada.async("uint8array"));
+        const arquivo = new File([dados], t.nome, { type: mimePorExtensaoLote(t.nome) });
+        const r = await tryPersistUploadedFile(arquivo, { pasta: t.pasta });
+        if (r && r.ok && r.driveFileId) {
+          enviados.push(t.chave);
+          novos++;
+        } else falhas++;
+      } catch (err) {
+        falhas++;
+      }
+    }
+    const completo = falhas === 0;
+    return {
+      ok: true,
+      enviados: novos,
+      falhas,
+      lotePublicado: {
+        versao: zips.length,
+        em: new Date().toISOString(),
+        enviados,
+        completo,
+        pasta: pastaBase,
+      },
+    };
+  } catch (e) {
+    return { ...base, motivo: "erro", erro: e && e.message };
+  } finally {
+    publicandoLotesSessao.delete(lote.id);
+  }
+}
+/** publicarLoteConcluidoNaPasta: caminho da conclusão manual na Homologação.
+ *  Lê o lote, copia os arquivos e devolve o resultado por `onPublicado`. */
+async function publicarLoteConcluidoNaPasta(registro, usuarioNome, onPublicado, onNotify) {
+  try {
+    const db = await getDb().catch(() => null);
+    if (!db) return;
+    const snap = await db.collection("batch_document_submissions").get();
+    const d = snap.docs.find((x) => x.id === registro.loteId);
+    const lote = d ? { id: d.id, ...d.data() } : null;
+    if (!lote || !publicacaoLotePendente(registro, lote)) return;
+    const pub = await publicarLoteNaPastaDrive(registro, lote);
+    if (!pub.lotePublicado) return;
+    onPublicado?.(registro.id, pub.lotePublicado, pub.enviados > 0 ? eventoPublicacaoLote(usuarioNome, pub) : null);
+    if (pub.enviados > 0) {
+      logDocumentAction("publicou_lote_pasta_drive_homologacao", { cliente: registro.cliente, arquivos: pub.enviados });
+      onNotify?.(`Documentações de "${registro.cliente}" copiadas para a pasta do Drive da homologação.`, "info");
+    }
+  } catch (e) {}
+}
+function eventoPublicacaoLote(usuario, pub) {
+  return {
+    at: new Date().toISOString(),
+    usuario: usuario || "Usuário do portal",
+    evento: "lote_publicado_drive",
+    arquivos: pub.enviados,
+    falhas: pub.falhas,
+  };
+}
+/** sincronizarLoteInterno: sincroniza o registro e, se a homologação está
+ *  concluída, copia as documentações do lote para a pasta do Drive. */
 async function sincronizarLoteInterno(lote, companies, ctx) {
+  const r = await sincronizarLoteBase(lote, companies, ctx);
+  try {
+    if (r && r.ok && r.registro && r.registro.status === "concluida" && publicacaoLotePendente(r.registro, lote)) {
+      const pub = await publicarLoteNaPastaDrive(r.registro, lote);
+      if (pub.lotePublicado) {
+        const db = await getDb().catch(() => null);
+        if (db) {
+          const usuario = (ctx && ctx.usuario) || "Usuário do portal";
+          const novo = {
+            ...r.registro,
+            lotePublicado: pub.lotePublicado,
+            ...(pub.enviados > 0
+              ? { historico: [...(r.registro.historico || []), eventoPublicacaoLote(usuario, pub)] }
+              : {}),
+          };
+          await db.collection("homologacoes").doc(r.registro.id).set(novo);
+          if (pub.enviados > 0) {
+            logDocumentAction("publicou_lote_pasta_drive_homologacao", { cliente: lote.cliente, arquivos: pub.enviados });
+          }
+          return { ...r, registro: novo };
+        }
+      }
+    }
+  } catch (e) {}
+  return r;
+}
+async function sincronizarLoteBase(lote, companies, ctx) {
   if (!lote || !loteGeraHomologacao(lote.tipoSolicitacao)) return { ok: false, motivo: "sem_tipo" };
   if (lote.homologacaoDesvinculada || lotesDesvinculadosSessao.has(lote.id)) return { ok: false, motivo: "desvinculado" };
   const db = await getDb().catch(() => null);
@@ -16264,7 +16434,15 @@ function HomologacaoEnvioDetalhe({ homolog: h, isAdmin, revelando, credRevelada,
   onView,
   companies,
   onAbrirLote,
+  onPublicadoLote,
 }) {
+  // Homologação de lote já concluída e ainda sem as documentações na pasta do
+  // Drive (ex.: concluída antes deste recurso): copia ao abrir o detalhe.
+  useEffect(() => {
+    if (h.status === "concluida" && h.origem === "envio_lote" && h.loteId && !(h.lotePublicado && h.lotePublicado.completo)) {
+      publicarLoteConcluidoNaPasta(h, currentUser?.nome, onPublicadoLote, onNotify);
+    }
+  }, [h.id, h.status, h.lotePublicado && h.lotePublicado.versao]);
   const [senhaRevelada, setSenhaRevelada] = useState(false);
   const [credRevelada, setCredRevelada] = useState(null);
   const [revelando, setRevelando] = useState(false);
@@ -16341,6 +16519,11 @@ function HomologacaoEnvioDetalhe({ homolog: h, isAdmin, revelando, credRevelada,
       de: h.status,
       para: novoStatus,
     });
+    // Homologação vinda do Envio em Lote concluída à mão: copia as
+    // documentações do lote para a pasta do Drive (em segundo plano).
+    if (novoStatus === "concluida" && h.origem === "envio_lote" && h.loteId) {
+      publicarLoteConcluidoNaPasta({ ...h, ...patch }, currentUser?.nome, onPublicadoLote, onNotify);
+    }
     // Notifica o consultor (pedido da Iasmin, 2026-09-29) só nas transições
     // "em andamento" e "concluída" — de propósito NÃO em "cancelada".
     if (novoStatus === "andamento" || novoStatus === "concluida") {
@@ -17170,6 +17353,8 @@ function HomologacaoEnvioDetalhe({ homolog: h, isAdmin, revelando, credRevelada,
                     `${ev.usuario} alterou o status de "${HOMOLOGACAO_STATUS_META[ev.de]?.label || ev.de}" para "${HOMOLOGACAO_STATUS_META[ev.para]?.label || ev.para}"${ev.origem === "envio_lote" ? (ev.motivo === "arquivos_para_preencher" ? " (automático: há arquivo do cliente aguardando preenchimento)" : " (automático, acompanhando o envio em lote)") : ""}.`,
                   ev.evento === "reaberta" &&
                     `${ev.usuario} reabriu a homologação (voltou para "${HOMOLOGACAO_STATUS_META[ev.para]?.label || ev.para}").`,
+                  ev.evento === "lote_publicado_drive" &&
+                    `${ev.usuario} publicou as documentações do lote na pasta do Drive (${ev.arquivos} arquivo(s))${ev.falhas > 0 ? `; ${ev.falhas} não puderam ser enviados e serão tentados de novo` : ""}.`,
                   ev.evento === "credenciais_reveladas" &&
                     `${ev.usuario} revelou as credenciais de acesso.`,
                   ev.evento === "bases_alteradas" &&
@@ -17320,6 +17505,18 @@ function HomologacaoEnvioDetalhe({ homolog: h, isAdmin, revelando, credRevelada,
     if (!atual) return;
     persist({ ...atual, ...patch });
   }
+  /** registrarPublicacaoLote: grava no registro (versão MAIS RECENTE, pelo ref —
+   *  nunca a cópia antiga de um clique) que as documentações do lote foram
+   *  copiadas para a pasta do Drive. */
+  function registrarPublicacaoLote(id, lotePublicado, evento) {
+    const atual = itemsMemoriaRef.current[id] || items.find((it) => it.id === id);
+    if (!atual) return;
+    persist({
+      ...atual,
+      lotePublicado,
+      ...(evento ? { historico: [...(atual.historico || []), evento] } : {}),
+    });
+  }
   /** handleDelete: exclusão manual real de uma solicitação de homologação
    *  (pedido explícito da Iasmin, 2026-09-18: "coloca a opção de apagar
    *  solicitações de homologação"). Mesmo padrão de best-effort já usado
@@ -17427,6 +17624,7 @@ function HomologacaoEnvioDetalhe({ homolog: h, isAdmin, revelando, credRevelada,
       onView: onView,
       companies: companies,
       onAbrirLote: (loteId) => onIrParaRegistro?.("envio_lote", loteId),
+      onPublicadoLote: registrarPublicacaoLote,
     });
   }
   const ehAtu = aba === "atualizacao";
