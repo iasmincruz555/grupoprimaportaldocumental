@@ -8473,9 +8473,9 @@ function BaseDocBadges({ company, compact }) {
     sm.conferencia > 0 && h("span", { className: "status-badge status-conferencia" }, sm.conferencia + " p/ conferir"),
   );
 }
-/* Estados SEM atendimento da Grupoprima (informado pela Iasmin: RR, RO e AP);
+/* Estados SEM atendimento da Grupoprima (informado pela Iasmin: RR e AP; RO passou a ser atendimento operacional);
    os demais estados sem base aparecem como "Atendimentos operacionais". */
-const BR_UF_SEM_ATENDIMENTO = ["RR", "RO", "AP"];
+const BR_UF_SEM_ATENDIMENTO = ["RR", "AP"];
 function brMapTone(c) {
   return c.tipo === "Matriz" ? "matriz" : "filial";
 }
@@ -30973,6 +30973,40 @@ function TapSelo({ grande }) {
     "Cliente apto para início!",
   );
 }
+function TapAutoTexto(props) {
+  const { value, onChange, inputMode, placeholder, disabled, id, ariaLabel, minRows, multilinha } = props;
+  const ref = React.useRef(null);
+  const ajustar = React.useCallback(() => {
+    const el = ref.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = el.scrollHeight + 2 + "px";
+  }, []);
+  React.useLayoutEffect(ajustar, [value]);
+  React.useEffect(() => {
+    const el = ref.current;
+    if (!el || typeof ResizeObserver === "undefined") return undefined;
+    let larg = el.offsetWidth;
+    const ro = new ResizeObserver(() => {
+      if (el.offsetWidth !== larg) { larg = el.offsetWidth; ajustar(); }
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [ajustar]);
+  return finEl("textarea", {
+    ref,
+    id,
+    className: "tap-auto",
+    rows: minRows || 1,
+    value: value || "",
+    disabled,
+    inputMode,
+    placeholder,
+    "aria-label": ariaLabel,
+    onChange: (e) => onChange(multilinha ? e.target.value : e.target.value.replace(/[\r\n]+/g, " ")),
+    onKeyDown: multilinha ? undefined : (e) => { if (e.key === "Enter") e.preventDefault(); },
+  });
+}
 function TapContatos({ valor, editavel, onChange }) {
   const lista = Array.isArray(valor) && valor.length ? valor : [{ nome: "", cargo: "", telefone: "", email: "" }];
   function set(i, campo, v) {
@@ -30985,10 +31019,10 @@ function TapContatos({ valor, editavel, onChange }) {
       finEl(
         "div",
         { key: i, className: "tap-contato-linha" },
-        finEl("input", { type: "text", placeholder: "Nome", value: c.nome || "", disabled: !editavel, onChange: (e) => set(i, "nome", e.target.value), "aria-label": "Nome do contato" }),
-        finEl("input", { type: "text", placeholder: "Cargo / área", value: c.cargo || "", disabled: !editavel, onChange: (e) => set(i, "cargo", e.target.value), "aria-label": "Cargo ou área" }),
-        finEl("input", { type: "text", inputMode: "tel", placeholder: "Telefone", value: c.telefone || "", disabled: !editavel, onChange: (e) => set(i, "telefone", e.target.value), "aria-label": "Telefone do contato" }),
-        finEl("input", { type: "text", inputMode: "email", placeholder: "E-mail", value: c.email || "", disabled: !editavel, onChange: (e) => set(i, "email", e.target.value), "aria-label": "E-mail do contato" }),
+        finEl(TapAutoTexto, { placeholder: "Nome", value: c.nome, disabled: !editavel, onChange: (v) => set(i, "nome", v), ariaLabel: "Nome do contato" }),
+        finEl(TapAutoTexto, { placeholder: "Cargo / área", value: c.cargo, disabled: !editavel, onChange: (v) => set(i, "cargo", v), ariaLabel: "Cargo ou área" }),
+        finEl(TapAutoTexto, { placeholder: "Telefone", inputMode: "tel", value: c.telefone, disabled: !editavel, onChange: (v) => set(i, "telefone", v), ariaLabel: "Telefone do contato" }),
+        finEl(TapAutoTexto, { placeholder: "E-mail", inputMode: "email", value: c.email, disabled: !editavel, onChange: (v) => set(i, "email", v), ariaLabel: "E-mail do contato" }),
         editavel && lista.length > 1 && finEl("button", { type: "button", className: "mini-download-btn", onClick: () => onChange(lista.filter((_, k) => k !== i)), "aria-label": "Remover contato" }, finEl(Trash2, { size: 13 })),
       ),
     ),
@@ -31003,7 +31037,7 @@ function TapCampo({ campo, valor, editavel, onChange }) {
   const id = "tap-" + campo.id;
   let controle;
   if (campo.tipo === "contatos") controle = finEl(TapContatos, { valor, editavel, onChange });
-  else if (campo.tipo === "longo") controle = finEl("textarea", { id, value: valor || "", disabled: !editavel, rows: 2, onChange: (e) => onChange(e.target.value) });
+  else if (campo.tipo === "longo") controle = finEl(TapAutoTexto, { id, value: valor, disabled: !editavel, minRows: 2, onChange: onChange, multilinha: true });
   else if (campo.tipo === "sn" || campo.tipo === "opcao") {
     const opcoes = campo.tipo === "sn" ? TAP_SIM_NAO : campo.opcoes;
     controle = finEl(
@@ -31013,6 +31047,8 @@ function TapCampo({ campo, valor, editavel, onChange }) {
         finEl("button", { key: o, type: "button", role: "radio", "aria-checked": valor === o, disabled: !editavel, className: "tap-opcao" + (valor === o ? " ativa" : ""), onClick: () => onChange(valor === o ? "" : o) }, o),
       ),
     );
+  } else if (campo.tipo === "texto" || campo.tipo === "email") {
+    controle = finEl(TapAutoTexto, { id, value: valor, disabled: !editavel, inputMode: campo.tipo === "email" ? "email" : undefined, onChange: onChange });
   } else {
     const tipoInput = campo.tipo === "data" ? "date" : "text";
     controle = finEl("input", {
@@ -31961,7 +31997,7 @@ function FinanceiroView({ currentUser, onNotify, onView }) {
         finEl(
           "thead",
           null,
-          finEl("tr", null, ["Data", "Cliente", "Consultor", "E-mail do cliente", "Status", "Preenchimento", "Retorno do cliente", "Financeiro", "Última atualização", "Ação"].map((t) => finEl("th", { key: t }, t))),
+          finEl("tr", null, ["Data", "Cliente", "Consultor", "E-mail do cliente", "Status", "Retorno do cliente", "Financeiro", "Última atualização", "Ação"].map((t) => finEl("th", { key: t }, t))),
         ),
         finEl(
           "tbody",
@@ -31975,7 +32011,6 @@ function FinanceiroView({ currentUser, onNotify, onView }) {
               finEl("td", null, it.consultor?.nome),
               finEl("td", { className: "fin-cell-email", title: it.emailCliente }, finEmailsEl(it.emailCliente)),
               finEl("td", null, finEl(FinStatusBadge, { status: it.status })),
-              finEl("td", { className: "fin-cell-tap", "data-testid": "tap-linha" }, finEl(TapChips, { item: it, compacto: true }), tapResumo(it).apto && finEl(TapSelo, {})),
               finEl("td", { className: "fin-cell-retorno", onClick: (e) => e.stopPropagation() }, finRetornoCliente(it, { onView, onNotify })),
               finEl("td", { className: "fin-cell-email", title: it.emailFinanceiro || "" }, finEmailsEl(it.emailFinanceiro)),
               finEl("td", { className: "mono" }, formatAuditWhen(new Date(finUltimaAtualizacao(it)))),
@@ -31997,7 +32032,6 @@ function FinanceiroView({ currentUser, onNotify, onView }) {
           finEl("div", { className: "company-card-mobile-top" }, finEl("span", { className: "company-mini-tag" }, it.cliente), finEl(FinStatusBadge, { status: it.status })),
           finEl("div", { className: "company-card-mobile-row" }, finEl("span", null, "Consultor"), finEl("span", null, it.consultor?.nome)),
           finEl("div", { className: "company-card-mobile-row" }, finEl("span", null, "E-mail do cliente"), finEl("span", { className: "fin-cell-email" }, finEmailsEl(it.emailCliente))),
-          finEl("div", { className: "company-card-mobile-row" }, finEl("span", null, "Preenchimento"), finEl("span", null, finEl(TapChips, { item: it, compacto: true }), tapResumo(it).apto && finEl(TapSelo, {}))),
           finEl("div", { className: "company-card-mobile-row", onClick: (e) => e.stopPropagation() }, finEl("span", null, "Retorno do cliente"), finEl("span", { className: "fin-cell-retorno" }, finRetornoCliente(it, { onView, onNotify }))),
           finEl("div", { className: "company-card-mobile-row" }, finEl("span", null, "Financeiro"), finEl("span", { className: "fin-cell-email" }, finEmailsEl(it.emailFinanceiro))),
           finEl("div", { className: "company-card-mobile-row" }, finEl("span", null, "Atualizada"), finEl("span", null, formatAuditWhen(new Date(finUltimaAtualizacao(it))))),
@@ -35394,7 +35428,13 @@ function GrupoprimaPortal() {
         .tap-dica { font-size: 11px; color: var(--carvao); }
         .tap-erro { font-size: 11px; color: #c0392b; font-weight: 700; }
         .portal-root[data-theme="dark"] .tap-erro { color: #ff9a8f; }
-        .tap-campo input[type=text], .tap-campo input[type=date], .tap-campo textarea { width: 100%; box-sizing: border-box; font: inherit; font-size: 13px; padding: 7px 10px; border: 1px solid var(--cinza-frio); border-radius: 8px; background: var(--card-bg); color: var(--texto); }
+        .tap-campo { min-width: 0; }
+        .tap-campo input[type=text], .tap-campo input[type=date], .tap-campo textarea { width: 100%; max-width: 100%; min-width: 0; box-sizing: border-box; font: inherit; font-size: 13px; padding: 7px 10px; border: 1px solid var(--cinza-frio); border-radius: 8px; background: var(--card-bg); color: var(--texto); }
+        .tap-campo textarea.tap-auto, .tap-contato-linha textarea.tap-auto { resize: none; overflow: hidden; line-height: 1.4; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; display: block; }
+        .tap-campo textarea:not(.tap-auto) { resize: vertical; }
+        .tap-contatos, .tap-contato-linha { min-width: 0; }
+        .tap-contato-linha > * { min-width: 0; }
+        .tap-contato-linha { align-items: start !important; }
         .tap-campo-pend input[type=text], .tap-campo-pend input[type=date], .tap-campo-pend textarea { border-color: rgba(224,161,0,0.6); }
         .tap-campo input:focus-visible, .tap-campo textarea:focus-visible { outline: 2px solid var(--foco, #6BFE9C); outline-offset: 1px; }
         .tap-opcoes { display: flex; flex-wrap: wrap; gap: 6px; }
@@ -35403,10 +35443,11 @@ function GrupoprimaPortal() {
         .portal-root[data-theme="dark"] .tap-opcao.ativa { background: rgba(107,254,156,0.2); color: #b9f7cd; }
         .tap-opcao:disabled { cursor: default; opacity: 0.75; }
         .tap-contatos { display: flex; flex-direction: column; gap: 8px; }
-        .tap-contato-linha { display: grid; grid-template-columns: 1.4fr 1fr 1fr 1.4fr auto; gap: 8px; align-items: center; }
+        .tap-contato-linha { display: grid; grid-template-columns: minmax(0,1.4fr) minmax(0,1fr) minmax(0,1fr) minmax(0,1.4fr) auto; gap: 8px; align-items: start; }
         .tap-add-contato { align-self: flex-start; }
         .tap-salvo { font-size: 11.5px; color: var(--carvao); margin: 6px 0 0; }
-        @media (max-width: 900px) { .tap-campos { grid-template-columns: 1fr; } .tap-contato-linha { grid-template-columns: 1fr 1fr; } }
+        @media (max-width: 900px) { .tap-campos { grid-template-columns: 1fr; } .tap-contato-linha { grid-template-columns: minmax(0,1fr) minmax(0,1fr); } }
+        @media (max-width: 520px) { .tap-contato-linha { grid-template-columns: minmax(0,1fr); } }
         .fin-modelo-card { margin-top: 0; margin-bottom: 4px; }
         .fin-modelo-linha { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
         .fin-modelo-info { flex: 1; min-width: 200px; }
