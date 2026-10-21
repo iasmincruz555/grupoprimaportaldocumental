@@ -966,6 +966,47 @@ const CONTABILIDADE_SUBGRUPOS = [
 function tipoNoGrupoContabil(g, tipo) {
   return g.tipos.some((t) => tipoLabelsAceitos(t).includes(tipo));
 }
+/* TIPOS_CONTABEIS_PERIODICOS: demonstrações que existem uma por ano/período
+   (cada ano é um documento próprio). Pedido da Iasmin, 2026-10-21: o título
+   automático e a classificação devem reconhecer o tipo (ex.: DFC) e o ano
+   direto do nome do arquivo ("DFC 2024 - ...", "28.05 - DFC 2025 - ...",
+   "20-10-2026_DFC_..._01_até_08_2026__.pdf"). */
+const TIPOS_CONTABEIS_PERIODICOS = ["Balanço", "DRE", "DFC", "Demonstração Contábil", "Balancete", "Faturamento"];
+const MESES_ABREV_PERIODO = ["jan", "fev", "mar", "abr", "mai", "jun", "jul", "ago", "set", "out", "nov", "dez"];
+/** periodoContabilDoTexto: ano(s) e, quando houver, o período parcial
+ *  ("01 até 08 2026" -> "jan–ago") a partir do nome do arquivo. Ignora a
+ *  data de emissão no começo do nome (dd-mm-aaaa) e não considera
+ *  "_" como parte de número (por isso não usa \b). Nunca inventa ano. */
+function periodoContabilDoTexto(texto) {
+  let t = normalize(String(texto || "").replace(/\.[A-Za-z0-9]{2,4}$/, ""));
+  t = t.replace(/(^|[^0-9])\d{1,2}[.\-_/]\d{1,2}[.\-_/]20\d{2}(?![0-9])/g, "$1 ");
+  let periodo = null;
+  const pm = /(^|[^0-9])(\d{1,2})[\s_.\-]*(?:ate|a|ao)[\s_.\-]*(\d{1,2})[\s_.\-/]*(20\d{2})(?![0-9])/.exec(t);
+  if (pm) {
+    const m1 = parseInt(pm[2], 10);
+    const m2 = parseInt(pm[3], 10);
+    if (m1 >= 1 && m1 <= 12 && m2 >= 1 && m2 <= 12 && m1 <= m2 && !(m1 === 1 && m2 === 12)) {
+      periodo = `${MESES_ABREV_PERIODO[m1 - 1]}–${MESES_ABREV_PERIODO[m2 - 1]}`;
+    }
+  }
+  const anos = [];
+  const re = /(?:^|[^0-9])(20\d{2})(?![0-9])/g;
+  let m;
+  while ((m = re.exec(t))) {
+    const a = parseInt(m[1], 10);
+    if (!anos.includes(a)) anos.push(a);
+  }
+  anos.sort((a, b) => b - a);
+  return { anos, periodo };
+}
+/** tituloComAnoContabil: "DFC" + nome do arquivo -> "DFC 2025" (ou
+ *  "DFC 2026 (jan–ago)"). Sem ano reconhecível, devolve a base como veio. */
+function tituloComAnoContabil(base, nomeArquivo) {
+  if (!nomeArquivo) return base;
+  const { anos, periodo } = periodoContabilDoTexto(nomeArquivo);
+  if (anos.length === 0 || anos.length > 3) return base;
+  return `${base} ${anos.join(" e ")}${periodo && anos.length === 1 ? ` (${periodo})` : ""}`;
+}
 /* PLANOS_PROCEDIMENTOS_SUBGRUPOS: agrupamento visual pedido pela Iasmin em
    2026-10-07 dentro de "Planos, Procedimentos e Manuais" — uma área própria
    "Manuais Comerciais" (manuais para o time comercial, como o "Manual
@@ -1657,9 +1698,39 @@ function normalizarDocEmpresarial(d) {
     ...(tipoEmpresarial && !categoriaEmpresarial ? { categoria: "contabilidade" } : {}),
   };
 }
+/** corrigirTipoContabilPeloNome: documentos de Contabilidade já indexados
+ *  com um tipo de OUTRA categoria (ex.: DFC lido como "Consolidação do
+ *  Contrato Social" porque o texto cita consolidação) cujo NOME DE ARQUIVO diz
+ *  claramente DFC/DRE/Balanço/Faturamento... passam a valer como esse tipo,
+ *  com família própria por ano e título com o ano (ex.: "DFC 2025"). Só
+ *  exibição/derivado, sem tocar no registro salvo; título editado à mão não
+ *  é alterado. */
+function corrigirTipoContabilPeloNome(d) {
+  if (!d || d.categoria !== "contabilidade" || !d.arquivo?.nomeOriginal) return d;
+  const tipoNome = docTypeLabelFor(normalize(d.arquivo.nomeOriginal));
+  if (!tipoNome || !TIPOS_CONTABEIS_PERIODICOS.includes(tipoNome) || d.tipo === tipoNome) return d;
+  const keyAtual = DOC_TYPE_KEYWORDS.find((k) => k.label === d.tipo)?.key || null;
+  if (keyAtual === "contabilidade" && d.tipo !== "Tipo específico não identificado") return d;
+  const tituloGenerico = !d.titulo || d.titulo === tituloCurtoParaTipo(d.tipo) || d.titulo === d.tipo;
+  const gerado = generateDocumentTitle({
+    categoria: d.categoria,
+    tipo: tipoNome,
+    companyId: d.companyId,
+    abrangencia: d.abrangencia,
+    versao: null,
+    nomeArquivo: d.arquivo.nomeOriginal,
+  });
+  return {
+    ...d,
+    tipo: tipoNome,
+    versao: null,
+    docFamily: docFamilyFor(d.categoria, tipoNome, { docKey: d.id || d.arquivo?.driveFileId || d.arquivo?.nomeOriginal }),
+    titulo: tituloGenerico ? gerado : d.titulo,
+  };
+}
 function useDerived(extraDocuments) {
   return useMemo(() => {
-    const extras = (extraDocuments || []).map(normalizarDocEmpresarial);
+    const extras = (extraDocuments || []).map(normalizarDocEmpresarial).map(corrigirTipoContabilPeloNome);
     const companies = companiesRaw.map((c) => {
       const confirmados = extras.filter((d) =>
         docAppliesToEstablishment(d, c.id),
@@ -4769,14 +4840,15 @@ const RE_TEXTO_BOMBEIROS = /\bavcb\b|\bavbc\b|\bclcb\b|bombeiros?|atestado de vi
     {
       key: "contabilidade",
       label: "DRE",
-      match: /\bdre\b|demonstra[c]ao do resultado/,
+      // Sem \b: "_" conta como letra em regex, então "DRE_2025.pdf" não casava.
+      match: /(?:^|[^a-z0-9])dre(?![a-z0-9])|demonstra[c]ao do resultado/,
     },
     {
       key: "contabilidade",
       // Pedido da Iasmin, 2026-10-21: DFC — Fluxo de Caixa (também
       // "Demonstração dos Fluxos de Caixa", "fluxo de caixa").
       label: "DFC",
-      match: /\bdfc\b|fluxos? de caixa|demonstra[c]ao dos? fluxos?/,
+      match: /(?:^|[^a-z0-9])dfc(?![a-z0-9])|fluxos? de caixa|demonstra[c]ao dos? fluxos?/,
     },
     {
       key: "contabilidade",
@@ -4969,7 +5041,7 @@ function tipoLabelsAceitos(label) {
     {
       key: "contabilidade",
       match:
-        /contab[i]|balan[cç]o patrimonial|\bdre\b|\bdfc\b|fluxos? de caixa|demonstra[cç][aã]o (do resultado|cont[aá]bel)|relat[oó]rio cont[aá]bil|declara[cç][aã]o de faturamento|titularidade|carta (de |do |da )?banc|dados? (banc|do banco|da conta)|informa[cç](?:[aã]o|[oõ]es) banc|conta corrente|comprovantes? de pagamento/,
+        /contab[i]|balan[cç]o patrimonial|(?:^|[^a-z0-9])dre(?![a-z0-9])|(?:^|[^a-z0-9])dfc(?![a-z0-9])|fluxos? de caixa|demonstra[cç][aã]o (do resultado|cont[aá]bel)|relat[oó]rio cont[aá]bil|declara[cç][aã]o de faturamento|titularidade|carta (de |do |da )?banc|dados? (banc|do banco|da conta)|informa[cç](?:[aã]o|[oõ]es) banc|conta corrente|comprovantes? de pagamento/,
     },
     {
       key: "seguros",
@@ -5277,8 +5349,8 @@ function anoDeDocumentoContabil(d) {
   const texto = [d.titulo, d.arquivo?.nomeOriginal, d.descricao]
     .filter(Boolean)
     .join(" ");
-  const m = texto.match(/\b20\d{2}\b/);
-  if (m) return parseInt(m[0], 10);
+  const { anos } = periodoContabilDoTexto(texto);
+  if (anos.length > 0) return anos[0];
   const emissaoMs = parseDateBR(d.emissao);
   if (emissaoMs) return new Date(emissaoMs).getFullYear();
   return null;
@@ -5543,11 +5615,14 @@ function tituloCurtoParaTipo(tipo) {
  *  o `tipo` ainda não o contém, o número é prefixado ao título. Nunca
  *  inventa um número: sem `versao` reconhecida, o título continua só o
  *  rótulo genérico. */
-function generateDocumentTitle({ categoria, tipo, companyId, abrangencia, versao }) {
+function generateDocumentTitle({ categoria, tipo, companyId, abrangencia, versao, nomeArquivo }) {
   let base =
     tituloCurtoParaTipo(tipo) ||
     CATEGORIES.find((c) => c.key === categoria)?.label ||
     "Documento";
+  if (nomeArquivo && TIPOS_CONTABEIS_PERIODICOS.includes(tipo)) {
+    base = tituloComAnoContabil(base, nomeArquivo);
+  }
   if (categoria === "contratos_sociais" && versao) {
     const m = /^(\d+)/.exec(String(versao).trim());
     if (m && !new RegExp(`(^|\\s)${m[1]}\\D`).test(base)) {
@@ -5581,7 +5656,21 @@ function docTituloExibido(doc) {
     companyId: doc.companyId,
     abrangencia: doc.abrangencia,
     versao: doc.versao,
+    nomeArquivo: doc.arquivo?.nomeOriginal || null,
   });
+  // Demonstrações contábeis por ano (DFC, DRE, Balanço, Faturamento...):
+  // título salvo igual ao rótulo genérico do tipo (sem ano) passa a ser
+  // exibido com o ano do nome do arquivo — só exibição; título editado à mão
+  // nunca é trocado.
+  if (
+    doc.titulo &&
+    gerado &&
+    doc.titulo !== gerado &&
+    TIPOS_CONTABEIS_PERIODICOS.includes(doc.tipo) &&
+    doc.titulo === tituloCurtoParaTipo(doc.tipo)
+  ) {
+    return gerado;
+  }
   if (
     doc.categoria === "contratos_sociais" &&
     doc.titulo &&
@@ -17969,6 +18058,7 @@ function formatCnpjDigits(digits) {
             : null,
         abrangencia: selAbrangencia,
         versao: (decisao && decisao.versaoSugerida) || item.versaoSugerida || null,
+        nomeArquivo: item.nomeOriginal || null,
       })
     : null;
   async function handleConfirmar() {
@@ -17992,6 +18082,7 @@ function formatCnpjDigits(digits) {
         companyId: companyIdConfirmado,
         abrangencia: selAbrangencia,
         versao: versaoConfirmada,
+        nomeArquivo: item.nomeOriginal || null,
       });
       await onConfirm(item, {
         categoria: selCategoria,
@@ -19114,6 +19205,24 @@ function categoriaKeywordMatches(normText) {
   const hit = DOC_TYPE_KEYWORDS.find((k) => k.match.test(normText));
   return hit ? hit.label : null;
 }
+/** refinarTipoContabilPorPosicao: um DFC cita "balanço patrimonial" e "resultado"
+ *  no corpo; quando o tipo achado é uma demonstração contábil, vale a que
+ *  aparece primeiro no texto (o título do relatório fica no topo), não a
+ *  primeira da lista de palavras-chave. */
+function refinarTipoContabilPorPosicao(normText, tipo) {
+  if (!tipo || !TIPOS_CONTABEIS_PERIODICOS.includes(tipo)) return tipo;
+  let melhor = tipo;
+  let melhorPos = Infinity;
+  DOC_TYPE_KEYWORDS.forEach((k) => {
+    if (!TIPOS_CONTABEIS_PERIODICOS.includes(k.label) || !(k.match instanceof RegExp)) return;
+    const pos = normText.search(k.match);
+    if (pos >= 0 && pos < melhorPos) {
+      melhorPos = pos;
+      melhor = k.label;
+    }
+  });
+  return melhor;
+}
 /** ETAPA 1 — análise do nome do arquivo. */ function analyzeFilename(
   title,
   companies,
@@ -19258,7 +19367,7 @@ function analyzeFolderPath(folderPath, companies) {
         ? detectSegurosSubcategoria(normText)
         : null,
     categoriaAmbigua: categorias.length > 1,
-    tipo: docTypeLabelFor(normText),
+    tipo: refinarTipoContabilPorPosicao(normText, docTypeLabelFor(normText)),
     versaoSugerida: extractVersaoLabel(categoriaResolvida, text),
     historicoDetectado: matchHistoricalCompanyName(text),
     razaoSocialMencionada: extractRazaoSocialMencionada(text),
@@ -19784,12 +19893,30 @@ async function runReextracaoDataEmissaoVersaoUmaVez(confirmedDocs) {
   // legível confirma IBAMA mas o nome do arquivo, por algum motivo, não).
   // Bug relatado pela Iasmin, 2026-09-21: um certificado real do IBAMA foi
   // classificado como "Alvará Matriz" na sincronização.
+  // Pedido da Iasmin, 2026-10-21 (4 DFCs classificados como "Consolidação do
+  // Contrato Social"): o tipo vindo do CONTEÚDO é só a primeira palavra-chave
+  // achada no texto inteiro (um DFC cita "consolidação"), então um tipo
+  // explícito no NOME do arquivo prevalece quando (a) é uma demonstração
+  // contábil por período (DFC, DRE, Balanço...) ou (b) é da mesma categoria
+  // já resolvida e o tipo do conteúdo é de outra categoria.
+  const categoriaDoTipo = (lbl) => DOC_TYPE_KEYWORDS.find((k) => k.label === lbl)?.key || null;
+  const nomeManda =
+    !!filenameEv.tipo &&
+    (TIPOS_CONTABEIS_PERIODICOS.includes(filenameEv.tipo) ||
+      (contentLegivel &&
+        !!contentEv.tipo &&
+        contentEv.tipo !== filenameEv.tipo &&
+        !!categoria &&
+        categoriaDoTipo(filenameEv.tipo) === categoria &&
+        categoriaDoTipo(contentEv.tipo) !== categoria));
   const tipoSugerido =
     filenameEv.tipo === "IBAMA" || contentEv.tipo === "IBAMA"
       ? "IBAMA"
-      : contentLegivel && contentEv.tipo
-        ? contentEv.tipo
-        : filenameEv.tipo || null; // ABRANGÊNCIA — dimensão independente da categoria (item 8/23: nunca
+      : nomeManda
+        ? filenameEv.tipo
+        : contentLegivel && contentEv.tipo
+          ? contentEv.tipo
+          : filenameEv.tipo || null; // ABRANGÊNCIA — dimensão independente da categoria (item 8/23: nunca
   // presumida pela categoria do documento). Determinada só por evidência
   // REAL no próprio documento: (1) mais de um CNPJ oficial citado no
   // conteúdo/nome → "Múltiplos estabelecimentos", documento único
@@ -20461,6 +20588,7 @@ function buildConfirmedDocRecord({
         companyId: companyId || null,
         abrangencia: abrangenciaFinal,
         versao: versaoSugerida,
+        nomeArquivo: nomeOriginal || null,
       }),
     numero: numero || null,
     orgao: orgao || null,
@@ -21387,7 +21515,7 @@ function SyncView({ companies, onNotify }) {
  *  de novo. Mudou a lista de bases/CNPJs ou a lógica (AUTODRIVE_LOGICA_VERSAO)
  *  → o cache inteiro é descartado e tudo é reclassificado uma vez. */
 const AUTODRIVE_CACHE_KEY = "pd_autodrive_cache_v1";
-const AUTODRIVE_LOGICA_VERSAO = 1;
+const AUTODRIVE_LOGICA_VERSAO = 2;
 function hashCurtoAutoDrive(texto) {
   let h = 5381;
   const t = String(texto || "");
