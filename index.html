@@ -30629,6 +30629,7 @@ function tapCorDoPercentual(pct) {
   if (pct >= TAP_LIMITE_AMARELO) return "amarelo";
   return "vermelho";
 }
+const TAP_ESTADO_ROTULO = { nao_iniciado: "Não iniciado", andamento: "Em andamento", concluido: "Concluído" };
 function tapTextoStatus(cor, pct, faltam) {
   if (pct === 0) return "Não iniciado";
   if (cor === "verde") return faltam === 0 ? "Completo" : "Praticamente concluído";
@@ -30653,7 +30654,25 @@ function tapCalcularEtapa(chaveOuEtapa, respostas) {
   const cor = tapCorDoPercentual(exato);
   let pct = preenchidos === 0 ? 0 : Math.max(1, Math.round(exato));
   const pctTexto = tapCorDoPercentual(pct) !== cor ? `${exato.toFixed(1).replace(".", ",")}%` : `${pct}%`;
-  return { chave: etapa.key, titulo: etapa.curto || etapa.titulo, total, preenchidos, faltando, pct, pctTexto, cor, texto: tapTextoStatus(cor, pct, faltando.length) };
+  // Estado do fluxo visual (círculos): concluído SÓ com todos os obrigatórios aplicáveis
+  // válidos; o número inteiro nunca mostra 100% antes disso (99% no máximo).
+  const concluido = total > 0 && faltando.length === 0;
+  const estado = concluido ? "concluido" : preenchidos === 0 ? "nao_iniciado" : "andamento";
+  const pctInt = concluido ? 100 : preenchidos === 0 ? 0 : Math.min(99, Math.max(1, Math.round(exato)));
+  return {
+    chave: etapa.key,
+    titulo: etapa.curto || etapa.titulo,
+    total,
+    preenchidos,
+    faltando,
+    pct,
+    pctTexto,
+    cor,
+    texto: tapTextoStatus(cor, pct, faltando.length),
+    estado,
+    estadoTexto: TAP_ESTADO_ROTULO[estado],
+    pctInt,
+  };
 }
 /** tapResumo: as três etapas + selo. "Apto" = as TRÊS verdes E nenhum campo
  *  obrigatório aplicável faltando em nenhuma delas (percentual sozinho não basta). */
@@ -30678,8 +30697,8 @@ function finSalvarTap(item, campos, usuarioNome) {
   const antesE = antesResumo.etapas.find((e) => e.chave === etapa.key);
   const depoisE = depoisResumo.etapas.find((e) => e.chave === etapa.key);
   const eventos = [];
-  if (antesE.cor !== depoisE.cor) {
-    eventos.push(finEvento(usuarioNome, "tap_etapa_atualizada", { etapa: etapa.key, de: antesE.cor, para: depoisE.cor, pct: depoisE.pct }));
+  if (antesE.cor !== depoisE.cor || antesE.estado !== depoisE.estado) {
+    eventos.push(finEvento(usuarioNome, "tap_etapa_atualizada", { etapa: etapa.key, de: antesE.cor, para: depoisE.cor, deEstado: antesE.estado, paraEstado: depoisE.estado, pct: depoisE.pctInt }));
   }
   if (antesResumo.apto !== depoisResumo.apto) {
     eventos.push(finEvento(usuarioNome, depoisResumo.apto ? "tap_apto" : "tap_apto_removido", {}));
@@ -30755,6 +30774,9 @@ function finDescreverEvento(ev) {
       return { titulo: `${quem} registrou uma observação.`, detalhe: ev.texto || null };
     case "tap_etapa_atualizada": {
       const nomeEtapa = tapEtapaPorChave(ev.etapa)?.titulo || ev.etapa;
+      if (ev.paraEstado) {
+        return { titulo: `${quem} atualizou a etapa ${nomeEtapa}: ${TAP_ESTADO_ROTULO[ev.deEstado] || ev.deEstado} → ${TAP_ESTADO_ROTULO[ev.paraEstado] || ev.paraEstado} (${ev.pct}%).`, detalhe: null };
+      }
       return { titulo: `${quem} atualizou a etapa ${nomeEtapa}: indicador ${TAP_COR_ROTULO[ev.de] || ev.de} → ${TAP_COR_ROTULO[ev.para] || ev.para} (${ev.pct}%).`, detalhe: null };
     }
     case "tap_apto":
@@ -31344,9 +31366,80 @@ function finRetornoCliente(it, { onView, onNotify } = {}) {
     " Visualizar arquivo",
   );
 }
-function TapSecao({ resumo, aberta, draft, editavel, salvo, onAbrir, onAlterar, onBaixarModelo }) {
+/** TapAnel: círculo com traçado de progresso ao redor da borda (SVG). A transição
+ *  do traçado é por CSS (stroke-dashoffset) e começa em 0 ao montar. */
+function TapAnel({ pct, estado }) {
+  const [vis, setVis] = useState(0);
+  useEffect(() => {
+    const id = requestAnimationFrame(() => setVis(pct));
+    return () => cancelAnimationFrame(id);
+  }, [pct]);
+  const R = 44;
+  const C = 2 * Math.PI * R;
+  return finEl(
+    "div",
+    { className: "tap-anel-wrap" },
+    finEl(
+      "svg",
+      { className: "tap-anel", viewBox: "0 0 100 100", "aria-hidden": "true" },
+      finEl("circle", { className: "tap-anel-trilho", cx: 50, cy: 50, r: R, fill: "none", strokeWidth: 7 }),
+      finEl("circle", {
+        className: "tap-anel-prog",
+        cx: 50,
+        cy: 50,
+        r: R,
+        fill: "none",
+        strokeWidth: 7,
+        strokeLinecap: "round",
+        transform: "rotate(-90 50 50)",
+        strokeDasharray: C,
+        strokeDashoffset: C * (1 - vis / 100),
+        style: { opacity: pct === 0 ? 0 : 1 },
+      }),
+    ),
+    finEl(
+      "div",
+      { className: "tap-anel-centro" },
+      estado === "concluido" ? finEl(CheckCircle2, { size: 30 }) : finEl("span", { className: "tap-anel-pct" }, pct + "%"),
+    ),
+  );
+}
+/** TapSecao: fluxo horizontal Comercial → Operacional → Financeiro (círculos de
+ *  progresso) + painel da etapa escolhida. A ordem é só visual: qualquer etapa
+ *  abre e edita a qualquer momento, sem bloqueio pelas anteriores. */
+function TapSecao({ cliente, resumo, aberta, draft, editavel, salvo, onAbrir, onAlterar, onBaixarModelo }) {
   const etapaAberta = aberta ? tapEtapaPorChave(aberta) : null;
   const resAberta = aberta ? resumo.etapas.find((e) => e.chave === aberta) : null;
+  const passos = [];
+  resumo.etapas.forEach((e, i) => {
+    const etapa = TAP_ETAPAS[i];
+    if (i > 0) passos.push(finEl("div", { key: "lig" + i, className: "tap-lig", "aria-hidden": "true" }, finEl(ChevronRight, { size: 18 })));
+    const restam = Math.max(0, 100 - e.pctInt);
+    passos.push(
+      finEl(
+        "button",
+        {
+          key: e.chave,
+          type: "button",
+          className: `tap-passo tap-est-${e.estado}` + (aberta === e.chave ? " aberta" : ""),
+          "aria-expanded": aberta === e.chave,
+          "aria-label": `${e.titulo}: ${e.pctInt}% — ${e.estadoTexto}`,
+          "data-testid": "tap-etapa-" + e.chave,
+          "data-pct": e.pctInt,
+          "data-estado": e.estado,
+          onClick: () => onAbrir(e.chave),
+        },
+        finEl(TapAnel, { pct: e.pctInt, estado: e.estado }),
+        finEl("div", { className: "tap-passo-nome" }, finEl("span", { className: "tap-etapa-num" }, String(i + 1)), finEl("span", null, e.titulo)),
+        finEl("div", { className: "tap-passo-status", "data-testid": "tap-pct-" + e.chave }, e.estadoTexto),
+        finEl(
+          "div",
+          { className: "tap-passo-sub" },
+          e.estado === "concluido" ? "Obrigatórios completos" : `Faltam ${restam}% · ${e.faltando.length} ${e.faltando.length === 1 ? "campo" : "campos"}`,
+        ),
+      ),
+    );
+  });
   return finEl(
     "section",
     { className: "section-block homolog-detail-card tap-secao", "data-testid": "tap-secao" },
@@ -31356,36 +31449,17 @@ function TapSecao({ resumo, aberta, draft, editavel, salvo, onAbrir, onAlterar, 
       finEl(
         "div",
         null,
-        finEl("h3", null, "Termo de Abertura de Projeto"),
-        finEl("p", { className: "homolog-bases-hint" }, "Três etapas da mesma solicitação: Comercial, Operacional e Financeiro. Cada uma tem seu indicador de preenchimento, atualizado automaticamente conforme você preenche. Use o modelo oficial como roteiro para reunir as informações."),
+        finEl("h3", null, cliente ? `Etapas do Termo de Abertura de Projeto — ${cliente}` : "Etapas do Termo de Abertura de Projeto"),
+        finEl("p", { className: "homolog-bases-hint" }, "Preencha em qualquer ordem: cada etapa avança de forma independente."),
       ),
-      onBaixarModelo && finEl("button", { type: "button", className: "kpi-new-homolog-btn", onClick: onBaixarModelo }, finEl(Download, { size: 14 }), " Baixar modelo"),
-    ),
-    finEl(
-      "div",
-      { className: "tap-etapas", role: "list" },
-      resumo.etapas.map((e, i) => {
-        const etapa = TAP_ETAPAS[i];
-        return finEl(
-          "button",
-          { key: e.chave, type: "button", role: "listitem", className: `tap-etapa-card tap-cor-${e.cor}` + (aberta === e.chave ? " aberta" : ""), "aria-expanded": aberta === e.chave, "data-testid": "tap-etapa-" + e.chave, "data-cor": e.cor, onClick: () => onAbrir(e.chave) },
-          finEl("div", { className: "tap-etapa-topo" }, finEl("span", { className: "tap-etapa-num" }, String(i + 1)), finEl("span", { className: "tap-etapa-titulo" }, etapa.titulo)),
-          finEl("div", { className: "tap-barra", "aria-hidden": "true" }, finEl("div", { className: "tap-barra-fill", style: { width: e.pct + "%" } })),
-          finEl("div", { className: "tap-etapa-status" }, finEl("strong", { "data-testid": "tap-pct-" + e.chave }, e.pctTexto), " · ", e.texto),
-          finEl("div", { className: "tap-etapa-sub" }, e.faltando.length === 0 ? `${e.preenchidos} de ${e.total} campos obrigatórios preenchidos` : `${e.preenchidos} de ${e.total} campos obrigatórios · faltam ${e.faltando.length}`),
-          finEl("div", { className: "tap-etapa-acao" }, aberta === e.chave ? "Fechar etapa" : editavel ? "Preencher / editar" : "Ver respostas"),
-        );
-      }),
-    ),
-    !resumo.apto &&
       finEl(
-        "p",
-        { className: "tap-regra" },
-        resumo.todasVerdes
-          ? "As três etapas já estão em verde, mas ainda faltam campos obrigatórios — o selo “Cliente apto para início!” só aparece com todos os obrigatórios preenchidos."
-          : "O selo “Cliente apto para início!” aparece quando as três etapas estiverem em verde (acima de 85%) e todos os campos obrigatórios estiverem preenchidos.",
+        "div",
+        { className: "tap-secao-acoes" },
+        resumo.apto && finEl(TapSelo, { grande: true }),
+        onBaixarModelo && finEl("button", { type: "button", className: "kpi-new-homolog-btn", onClick: onBaixarModelo }, finEl(Download, { size: 14 }), " Baixar modelo"),
       ),
-    resumo.apto && finEl("p", { className: "tap-regra tap-regra-ok" }, "Conclusão documental do fluxo de abertura conforme as regras cadastradas. Aprovações formais específicas, se houver, continuam sendo necessárias."),
+    ),
+    finEl("div", { className: "tap-fluxo", role: "group", "aria-label": "Etapas do Termo de Abertura de Projeto" }, passos),
     etapaAberta &&
       finEl(
         "div",
@@ -31394,7 +31468,7 @@ function TapSecao({ resumo, aberta, draft, editavel, salvo, onAbrir, onAlterar, 
           "div",
           { className: "tap-painel-topo" },
           finEl("div", null, finEl("strong", null, `Etapa — ${etapaAberta.titulo}`), finEl("span", { className: "tap-origem" }, ` · modelo: ${etapaAberta.origem}`)),
-          finEl(TapChip, { e: resAberta }),
+          finEl("span", { className: `tap-painel-estado tap-est-${resAberta.estado}` }, `${resAberta.pctInt}% · ${resAberta.estadoTexto}`),
         ),
         resAberta.faltando.length > 0 &&
           finEl(
@@ -31495,6 +31569,17 @@ function FinDetalheView({ item, currentUser, onBack, onExecutar, onExcluir, onSa
     "div",
     { className: "view view-wide" },
     finEl("button", { className: "back-btn", onClick: onBack }, finEl(ArrowLeft, { size: 15 }), " Voltar ao Termo de Abertura de Projeto"),
+    finEl(TapSecao, {
+      cliente: item.cliente,
+      resumo: resumoTap,
+      aberta: tapAberta,
+      draft: tapDraft,
+      editavel: operar,
+      salvo: tapSalvo,
+      onAbrir: tapAbrir,
+      onAlterar: tapAlterar,
+      onBaixarModelo: operar ? () => finBaixarModelo({ onNotify }) : null,
+    }),
     finEl(
       "div",
       { className: "fin-detalhe-topo" },
@@ -31508,8 +31593,6 @@ function FinDetalheView({ item, currentUser, onBack, onExecutar, onExcluir, onSa
         finEl(FinStatusBadge, { status: item.status }),
       ),
       finEl("h1", null, item.cliente),
-      resumoTap.apto && finEl(TapSelo, { grande: true }),
-      finEl("div", { className: "tap-header-chips" }, finEl(TapChips, { item: itemEfetivo })),
       finEl(
         "p",
         { className: "company-header-legal" },
@@ -31667,16 +31750,6 @@ function FinDetalheView({ item, currentUser, onBack, onExecutar, onExcluir, onSa
         ),
       ),
     ),
-    finEl(TapSecao, {
-      resumo: resumoTap,
-      aberta: tapAberta,
-      draft: tapDraft,
-      editavel: operar,
-      salvo: tapSalvo,
-      onAbrir: tapAbrir,
-      onAlterar: tapAlterar,
-      onBaixarModelo: operar ? () => finBaixarModelo({ onNotify }) : null,
-    }),
     finEl(
       "section",
       { className: "section-block homolog-detail-card" },
@@ -31923,7 +31996,7 @@ function FinanceiroView({ currentUser, onNotify, onView }) {
     persist(res.item);
     if (res.eventos.length) {
       const e = res.resumo.etapas.find((x) => x.chave === etapa);
-      logDocumentAction("atualizou_etapa_termo_abertura", { cliente: atual.cliente, etapa: e.titulo, preenchimento: e.pctTexto, apto: res.resumo.apto ? "sim" : "não" });
+      logDocumentAction("atualizou_etapa_termo_abertura", { cliente: atual.cliente, etapa: e.titulo, preenchimento: e.pctInt + "% (" + e.estadoTexto + ")", apto: res.resumo.apto ? "sim" : "não" });
       if (res.eventos.some((ev) => ev.evento === "tap_apto")) onNotify?.(`“Cliente apto para início!” — ${atual.cliente}`, "info");
     }
     return res;
@@ -35420,28 +35493,47 @@ function GrupoprimaPortal() {
         .tap-selo { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; font-weight: 800; padding: 3px 10px; border-radius: 999px; color: #0b4a2c; background: rgba(107,254,156,0.35); border: 1px solid rgba(40,170,100,0.7); white-space: nowrap; }
         .portal-root[data-theme="dark"] .tap-selo { color: #b9f7cd; background: rgba(107,254,156,0.18); border-color: rgba(107,254,156,0.6); }
         .tap-selo-grande { font-size: 15px; padding: 8px 18px; margin-top: 12px; box-shadow: 0 0 0 3px rgba(107,254,156,0.18); }
-        .tap-header-chips { margin-top: 10px; }
         .fin-cell-tap { min-width: 230px; }
         .fin-cell-tap .tap-selo { margin-top: 5px; }
-        .tap-secao { margin-top: 16px; }
+        .tap-secao { margin-top: 0; margin-bottom: 16px; }
+        .tap-secao-acoes { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; justify-content: flex-end; }
+        .tap-secao-acoes .tap-selo-grande { margin-top: 0; }
+        .tap-fluxo { display: flex; align-items: stretch; justify-content: center; gap: 6px; margin-top: 16px; }
+        .tap-lig { display: flex; align-items: center; color: var(--cinza-frio); flex: none; }
+        .tap-passo { --tap-neutro: var(--cinza-frio); --tap-prog: #2f7de1; --tap-ok: #1fa85f; flex: 1 1 0; min-width: 0; max-width: 300px; display: flex; flex-direction: column; align-items: center; gap: 6px; text-align: center; font: inherit; color: var(--texto); background: transparent; border: 1px solid transparent; border-radius: 16px; padding: 14px 10px 12px; cursor: pointer; transition: background .15s, border-color .15s, box-shadow .15s; }
+        .portal-root[data-theme="dark"] .tap-passo { --tap-prog: #5aa9ff; --tap-ok: var(--verde); }
+        .tap-passo:hover { background: rgba(107,254,156,0.07); }
+        .tap-passo:focus-visible { outline: 2px solid var(--foco); outline-offset: 2px; }
+        .tap-passo.aberta { background: rgba(107,254,156,0.1); border-color: var(--cinza-frio); box-shadow: 0 2px 10px rgba(0,0,0,0.12); }
+        .tap-anel-wrap { position: relative; width: 104px; height: 104px; flex: none; }
+        .tap-anel { width: 100%; height: 100%; display: block; }
+        .tap-anel-trilho { stroke: var(--tap-neutro); opacity: 0.55; }
+        .tap-anel-prog { stroke: var(--tap-prog); transition: stroke-dashoffset .7s cubic-bezier(.4,0,.2,1), stroke .3s, opacity .2s; }
+        .tap-est-concluido .tap-anel-prog { stroke: var(--tap-ok); }
+        .tap-est-concluido .tap-anel-trilho { stroke: var(--tap-ok); opacity: 0.25; }
+        .tap-anel-centro { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; }
+        .tap-anel-pct { font-family: 'Archivo', sans-serif; font-weight: 800; font-size: 22px; letter-spacing: -0.02em; }
+        .tap-est-concluido .tap-anel-centro { color: var(--tap-ok); }
+        .tap-est-andamento .tap-anel-pct { color: var(--tap-prog); }
+        .tap-est-nao_iniciado .tap-anel-pct { color: var(--carvao); }
+        .tap-passo-nome { display: flex; align-items: center; gap: 7px; font-weight: 800; font-size: 14.5px; }
+        .tap-etapa-num { width: 22px; height: 22px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 11.5px; border: 1px solid var(--cinza-frio); color: var(--carvao); flex: none; }
+        .tap-passo-status { font-size: 12.5px; font-weight: 800; }
+        .tap-est-concluido .tap-passo-status { color: var(--tap-ok); }
+        .tap-est-andamento .tap-passo-status { color: var(--tap-prog); }
+        .tap-est-nao_iniciado .tap-passo-status { color: #c0392b; opacity: 0.85; }
+        .portal-root[data-theme="dark"] .tap-est-nao_iniciado .tap-passo-status { color: #ff9a8f; }
+        .tap-passo-sub { font-size: 11.5px; color: var(--carvao); }
+        .tap-painel-estado { font-size: 12px; font-weight: 800; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--cinza-frio); }
+        .tap-painel-estado.tap-est-concluido { color: #0b6b3a; background: rgba(107,254,156,0.25); border-color: rgba(40,170,100,0.6); }
+        .portal-root[data-theme="dark"] .tap-painel-estado.tap-est-concluido { color: #b9f7cd; }
+        .tap-painel-estado.tap-est-andamento { color: #1f5fb8; border-color: rgba(47,125,225,0.5); background: rgba(47,125,225,0.1); }
+        .portal-root[data-theme="dark"] .tap-painel-estado.tap-est-andamento { color: #9ccbff; }
+        @media (max-width: 640px) { .tap-fluxo { gap: 0; } .tap-lig { display: none; } .tap-anel-wrap { width: 72px; height: 72px; } .tap-anel-pct { font-size: 15px; } .tap-passo { padding: 10px 4px; } .tap-passo-nome { font-size: 12.5px; flex-direction: column; gap: 3px; } .tap-passo-sub { font-size: 10.5px; } }
+        @media (prefers-reduced-motion: reduce) { .tap-anel-prog { transition: none; } }
         .tap-secao-topo { display: flex; justify-content: space-between; gap: 14px; align-items: flex-start; flex-wrap: wrap; }
         .tap-secao-topo h3 { margin: 0 0 4px; }
         .tap-secao-topo > div { flex: 1 1 360px; min-width: 0; }
-        .tap-etapas { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 14px; }
-        .tap-etapa-card { text-align: left; font: inherit; color: var(--texto); background: var(--card-bg); border: 1px solid var(--cinza-frio); border-left: 5px solid var(--tap-bd); border-radius: 12px; padding: 12px 14px; cursor: pointer; display: flex; flex-direction: column; gap: 6px; transition: box-shadow .15s, border-color .15s; }
-        .tap-etapa-card:hover, .tap-etapa-card:focus-visible { box-shadow: 0 2px 10px rgba(0,0,0,0.18); outline: none; }
-        .tap-etapa-card.aberta { border-color: var(--tap-c); box-shadow: 0 0 0 2px var(--tap-bd); }
-        .tap-etapa-topo { display: flex; align-items: center; gap: 8px; font-weight: 800; font-size: 13px; }
-        .tap-etapa-num { width: 22px; height: 22px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 11.5px; background: var(--tap-bg); color: var(--tap-c); border: 1px solid var(--tap-bd); flex: none; }
-        .tap-barra { height: 8px; border-radius: 999px; background: var(--branco-frio); border: 1px solid var(--cinza-frio); overflow: hidden; }
-        .tap-barra-fill { height: 100%; background: var(--tap-c); border-radius: 999px; transition: width .25s; }
-        .tap-etapa-status { font-size: 12.5px; color: var(--tap-c); font-weight: 700; }
-        .tap-etapa-status strong { font-weight: 900; font-size: 14px; }
-        .tap-etapa-sub { font-size: 11.5px; color: var(--carvao); }
-        .tap-etapa-acao { font-size: 11.5px; font-weight: 800; color: var(--texto); text-decoration: underline; }
-        .tap-regra { font-size: 12px; color: var(--carvao); margin: 12px 0 0; }
-        .tap-regra-ok { color: #0b4a2c; }
-        .portal-root[data-theme="dark"] .tap-regra-ok { color: #7FE6A0; }
         .tap-painel { margin-top: 14px; border: 1px solid var(--cinza-frio); border-radius: 12px; padding: 14px 16px; background: var(--branco-frio); }
         .tap-painel-topo { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; font-size: 13px; }
         .tap-origem { color: var(--carvao); font-size: 12px; }
@@ -35471,7 +35563,7 @@ function GrupoprimaPortal() {
         .tap-contato-linha { display: grid; grid-template-columns: 1.4fr 1fr 1fr 1.4fr auto; gap: 8px; align-items: center; }
         .tap-add-contato { align-self: flex-start; }
         .tap-salvo { font-size: 11.5px; color: var(--carvao); margin: 6px 0 0; }
-        @media (max-width: 900px) { .tap-etapas { grid-template-columns: 1fr; } .tap-campos { grid-template-columns: 1fr; } .tap-contato-linha { grid-template-columns: 1fr 1fr; } }
+        @media (max-width: 900px) { .tap-campos { grid-template-columns: 1fr; } .tap-contato-linha { grid-template-columns: 1fr 1fr; } }
         .fin-modelo-card { margin-top: 0; margin-bottom: 4px; }
         .fin-modelo-linha { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
         .fin-modelo-info { flex: 1; min-width: 200px; }
