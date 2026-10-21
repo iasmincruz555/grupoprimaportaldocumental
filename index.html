@@ -31047,19 +31047,17 @@ function TapCampo({ campo, valor, editavel, onChange }) {
         finEl("button", { key: o, type: "button", role: "radio", "aria-checked": valor === o, disabled: !editavel, className: "tap-opcao" + (valor === o ? " ativa" : ""), onClick: () => onChange(valor === o ? "" : o) }, o),
       ),
     );
-  } else if (campo.tipo === "texto" || campo.tipo === "email") {
-    controle = finEl(TapAutoTexto, { id, value: valor, disabled: !editavel, inputMode: campo.tipo === "email" ? "email" : undefined, onChange: onChange });
-  } else {
-    const tipoInput = campo.tipo === "data" ? "date" : "text";
-    controle = finEl("input", {
+  } else if (campo.tipo !== "data") {
+    controle = finEl(TapAutoTexto, {
       id,
-      type: tipoInput,
-      value: valor || "",
+      value: valor,
       disabled: !editavel,
       inputMode: campo.tipo === "telefone" ? "tel" : campo.tipo === "email" ? "email" : undefined,
       placeholder: campo.tipo === "cnpj" ? "00.000.000/0000-00" : campo.tipo === "cep" ? "00000-000" : undefined,
-      onChange: (e) => onChange(e.target.value),
+      onChange: onChange,
     });
+  } else {
+    controle = finEl("input", { id, type: "date", value: valor || "", disabled: !editavel, onChange: (e) => onChange(e.target.value) });
   }
   return finEl(
     "div",
