@@ -31382,14 +31382,15 @@ function TapAnel({ pct, estado }) {
     finEl(
       "svg",
       { className: "tap-anel", viewBox: "0 0 100 100", "aria-hidden": "true" },
-      finEl("circle", { className: "tap-anel-trilho", cx: 50, cy: 50, r: R, fill: "none", strokeWidth: 7 }),
+      finEl("circle", { className: "tap-anel-fundo", cx: 50, cy: 50, r: R }),
+      finEl("circle", { className: "tap-anel-trilho", cx: 50, cy: 50, r: R, fill: "none", strokeWidth: 5 }),
       finEl("circle", {
         className: "tap-anel-prog",
         cx: 50,
         cy: 50,
         r: R,
         fill: "none",
-        strokeWidth: 7,
+        strokeWidth: 5,
         strokeLinecap: "round",
         transform: "rotate(-90 50 50)",
         strokeDasharray: C,
@@ -31400,7 +31401,7 @@ function TapAnel({ pct, estado }) {
     finEl(
       "div",
       { className: "tap-anel-centro" },
-      estado === "concluido" ? finEl(CheckCircle2, { size: 30 }) : finEl("span", { className: "tap-anel-pct" }, pct + "%"),
+      estado === "concluido" ? finEl(CheckCircle2, { size: 28 }) : finEl("span", { className: "tap-anel-pct" }, pct + "%"),
     ),
   );
 }
@@ -31643,80 +31644,7 @@ function FinDetalheView({ item, currentUser, onBack, onExecutar, onExcluir, onSa
             finEl("button", { className: "filters-clear-btn filters-clear-inline", onClick: () => setConfirmandoExclusao(false) }, "Cancelar"),
           ),
         ),
-      finEl(
-        "div",
-        { className: "fin-dados-compacto", "data-testid": "fin-dados" },
-      finEl(
-          "div",
-          { className: "fin-dados-grid" },
-          dado("E-mail do cliente", item.emailCliente, false, true),
-          dado("Data do envio ao cliente", item.dataEnvio ? isoDateToBR(item.dataEnvio) : "Ainda não enviado"),
-          dado("Modelo utilizado", modeloUsado ? (modeloAtualVersao && modeloAtualVersao !== item.modeloVersao ? `${modeloUsado} (hoje a vigente é a ${modeloAtualVersao})` : modeloUsado) : null),
-          dado("E-mail do Financeiro", item.emailFinanceiro, false, true),
-          dado("Data do encaminhamento", item.dataEncaminhamento ? isoDateToBR(item.dataEncaminhamento) : null),
-          dado("Última atualização", `${formatAuditWhen(new Date(finUltimaAtualizacao(item)))}${item.atualizadoPor ? " · " + item.atualizadoPor : ""}`),
-          item.observacoes ? dado("Observações", item.observacoes, true) : null,
-        ),
-      ),
     ),
-    ),
-    finEl(
-      "section",
-      { className: "section-block homolog-detail-card" },
-      finEl("h3", null, "Resposta do cliente"),
-      respostas.length === 0 && finEl("p", { className: "empty-note" }, "Nenhuma resposta anexada ainda. Quando o cliente devolver o modelo preenchido, anexe o arquivo aqui."),
-      respostas.length > 0 &&
-        finEl(
-          "ul",
-          { className: "homolog-anexos-list fin-respostas" },
-          [...respostas].reverse().map((r, idx) =>
-            finEl(
-              "li",
-              { key: r.id, className: "homolog-anexo-item fin-resposta-item" },
-              finEl(FileText, { size: 14 }),
-              finEl(
-                "div",
-                { className: "fin-resposta-corpo" },
-                finEl(
-                  "div",
-                  { className: "homolog-anexo-nome" },
-                  r.arquivo.nome,
-                  finEl("span", { className: "fin-versao-tag" }, `Versão ${r.versao}`),
-                  idx === 0 && respostas.length > 1 && finEl("span", { className: "fin-versao-tag fin-versao-atual" }, "Mais recente"),
-                ),
-                finEl("div", { className: "homolog-historico-when" }, `${formatBytes(r.arquivo.tamanho)} · recebida em ${isoDateToBR(r.dataRecebimento)} · registrada por ${r.registradoPor} em ${formatAuditWhen(new Date(r.registradoEm))}`),
-                r.observacoes && finEl("div", { className: "fin-resposta-obs" }, r.observacoes),
-              ),
-              finEl("button", { className: "mini-download-btn", onClick: () => finVerArquivo(r.arquivo, item, { onView, onNotify, versao: r.versao }) }, finEl(Eye, { size: 13 }), " Ver"),
-              finEl("button", { className: "mini-download-btn", onClick: () => finBaixarArquivo(r.arquivo, item, { onNotify }) }, finEl(Download, { size: 13 }), " Baixar"),
-            ),
-          ),
-        ),
-    ),
-    finEl(
-      "section",
-      { className: "section-block homolog-detail-card" },
-      finEl("h3", null, "Encaminhamentos ao Financeiro"),
-      encaminhamentos.length === 0 && finEl("p", { className: "empty-note" }, "A resposta ainda não foi encaminhada ao Financeiro."),
-      encaminhamentos.length > 0 &&
-        finEl(
-          "ul",
-          { className: "homolog-anexos-list" },
-          [...encaminhamentos].reverse().map((enc) =>
-            finEl(
-              "li",
-              { key: enc.id, className: "homolog-anexo-item fin-resposta-item" },
-              finEl(Send, { size: 14 }),
-              finEl(
-                "div",
-                { className: "fin-resposta-corpo" },
-                finEl("div", { className: "homolog-anexo-nome" }, enc.email, finEl("span", { className: "fin-versao-tag" }, `Resposta v${enc.versaoResposta}`)),
-                finEl("div", { className: "homolog-historico-when" }, `Encaminhado em ${isoDateToBR(enc.data)} · registrado por ${enc.encaminhadoPor} em ${formatAuditWhen(new Date(enc.encaminhadoEm))}`),
-                enc.observacoes && finEl("div", { className: "fin-resposta-obs" }, enc.observacoes),
-              ),
-            ),
-          ),
-        ),
     ),
     finEl(
       "section",
@@ -35410,21 +35338,26 @@ function GrupoprimaPortal() {
         .tap-secao-acoes .tap-selo-grande { margin-top: 0; }
         .tap-fluxo { display: flex; align-items: stretch; justify-content: center; gap: 6px; margin-top: 16px; }
         .tap-lig { display: flex; align-items: center; color: var(--cinza-frio); flex: none; }
-        .tap-passo { --tap-neutro: var(--cinza-frio); --tap-prog: #2f7de1; --tap-ok: #1fa85f; flex: 1 1 0; min-width: 0; max-width: 300px; display: flex; flex-direction: column; align-items: center; gap: 6px; text-align: center; font: inherit; color: var(--texto); background: transparent; border: 1px solid transparent; border-radius: 16px; padding: 14px 10px 12px; cursor: pointer; transition: background .15s, border-color .15s, box-shadow .15s; }
-        .portal-root[data-theme="dark"] .tap-passo { --tap-prog: #5aa9ff; --tap-ok: var(--verde); }
-        .tap-passo:hover { background: rgba(107,254,156,0.07); }
+        .tap-passo { --tap-neutro: var(--cinza-frio); --tap-prog: #218c5a; --tap-ok: #218c5a; --tap-f0: rgba(33,140,90,0.03); --tap-f1: rgba(33,140,90,0.07); --tap-f2: rgba(33,140,90,0.12); flex: 1 1 0; min-width: 0; max-width: 300px; display: flex; flex-direction: column; align-items: center; gap: 6px; text-align: center; font: inherit; color: var(--texto); background: transparent; border: 1px solid transparent; border-radius: 16px; padding: 14px 10px 12px; cursor: pointer; transition: background .15s, border-color .15s, box-shadow .15s; }
+        .portal-root[data-theme="dark"] .tap-passo { --tap-prog: #4fb687; --tap-ok: #4fb687; --tap-f0: rgba(79,182,135,0.04); --tap-f1: rgba(79,182,135,0.09); --tap-f2: rgba(79,182,135,0.16); }
+        .tap-anel-fundo { transition: fill .4s; fill: var(--tap-f0); }
+        .tap-est-andamento .tap-anel-fundo { fill: var(--tap-f1); }
+        .tap-est-concluido .tap-anel-fundo { fill: var(--tap-f2); }
+        .tap-passo:hover .tap-anel-fundo { fill: var(--tap-f2); }
+        .tap-passo:hover { background: rgba(120,140,155,0.07); }
         .tap-passo:focus-visible { outline: 2px solid var(--foco); outline-offset: 2px; }
-        .tap-passo.aberta { background: rgba(107,254,156,0.1); border-color: var(--cinza-frio); box-shadow: 0 2px 10px rgba(0,0,0,0.12); }
+        .tap-passo.aberta { background: rgba(120,140,155,0.1); border-color: var(--cinza-frio); }
         .tap-anel-wrap { position: relative; width: 104px; height: 104px; flex: none; }
         .tap-anel { width: 100%; height: 100%; display: block; }
-        .tap-anel-trilho { stroke: var(--tap-neutro); opacity: 0.55; }
+        .tap-anel-trilho { stroke: var(--tap-neutro); opacity: 0.6; }
+        .tap-est-nao_iniciado .tap-anel-trilho { stroke: var(--tap-neutro); opacity: 0.55; }
         .tap-anel-prog { stroke: var(--tap-prog); transition: stroke-dashoffset .7s cubic-bezier(.4,0,.2,1), stroke .3s, opacity .2s; }
         .tap-est-concluido .tap-anel-prog { stroke: var(--tap-ok); }
-        .tap-est-concluido .tap-anel-trilho { stroke: var(--tap-ok); opacity: 0.25; }
+        .tap-est-concluido .tap-anel-trilho { stroke: var(--tap-ok); opacity: 0.3; }
         .tap-anel-centro { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; }
-        .tap-anel-pct { font-family: 'Archivo', sans-serif; font-weight: 800; font-size: 22px; letter-spacing: -0.02em; }
+        .tap-anel-pct { font-family: 'Archivo', sans-serif; font-weight: 700; font-size: 22px; letter-spacing: -0.02em; }
         .tap-est-concluido .tap-anel-centro { color: var(--tap-ok); }
-        .tap-est-andamento .tap-anel-pct { color: var(--tap-prog); }
+        .tap-est-andamento .tap-anel-pct { color: var(--texto); }
         .tap-est-nao_iniciado .tap-anel-pct { color: var(--carvao); }
         .tap-passo-nome { display: flex; align-items: center; gap: 7px; font-weight: 800; font-size: 14.5px; }
         .tap-etapa-num { width: 22px; height: 22px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 11.5px; border: 1px solid var(--cinza-frio); color: var(--carvao); flex: none; }
@@ -35435,10 +35368,10 @@ function GrupoprimaPortal() {
         .portal-root[data-theme="dark"] .tap-est-nao_iniciado .tap-passo-status { color: #ff9a8f; }
         .tap-passo-sub { font-size: 11.5px; color: var(--carvao); }
         .tap-painel-estado { font-size: 12px; font-weight: 800; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--cinza-frio); }
-        .tap-painel-estado.tap-est-concluido { color: #0b6b3a; background: rgba(107,254,156,0.25); border-color: rgba(40,170,100,0.6); }
-        .portal-root[data-theme="dark"] .tap-painel-estado.tap-est-concluido { color: #b9f7cd; }
-        .tap-painel-estado.tap-est-andamento { color: #1f5fb8; border-color: rgba(47,125,225,0.5); background: rgba(47,125,225,0.1); }
-        .portal-root[data-theme="dark"] .tap-painel-estado.tap-est-andamento { color: #9ccbff; }
+        .tap-painel-estado.tap-est-concluido { color: #0b6b3a; background: rgba(33,140,90,0.1); border-color: rgba(33,140,90,0.45); }
+        .portal-root[data-theme="dark"] .tap-painel-estado.tap-est-concluido { color: #8fd6b3; }
+        .tap-painel-estado.tap-est-andamento { color: #0b6b3a; border-color: rgba(40,170,100,0.45); background: rgba(40,170,100,0.1); }
+        .portal-root[data-theme="dark"] .tap-painel-estado.tap-est-andamento { color: #8fd6b3; }
         @media (max-width: 640px) { .tap-fluxo { gap: 0; } .tap-lig { display: none; } .tap-anel-wrap { width: 72px; height: 72px; } .tap-anel-pct { font-size: 15px; } .tap-passo { padding: 10px 4px; } .tap-passo-nome { font-size: 12.5px; flex-direction: column; gap: 3px; } .tap-passo-sub { font-size: 10.5px; } }
         @media (prefers-reduced-motion: reduce) { .tap-anel-prog { transition: none; } }
         .tap-secao-topo { display: flex; justify-content: space-between; gap: 14px; align-items: flex-start; flex-wrap: wrap; }
