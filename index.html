@@ -31442,7 +31442,7 @@ function TapAnel({ pct, estado }) {
 /** TapSecao: fluxo horizontal Comercial → Operacional → Financeiro (círculos de
  *  progresso) + painel da etapa escolhida. A ordem é só visual: qualquer etapa
  *  abre e edita a qualquer momento, sem bloqueio pelas anteriores. */
-function TapSecao({ cliente, resumo, aberta, draft, editavel, salvo, onAbrir, onAlterar, onBaixarModelo }) {
+function TapSecao({ cliente, resumo, aberta, draft, editavel, salvo, onAbrir, onAlterar, onBaixarModelo, intermedio }) {
   const etapaAberta = aberta ? tapEtapaPorChave(aberta) : null;
   const resAberta = aberta ? resumo.etapas.find((e) => e.chave === aberta) : null;
   const passos = [];
@@ -31495,6 +31495,7 @@ function TapSecao({ cliente, resumo, aberta, draft, editavel, salvo, onAbrir, on
       ),
     ),
     finEl("div", { className: "tap-fluxo", role: "group", "aria-label": "Etapas do Termo de Abertura de Projeto" }, passos),
+    intermedio || null,
     etapaAberta &&
       finEl(
         "div",
@@ -31614,72 +31615,62 @@ function FinDetalheView({ item, currentUser, onBack, onExecutar, onExcluir, onSa
       onAbrir: tapAbrir,
       onAlterar: tapAlterar,
       onBaixarModelo: operar ? () => finBaixarModelo({ onNotify }) : null,
-    }),
-    finEl(
-      "div",
-      { className: "fin-detalhe-topo" },
-    finEl(
-      "header",
-      { className: "company-header" },
-      finEl(
+      intermedio: finEl(
         "div",
-        { className: "company-header-top" },
-        finEl("span", { className: "company-header-tag" }, "TERMO DE ABERTURA DE PROJETO"),
-        finEl(FinStatusBadge, { status: item.status }),
-      ),
-      finEl("h1", null, item.cliente),
-      finEl(
-        "p",
-        { className: "company-header-legal" },
-        "Consultor: ",
-        item.consultor?.nome,
-        item.consultor?.email ? ` (${item.consultor.email})` : "",
-        " · Solicitada em ",
-        formatAuditWhen(new Date(item.criadoEm)),
-      ),
-      emPendencia &&
+        { className: "tap-solic", "data-testid": "tap-solic" },
         finEl(
           "div",
-          { className: "fin-pendencia-box" },
-          finEl(AlertTriangle, { size: 15 }),
+          { className: "tap-solic-linha" },
           finEl(
             "div",
-            null,
-            finEl("strong", null, "Pendência aberta"),
-            finEl("div", null, item.pendencia?.motivo || "—"),
-            finEl("div", { className: "homolog-historico-when" }, `${item.pendencia?.por || ""}${item.pendencia?.em ? " · " + formatAuditWhen(new Date(item.pendencia.em)) : ""}`),
+            { className: "tap-solic-info" },
+            finEl("div", { className: "tap-solic-nome" }, item.cliente),
+            finEl(
+              "div",
+              { className: "tap-solic-meta" },
+              "Consultor: ",
+              item.consultor?.nome,
+              item.consultor?.email ? ` (${item.consultor.email})` : "",
+              " · Solicitada em ",
+              formatAuditWhen(new Date(item.criadoEm)),
+            ),
           ),
+          admin &&
+            !confirmandoExclusao &&
+            finEl(
+              "div",
+              { className: "tap-solic-acoes" },
+              finEl("button", { type: "button", className: "doc-view-btn", onClick: () => setModal("editar") }, finEl(Pencil, { size: 13 }), " Editar dados"),
+              finEl("button", { type: "button", className: "doc-view-btn homolog-delete-btn", onClick: () => setConfirmandoExclusao(true) }, finEl(XCircle, { size: 13 }), " Excluir solicitação"),
+            ),
         ),
-      operar
-        ? finEl(
-            "div",
-            { className: "homolog-status-actions" },
-            !item.dataEnvio && !concluido && finEl("button", { className: "doc-view-btn", onClick: () => setModal("envio") }, finEl(Mail, { size: 14 }), " Registrar envio ao cliente"),
-            !concluido &&
-              finEl("button", { className: "doc-view-btn", onClick: () => setModal("resposta") }, finEl(UploadCloud, { size: 14 }), respostas.length ? " Anexar nova versão da resposta" : " Anexar resposta do cliente"),
-            !concluido && !emPendencia && respostas.length > 0 && finEl("button", { className: "doc-view-btn", onClick: () => setModal("encaminhar") }, finEl(Send, { size: 14 }), " Encaminhar ao Financeiro"),
-            !concluido && !emPendencia && finEl("button", { className: "doc-view-btn", onClick: () => setModal("pendencia") }, finEl(AlertTriangle, { size: 14 }), " Sinalizar pendência"),
-            emPendencia && finEl("button", { className: "doc-view-btn", onClick: () => setModal("resolver") }, finEl(CheckCircle2, { size: 14 }), " Resolver pendência"),
-            finEl("button", { className: "doc-view-btn", onClick: () => setModal("observacao") }, finEl(FileText, { size: 14 }), " Adicionar observação"),
-            admin && finEl("button", { className: "doc-view-btn", onClick: () => setModal("editar") }, finEl(Pencil, { size: 14 }), " Editar dados"),
-            admin && !confirmandoExclusao && finEl("button", { className: "doc-view-btn homolog-delete-btn", onClick: () => setConfirmandoExclusao(true) }, finEl(XCircle, { size: 14 }), " Excluir solicitação"),
-          )
-        : finEl("p", { className: "homolog-bases-hint", style: { marginTop: 14 } }, "Seu perfil é de consulta: você pode visualizar esta solicitação e abrir os arquivos, mas não alterá-la."),
-      admin &&
-        confirmandoExclusao &&
-        finEl(
-          "div",
-          { className: "doc-row-delete-confirm homolog-delete-confirm" },
-          finEl("span", null, `Excluir a solicitação de abertura de cliente de "${item.cliente}"? Isso remove o registro e o histórico definitivamente (os arquivos já salvos no Drive não são apagados) e não pode ser desfeito.`),
+        emPendencia &&
           finEl(
             "div",
-            { className: "doc-row-delete-confirm-actions" },
-            finEl("button", { className: "doc-row-delete-confirm-btn", onClick: () => onExcluir(item.id) }, "Confirmar exclusão"),
-            finEl("button", { className: "filters-clear-btn filters-clear-inline", onClick: () => setConfirmandoExclusao(false) }, "Cancelar"),
+            { className: "fin-pendencia-box" },
+            finEl(AlertTriangle, { size: 15 }),
+            finEl(
+              "div",
+              null,
+              finEl("strong", null, "Pendência aberta"),
+              finEl("div", null, item.pendencia?.motivo || "—"),
+            ),
           ),
-        ),
-    ),
-    ),
+        admin &&
+          confirmandoExclusao &&
+          finEl(
+            "div",
+            { className: "doc-row-delete-confirm homolog-delete-confirm" },
+            finEl("span", null, `Excluir a solicitação de abertura de cliente de "${item.cliente}"? Isso remove o registro e o histórico definitivamente (os arquivos já salvos no Drive não são apagados) e não pode ser desfeito.`),
+            finEl(
+              "div",
+              { className: "doc-row-delete-confirm-actions" },
+              finEl("button", { className: "doc-row-delete-confirm-btn", onClick: () => onExcluir(item.id) }, "Confirmar exclusão"),
+              finEl("button", { className: "filters-clear-btn filters-clear-inline", onClick: () => setConfirmandoExclusao(false) }, "Cancelar"),
+            ),
+          ),
+      ),
+    }),
     finEl(
       "section",
       { className: "section-block homolog-detail-card" },
@@ -35366,6 +35357,14 @@ function GrupoprimaPortal() {
         .fin-cell-tap { min-width: 230px; }
         .fin-cell-tap .tap-selo { margin-top: 5px; }
         .tap-secao { margin-top: 0; margin-bottom: 16px; }
+        .tap-solic { margin: 6px 0 14px; padding: 10px 14px; border: 1px solid var(--cinza-frio); border-radius: 10px; background: var(--card-bg); }
+        .tap-solic-linha { display: flex; align-items: center; justify-content: space-between; gap: 10px 16px; flex-wrap: wrap; }
+        .tap-solic-info { flex: 1 1 320px; min-width: 0; }
+        .tap-solic-nome { font-size: 16px; font-weight: 800; color: var(--texto); line-height: 1.25; overflow-wrap: anywhere; }
+        .tap-solic-meta { font-size: 12px; color: var(--carvao); margin-top: 2px; overflow-wrap: anywhere; }
+        .tap-solic-acoes { display: flex; gap: 8px; flex-wrap: wrap; }
+        .tap-solic-acoes .doc-view-btn { padding: 5px 10px; font-size: 12px; }
+        .tap-solic .fin-pendencia-box, .tap-solic .homolog-delete-confirm { margin-top: 10px; }
         .tap-secao-acoes { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; justify-content: flex-end; }
         .tap-secao-acoes .tap-selo-grande { margin-top: 0; }
         .tap-fluxo { display: flex; align-items: stretch; justify-content: center; gap: 6px; margin-top: 16px; }
