@@ -31476,6 +31476,9 @@ function TapSecao({ cliente, resumo, aberta, draft, editavel, salvo, onAbrir, on
     );
   });
   return finEl(
+    React.Fragment,
+    null,
+    finEl(
     "section",
     { className: "section-block homolog-detail-card tap-secao", "data-testid": "tap-secao" },
     finEl(
@@ -31495,8 +31498,12 @@ function TapSecao({ cliente, resumo, aberta, draft, editavel, salvo, onAbrir, on
       ),
     ),
     finEl("div", { className: "tap-fluxo", role: "group", "aria-label": "Etapas do Termo de Abertura de Projeto" }, passos),
+    ),
     intermedio || null,
     etapaAberta &&
+      finEl(
+        "section",
+        { className: "section-block homolog-detail-card tap-secao tap-secao-painel" },
       finEl(
         "div",
         { className: "tap-painel", "data-testid": "tap-painel" },
@@ -31516,6 +31523,7 @@ function TapSecao({ cliente, resumo, aberta, draft, editavel, salvo, onAbrir, on
           ),
         finEl(TapEditor, { etapa: etapaAberta, valores: draft, editavel, onChange: onAlterar }),
         finEl("p", { className: "tap-salvo", "aria-live": "polite" }, editavel ? (salvo ? "Alterações salvas automaticamente." : "Salvando…") : "Seu perfil é de consulta: as respostas são somente para leitura."),
+      ),
       ),
   );
 }
@@ -35357,7 +35365,9 @@ function GrupoprimaPortal() {
         .fin-cell-tap { min-width: 230px; }
         .fin-cell-tap .tap-selo { margin-top: 5px; }
         .tap-secao { margin-top: 0; margin-bottom: 16px; }
-        .tap-solic { margin: 6px 0 14px; padding: 10px 14px; border: 1px solid var(--cinza-frio); border-radius: 10px; background: var(--card-bg); }
+        .tap-secao-painel { padding: 0; border: 0; background: transparent; box-shadow: none; margin-bottom: 16px; }
+        .tap-secao-painel .tap-painel { margin-top: 0; }
+        .tap-solic { margin: 0 0 16px; padding: 10px 14px; border: 1px solid var(--cinza-frio); border-radius: 10px; background: var(--card-bg); }
         .tap-solic-linha { display: flex; align-items: center; justify-content: space-between; gap: 10px 16px; flex-wrap: wrap; }
         .tap-solic-info { flex: 1 1 320px; min-width: 0; }
         .tap-solic-nome { font-size: 16px; font-weight: 800; color: var(--texto); line-height: 1.25; overflow-wrap: anywhere; }
