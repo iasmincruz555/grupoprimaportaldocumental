@@ -35414,7 +35414,9 @@ function GrupoprimaPortal() {
         .tap-origem { color: var(--carvao); font-size: 12px; }
         .tap-faltando { font-size: 12px; padding: 8px 10px; border-radius: 8px; margin-bottom: 12px; background: rgba(224,161,0,0.14); border: 1px solid rgba(224,161,0,0.45); color: var(--texto); }
         .tap-grupo { border: 1px solid var(--cinza-frio); border-radius: 10px; padding: 10px 14px 14px; margin: 0 0 12px; background: var(--card-bg); }
-        .tap-grupo legend { font-size: 12px; font-weight: 800; padding: 0 8px; text-transform: uppercase; letter-spacing: .03em; color: var(--texto); }
+        .tap-grupo { min-width: 0; padding-top: 14px; }
+        .tap-grupo legend { float: left; width: 100%; box-sizing: border-box; padding: 0 0 8px; margin: 0 0 12px; border-bottom: 1px solid var(--cinza-frio); font-size: 12px; font-weight: 800; text-transform: uppercase; letter-spacing: .03em; color: var(--texto); overflow-wrap: anywhere; }
+        .tap-grupo legend + * { clear: both; }
         .tap-campos { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 18px; }
         .tap-campo { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
         .tap-campo-larga { grid-column: 1 / -1; }
