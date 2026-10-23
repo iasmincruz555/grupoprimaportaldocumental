@@ -30156,13 +30156,11 @@ function finPodeVerRegistro(user, reg) {
 }
 function finCriarSolicitacao(campos, user, modeloVersao) {
   const cliente = String(campos?.cliente || "").trim();
-  const emailsClienteN = finNormalizarEmails(campos?.emailCliente);
-  const emailCliente = emailsClienteN.texto;
+  const raizCnpj = finMascararRaizCnpj(campos?.raizCnpj);
   const dataEnvio = String(campos?.dataEnvio || "").trim();
   const observacoes = String(campos?.observacoes || "").trim();
   if (!cliente) return { ok: false, erro: "Informe o cliente." };
-  if (!emailCliente) return { ok: false, erro: "Informe o e-mail do cliente para o qual o modelo foi enviado." };
-  if (emailsClienteN.invalido) return { ok: false, erro: `O e-mail do cliente "${emailsClienteN.invalido}" não parece válido.` };
+  if (!finRaizCnpjValida(raizCnpj)) return { ok: false, erro: "Informe a raiz do CNPJ do cliente (8 dígitos)." };
   if (dataEnvio) {
     if (!finDataIsoValida(dataEnvio)) return { ok: false, erro: "Data do envio inválida." };
     if (dataEnvio > finHojeIso()) return { ok: false, erro: "A data do envio não pode ser futura." };
@@ -30171,14 +30169,15 @@ function finCriarSolicitacao(campos, user, modeloVersao) {
   const agora = new Date().toISOString();
   const eventos = [finEvento(nomeUsuario, "criada", { observacoes })];
   if (modeloVersao) eventos.push(finEvento(nomeUsuario, "modelo_disponibilizado", { versao: modeloVersao }));
-  if (dataEnvio) eventos.push(finEvento(nomeUsuario, "enviado_ao_cliente", { email: emailCliente, data: dataEnvio }));
+  if (dataEnvio) eventos.push(finEvento(nomeUsuario, "enviado_ao_cliente", { data: dataEnvio }));
   return {
     ok: true,
     item: {
       id: generateFinSolicitacaoId(),
       cliente,
       consultor: { nome: nomeUsuario, email: user?.email || "" },
-      emailCliente,
+      raizCnpj,
+      emailCliente: "",
       dataEnvio: dataEnvio || null,
       observacoes,
       modeloVersao: modeloVersao || null,
@@ -30205,7 +30204,7 @@ function finRegistrarEnvio(item, campos, usuarioNome) {
   if (item.status === "modelo_nao_enviado") patch.status = "aguardando_cliente";
   return {
     ok: true,
-    item: finAplicar(item, patch, finEvento(usuarioNome, "enviado_ao_cliente", { email: item.emailCliente, data }), usuarioNome),
+    item: finAplicar(item, patch, finEvento(usuarioNome, "enviado_ao_cliente", { data }), usuarioNome),
   };
 }
 /** finAnexarResposta: SEMPRE acrescenta uma nova versão — nunca substitui a
@@ -30358,7 +30357,7 @@ const FIN_CAMPOS_EDITAVEIS = {
   cliente: "Cliente",
   consultorNome: "Consultor",
   consultorEmail: "E-mail do consultor",
-  emailCliente: "E-mail do cliente",
+  raizCnpj: "Raiz do CNPJ",
   dataEnvio: "Data do envio",
   emailFinanceiro: "E-mail do Financeiro",
   observacoes: "Observações",
@@ -30368,7 +30367,7 @@ function finEditarDados(item, campos, usuarioNome) {
     cliente: String(campos?.cliente ?? item.cliente ?? "").trim(),
     consultorNome: String(campos?.consultorNome ?? item.consultor?.nome ?? "").trim(),
     consultorEmail: String(campos?.consultorEmail ?? item.consultor?.email ?? "").trim(),
-    emailCliente: finNormalizarEmails(campos?.emailCliente ?? item.emailCliente ?? "").texto,
+    raizCnpj: finMascararRaizCnpj(campos?.raizCnpj ?? finRaizCnpj(item)),
     dataEnvio: String(campos?.dataEnvio ?? item.dataEnvio ?? "").trim(),
     emailFinanceiro: finNormalizarEmails(campos?.emailFinanceiro ?? item.emailFinanceiro ?? "").texto,
     observacoes: String(campos?.observacoes ?? item.observacoes ?? "").trim(),
@@ -30377,8 +30376,7 @@ function finEditarDados(item, campos, usuarioNome) {
   if (!novo.cliente) return { ok: false, erro: "Informe o cliente." };
   if (!novo.consultorNome) return { ok: false, erro: "Informe o consultor responsável." };
   if (novo.consultorEmail && !finEmailValido(novo.consultorEmail)) return { ok: false, erro: "O e-mail do consultor não parece válido." };
-  if (!novo.emailCliente) return { ok: false, erro: "O e-mail do cliente é obrigatório." };
-  { const inv = finNormalizarEmails(novo.emailCliente).invalido; if (inv) return { ok: false, erro: `O e-mail do cliente "${inv}" não parece válido.` }; }
+  if (!finRaizCnpjValida(novo.raizCnpj)) return { ok: false, erro: "Informe a raiz do CNPJ do cliente (8 dígitos)." };
   if (novo.dataEnvio) {
     if (!finDataIsoValida(novo.dataEnvio)) return { ok: false, erro: "Data do envio inválida." };
     if (novo.dataEnvio > finHojeIso()) return { ok: false, erro: "A data do envio não pode ser futura." };
@@ -30395,7 +30393,7 @@ function finEditarDados(item, campos, usuarioNome) {
     cliente: item.cliente || "",
     consultorNome: item.consultor?.nome || "",
     consultorEmail: item.consultor?.email || "",
-    emailCliente: item.emailCliente || "",
+    raizCnpj: finRaizCnpj(item),
     dataEnvio: item.dataEnvio || "",
     emailFinanceiro: temEncaminhamento ? item.emailFinanceiro || "" : "",
     observacoes: item.observacoes || "",
@@ -30407,7 +30405,7 @@ function finEditarDados(item, campos, usuarioNome) {
   const patch = {
     cliente: novo.cliente,
     consultor: { nome: novo.consultorNome, email: novo.consultorEmail },
-    emailCliente: novo.emailCliente,
+    raizCnpj: novo.raizCnpj,
     dataEnvio: novo.dataEnvio || null,
     observacoes: novo.observacoes,
   };
@@ -30705,10 +30703,35 @@ function finSalvarTap(item, campos, usuarioNome) {
   }
   return { ok: true, item: finAplicar(item, { tap: novoTap }, eventos, usuarioNome), eventos, resumo: depoisResumo };
 }
+/* Raiz do CNPJ (8 primeiros dígitos) do cliente, lida do CNPJ informado na etapa
+   Comercial do TAP. Identifica a empresa mesmo quando surgirem novas filiais. */
+/** finMascararRaizCnpj: aplica a máscara 00.000.000 enquanto digita (aceita colar o CNPJ
+ *  completo — usa os 8 primeiros dígitos). */
+function finMascararRaizCnpj(texto) {
+  const d = String(texto || "").replace(/\D/g, "").slice(0, 8);
+  if (d.length <= 2) return d;
+  if (d.length <= 5) return d.slice(0, 2) + "." + d.slice(2);
+  return d.slice(0, 2) + "." + d.slice(2, 5) + "." + d.slice(5);
+}
+function finRaizCnpjValida(texto) {
+  return String(texto || "").replace(/\D/g, "").length === 8;
+}
+function finRaizCnpj(it) {
+  const bruto = (it && (it.raizCnpj || (it.tap && it.tap.comercial && it.tap.comercial.cnpj) || it.cnpj)) || "";
+  const d = String(bruto).replace(/\D/g, "");
+  if (d.length < 8) return "";
+  return d.slice(0, 2) + "." + d.slice(2, 5) + "." + d.slice(5, 8);
+}
 function finFiltrar(items, f) {
   const filtro = f || {};
   return (items || []).filter((it) => {
-    if (filtro.cliente && !normalize(it.cliente || "").includes(normalize(filtro.cliente))) return false;
+    if (filtro.cliente) {
+      const q = normalize(filtro.cliente);
+      const qDig = filtro.cliente.replace(/\D/g, "");
+      const porNome = normalize(it.cliente || "").includes(q);
+      const porRaiz = qDig.length >= 2 && finRaizCnpj(it).replace(/\D/g, "").includes(qDig);
+      if (!porNome && !porRaiz) return false;
+    }
     if (filtro.consultor && it.consultor?.nome !== filtro.consultor) return false;
     if (filtro.status && it.status !== filtro.status) return false;
     if (filtro.emailFinanceiro && !normalize(it.emailFinanceiro || "").includes(normalize(filtro.emailFinanceiro))) return false;
@@ -30748,7 +30771,7 @@ function finDescreverEvento(ev) {
     case "modelo_disponibilizado":
       return { titulo: `Modelo oficial (versão ${ev.versao}) disponibilizado ao consultor.`, detalhe: null };
     case "enviado_ao_cliente":
-      return { titulo: `${quem} registrou o envio do modelo ao cliente (${ev.email}) em ${dataBR(ev.data)}.`, detalhe: null };
+      return { titulo: `${quem} registrou o envio do modelo ao cliente${ev.email ? ` (${ev.email})` : ""} em ${dataBR(ev.data)}.`, detalhe: null };
     case "resposta_recebida":
       return {
         titulo: `${quem} anexou a resposta do cliente (versão ${ev.versao}): “${ev.arquivo}” — recebida em ${dataBR(ev.data)}.${ev.reabriuStatus ? " O status voltou para “Resposta recebida”." : ""}`,
@@ -30892,7 +30915,7 @@ function finExecutarOperacao(item, chave, args, user) {
       action: op.audit,
       details: {
         cliente: item.cliente,
-        emailCliente: item.emailCliente,
+        raizCnpj: finRaizCnpj(item),
         ...(op.detalhes ? op.detalhes(res.item, args || {}, item) : {}),
       },
     },
@@ -30907,7 +30930,7 @@ function finExecutarCriacao(campos, user, modeloVersao) {
     item: res.item,
     audit: {
       action: "criou_solicitacao_financeira",
-      details: { cliente: res.item.cliente, emailCliente: res.item.emailCliente, consultor: res.item.consultor.nome },
+      details: { cliente: res.item.cliente, raizCnpj: res.item.raizCnpj, consultor: res.item.consultor.nome },
     },
   };
 }
@@ -31141,13 +31164,13 @@ function FinErro({ erro }) {
 }
 function FinNovaSolicitacaoModal({ currentUser, modeloVersao, onClose, onCriar }) {
   const [cliente, setCliente] = useState("");
-  const [emailCliente, setEmailCliente] = useState("");
+  const [raizCnpj, setRaizCnpj] = useState("");
   const [dataEnvio, setDataEnvio] = useState("");
   const [observacoes, setObservacoes] = useState("");
   const [erro, setErro] = useState(null);
   function handleSubmit(e) {
     e.preventDefault();
-    const res = onCriar({ cliente, emailCliente, dataEnvio, observacoes });
+    const res = onCriar({ cliente, raizCnpj, dataEnvio, observacoes });
     if (!res.ok) setErro(res.erro);
   }
   return finEl(
@@ -31165,8 +31188,8 @@ function FinNovaSolicitacaoModal({ currentUser, modeloVersao, onClose, onCriar }
       finEl(FinCampo, { rotulo: "Cliente" }, finEl("input", { type: "text", value: cliente, onChange: (e) => setCliente(e.target.value), placeholder: "Razão social ou nome fantasia do cliente", autoFocus: true })),
       finEl(
         FinCampo,
-        { rotulo: "E-mail(s) do cliente", dica: " (obrigatório — para mais de um, separe com ponto e vírgula)" },
-        finEl("input", { type: "text", inputMode: "email", value: emailCliente, onChange: (e) => setEmailCliente(e.target.value), placeholder: "E-mail(s) para o qual o modelo foi enviado", autoComplete: "off" }),
+        { rotulo: "Raiz do CNPJ", dica: " (obrigatório — 8 primeiros dígitos, comuns a todas as filiais do cliente)" },
+        finEl("input", { type: "text", inputMode: "numeric", value: raizCnpj, onChange: (e) => setRaizCnpj(finMascararRaizCnpj(e.target.value)), placeholder: "00.000.000", maxLength: 10, autoComplete: "off", "data-testid": "nova-raiz-cnpj" }),
       ),
       finEl(
         FinCampo,
@@ -31189,7 +31212,7 @@ function FinRegistrarEnvioModal({ item, onClose, onConfirmar }) {
   }
   return finEl(
     FinModal,
-    { titulo: "Registrar envio ao cliente", subtitulo: `${item.cliente} · ${item.emailCliente}`, icon: finEl(Mail, { size: 16 }), onClose },
+    { titulo: "Registrar envio ao cliente", subtitulo: finRaizCnpj(item) ? `${item.cliente} · Raiz do CNPJ ${finRaizCnpj(item)}` : item.cliente, icon: finEl(Mail, { size: 16 }), onClose },
     finEl(
       "form",
       { onSubmit: handleSubmit },
@@ -31324,7 +31347,7 @@ function FinEditarModal({ item, onClose, onConfirmar }) {
     cliente: item.cliente || "",
     consultorNome: item.consultor?.nome || "",
     consultorEmail: item.consultor?.email || "",
-    emailCliente: item.emailCliente || "",
+    raizCnpj: finRaizCnpj(item),
     dataEnvio: item.dataEnvio || "",
     emailFinanceiro: item.emailFinanceiro || "",
     observacoes: item.observacoes || "",
@@ -31346,7 +31369,7 @@ function FinEditarModal({ item, onClose, onConfirmar }) {
       finEl(FinCampo, { rotulo: "Cliente" }, finEl("input", { type: "text", value: v.cliente, onChange: set("cliente") })),
       finEl(FinCampo, { rotulo: "Consultor responsável" }, finEl("input", { type: "text", value: v.consultorNome, onChange: set("consultorNome") })),
       finEl(FinCampo, { rotulo: "E-mail do consultor", dica: " (opcional)" }, finEl("input", { type: "text", value: v.consultorEmail, onChange: set("consultorEmail") })),
-      finEl(FinCampo, { rotulo: "E-mail(s) do cliente", dica: " (separe com ponto e vírgula)" }, finEl("input", { type: "text", value: v.emailCliente, onChange: set("emailCliente") })),
+      finEl(FinCampo, { rotulo: "Raiz do CNPJ", dica: " (8 dígitos)" }, finEl("input", { type: "text", inputMode: "numeric", value: v.raizCnpj, maxLength: 10, placeholder: "00.000.000", onChange: (e) => setV((prev) => ({ ...prev, raizCnpj: finMascararRaizCnpj(e.target.value) })) })),
       finEl(FinCampo, { rotulo: "Data do envio" }, finEl("input", { type: "date", value: v.dataEnvio, max: finHojeIso(), onChange: set("dataEnvio") })),
       temEncaminhamento && finEl(FinCampo, { rotulo: "E-mail(s) do Financeiro (último encaminhamento)", dica: " (separe com ponto e vírgula)" }, finEl("input", { type: "text", value: v.emailFinanceiro, onChange: set("emailFinanceiro") })),
       finEl(FinCampo, { rotulo: "Observações" }, finEl("textarea", { value: v.observacoes, onChange: set("observacoes") })),
@@ -31902,7 +31925,7 @@ function FinanceiroView({ currentUser, onNotify, onView }) {
         delete removidosRef.current[id];
         onNotify?.("Não foi possível excluir agora. Atualize a página e tente novamente.", "error");
       });
-    logDocumentAction("excluiu_solicitacao_financeira", { cliente: item.cliente, emailCliente: item.emailCliente });
+    logDocumentAction("excluiu_solicitacao_financeira", { cliente: item.cliente, raizCnpj: finRaizCnpj(item) });
     onNotify?.(`Solicitação de "${item.cliente}" foi excluída.`, "info");
   }
   const selecionado = selectedId ? items.find((it) => it.id === selectedId) : null;
@@ -31994,7 +32017,7 @@ function FinanceiroView({ currentUser, onNotify, onView }) {
         finEl(
           "thead",
           null,
-          finEl("tr", null, ["Data", "Cliente", "Consultor", "E-mail do cliente", "Status", "Retorno do cliente", "Financeiro", "Última atualização", "Ação"].map((t) => finEl("th", { key: t }, t))),
+          finEl("tr", null, ["Data", "Cliente", "Consultor", "Raiz do CNPJ", "Status", "Retorno do cliente", "Financeiro", "Última atualização", "Ação"].map((t) => finEl("th", { key: t }, t))),
         ),
         finEl(
           "tbody",
@@ -32006,7 +32029,7 @@ function FinanceiroView({ currentUser, onNotify, onView }) {
               finEl("td", { className: "mono" }, isoDateToBR((it.criadoEm || "").slice(0, 10))),
               finEl("td", null, it.cliente),
               finEl("td", null, it.consultor?.nome),
-              finEl("td", { className: "fin-cell-email", title: it.emailCliente }, finEmailsEl(it.emailCliente)),
+              finEl("td", { className: "mono", "data-testid": "fin-raiz-cnpj" }, finRaizCnpj(it) || "—"),
               finEl("td", null, finEl(FinStatusBadge, { status: it.status })),
               finEl("td", { className: "fin-cell-retorno", onClick: (e) => e.stopPropagation() }, finRetornoCliente(it, { onView, onNotify })),
               finEl("td", { className: "fin-cell-email", title: it.emailFinanceiro || "" }, finEmailsEl(it.emailFinanceiro)),
@@ -32028,7 +32051,7 @@ function FinanceiroView({ currentUser, onNotify, onView }) {
           { key: it.id, className: "company-card-mobile", onClick: () => setSelectedId(it.id) },
           finEl("div", { className: "company-card-mobile-top" }, finEl("span", { className: "company-mini-tag" }, it.cliente), finEl(FinStatusBadge, { status: it.status })),
           finEl("div", { className: "company-card-mobile-row" }, finEl("span", null, "Consultor"), finEl("span", null, it.consultor?.nome)),
-          finEl("div", { className: "company-card-mobile-row" }, finEl("span", null, "E-mail do cliente"), finEl("span", { className: "fin-cell-email" }, finEmailsEl(it.emailCliente))),
+          finEl("div", { className: "company-card-mobile-row" }, finEl("span", null, "Raiz do CNPJ"), finEl("span", { className: "mono" }, finRaizCnpj(it) || "—")),
           finEl("div", { className: "company-card-mobile-row", onClick: (e) => e.stopPropagation() }, finEl("span", null, "Retorno do cliente"), finEl("span", { className: "fin-cell-retorno" }, finRetornoCliente(it, { onView, onNotify }))),
           finEl("div", { className: "company-card-mobile-row" }, finEl("span", null, "Financeiro"), finEl("span", { className: "fin-cell-email" }, finEmailsEl(it.emailFinanceiro))),
           finEl("div", { className: "company-card-mobile-row" }, finEl("span", null, "Atualizada"), finEl("span", null, formatAuditWhen(new Date(finUltimaAtualizacao(it))))),
