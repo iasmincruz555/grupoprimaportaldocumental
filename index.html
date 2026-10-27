@@ -1506,6 +1506,25 @@ function isEnderecoQuery(text) {
   const nq = normalize(text);
   return /endere[cç]|localiza[cç][aã]o|onde fica|onde fic(a|am)/.test(nq);
 }
+/** isListaFiliaisQuery: "quais as nossas filiais", "nossas bases", "bases filiais",
+ *  "filiais"... — pedido para LISTAR as unidades (só cidade/UF; endereço, CNPJ,
+ *  documentos etc. continuam nos outros fluxos). Pedido da Iasmin, 2026-10-27. */
+function isListaFiliaisQuery(text) {
+  const nq = normalize(text).replace(/[?!.,;:]+/g, " ").replace(/\s+/g, " ").trim();
+  if (!/\b(filiais|filial|bases|base|unidades|unidade)\b/.test(nq)) return false;
+  if (/endere|localiza|onde fic|cnpj|document|cartao|alvara|contrato|licenc|seguro|telefone|e-?mail|contato|venc|abertura|situacao|certid|apolice|inscri|versao|zip|lote|homolog|quantas|quantos|faltando|falta/.test(nq)) return false;
+  if (/\b(quais|qual|liste|lista|listar|cite|diga|diz|fale|fala|mostre|mostra|mostrar|me d[eê]|onde temos|onde tem)\b/.test(nq)) return true;
+  return nq.split(" ").length <= 4;
+}
+function formatListaFiliaisResposta(companies) {
+  const lista = companies || [];
+  const matriz = lista.find((c) => c.tipo === "Matriz");
+  const filiais = lista.filter((c) => c.tipo !== "Matriz");
+  const linhas = [];
+  if (matriz) linhas.push(`Matriz: ${matriz.municipio}/${matriz.uf}`);
+  filiais.forEach((c) => linhas.push(`${c.municipio}/${c.uf}`));
+  return linhas.join("\n");
+}
 /** formatCnpjsResposta: mesmo espírito de `formatEnderecosResposta`, mas
  *  para CNPJ — uma base só devolve uma frase; várias, uma lista com
  *  cabeçalho. Reaproveita o `company.cnpj` real (já usado em `answerQuery`
@@ -1895,10 +1914,11 @@ function assetIssueMessage(reason) {
   }
 }
 async function tryPersistUploadedFile(file, opts) {
-  const MAX_BYTES = 20 * 1024 * 1024;
+  const MAX_BYTES = opts && opts.maxBytes ? opts.maxBytes : 20 * 1024 * 1024;
   const pastaDestino = opts && opts.pasta ? String(opts.pasta) : null;
+  const tentativas = opts && opts.tentativas ? opts.tentativas : 1;
   if (file.size > MAX_BYTES)
-    return { ok: false, reason: "arquivo_grande_demais" };
+    return { ok: false, reason: "arquivo_grande_demais", tamanho: file.size, limite: MAX_BYTES };
   // Backend próprio (Cloud Run): tentado PRIMEIRO — sobe o binário de
   // verdade para a pasta oficial do Drive via POST /api/documents/upload-file
   // e devolve um driveFileId real, que passa a ser o identificador
@@ -1907,33 +1927,42 @@ async function tryPersistUploadedFile(file, opts) {
   // em qualquer hospedagem, inclusive fora do claude.ai — é o caminho real
   // hoje. `backendTentado` só ajusta a mensagem de erro final quando não
   // há nenhum caminho disponível (ver abaixo). */ let backendTentado = false;
+  let falhaBackend = null;
   if (DRIVE_PROXY_URL) {
     backendTentado = true;
-    try {
-      const formData = new FormData();
-      formData.append("arquivo", file, file.name);
-      if (pastaDestino) formData.append("pasta", pastaDestino);
-      const resp = await fetch(`${DRIVE_PROXY_URL}/api/documents/upload-file`, {
-        method: "POST",
-        headers: DRIVE_PROXY_KEY ? { "X-Portal-Key": DRIVE_PROXY_KEY } : {},
-        body: formData,
-      });
-      if (resp.ok) {
-        const data = await resp.json();
-        return {
-          ok: true,
-          driveFileId: data.driveFileId,
-          mimeType: data.mimeType,
-          sizeBytes: data.tamanho,
-        };
+    for (let tentativa = 1; tentativa <= tentativas; tentativa++) {
+      try {
+        const formData = new FormData();
+        formData.append("arquivo", file, file.name);
+        if (pastaDestino) formData.append("pasta", pastaDestino);
+        const resp = await fetch(`${DRIVE_PROXY_URL}/api/documents/upload-file`, {
+          method: "POST",
+          headers: DRIVE_PROXY_KEY ? { "X-Portal-Key": DRIVE_PROXY_KEY } : {},
+          body: formData,
+        });
+        if (resp.ok) {
+          const data = await resp.json();
+          return {
+            ok: true,
+            driveFileId: data.driveFileId,
+            mimeType: data.mimeType,
+            sizeBytes: data.tamanho,
+          };
+        }
+        if (resp.status === 400) return { ok: false, reason: "formato_nao_suportado" };
+        let detalhe = "";
+        try {
+          const j = await resp.json();
+          detalhe = (j && (j.detalhe || j.erro)) || "";
+        } catch (e2) {}
+        falhaBackend = { reason: "falha_upload", status: resp.status, detalhe };
+        if (resp.status === 413 || resp.status < 500) break;
+      } catch (e) {
+        falhaBackend = { reason: "falha_upload", status: 0, detalhe: "sem conexão com o servidor" };
       }
-      if (resp.status === 400) return { ok: false, reason: "formato_nao_suportado" };
-      return { ok: false, reason: "falha_upload" };
-    } catch (e) {
-      // Backend indisponível agora (rede, serviço fora do ar) — cai para a
-      // capability "assets" abaixo, quando existir (prévia dentro do
-      // Artifact). Nunca finge sucesso.
+      if (tentativa < tentativas) await new Promise((r) => setTimeout(r, 1500 * tentativa));
     }
+    if (falhaBackend && !(await getAssetsCapability())) return { ok: false, ...falhaBackend };
   }
   // Capability "assets" do Artifact: só como alternativa, quando este
   // arquivo é reaberto como prévia dentro do claude.ai (ou o backend
@@ -4443,7 +4472,11 @@ const RE_TEXTO_BOMBEIROS = /\bavcb\b|\bavbc\b|\bclcb\b|bombeiros?|atestado de vi
     {
       key: "cnpj",
       label: "Cartão CNPJ",
-      match: /cart[a]o cnpj|comprovante de inscri[c]ao|situa[c]ao cadastral/,
+      // "comprovante de inscrição ESTADUAL/MUNICIPAL" (ex.: item "h) Comprovante de
+      // inscrição estadual;" de um checklist de cliente) é Inscrição Estadual/
+      // Municipal, NÃO Cartão CNPJ — só o "comprovante de inscrição no CNPJ"
+      // (ou sem qualificador) é o cartão. Bug relatado pela Iasmin, 2026-10-27.
+      match: /cart[a]o cnpj|comprovante de inscri[c]ao(?! (estadual|municipal|no cadastro de contribuinte|no cadastro estadual|no cadastro municipal))|situa[c]ao cadastral/,
     }, // Documentos societários deixaram de ser tratados todos genericamente como
     // "Contrato Social" (pedido explícito): cada subtipo tem seu próprio
     // rótulo. Ordem importa — os mais específicos vêm ANTES do "Contrato
@@ -13264,6 +13297,13 @@ function ChatDrawer({
         type: "text",
         text: answerPortalQuestion(text),
       });
+      return;
+    }
+    // Lista das filiais (só cidade/UF) — "quais são nossas filiais", "bases
+    // filiais"... (pedido da Iasmin, 2026-10-27); endereço/CNPJ/documentos
+    // continuam nos fluxos abaixo.
+    if (isListaFiliaisQuery(text) && companies && companies.length > 0) {
+      pushMessage({ role: "assistant", type: "text", text: formatListaFiliaisResposta(companies) });
       return;
     }
     // Endereço das bases (pedido explícito da Iasmin, 2026-09-23) — checado
@@ -25028,6 +25068,15 @@ function pastaLoteParaSolicitacao(cliente, id) {
  *  formato que matchChecklistItemToCompany espera (`descricaoOriginal`) —
  *  nenhuma lógica de cruzamento é duplicada, só um adaptador de campo. */
 function loteItemParaMatch(item) {
+  // Itens já salvos antes da correção de 2026-10-27 podem ter "Cartão CNPJ" gravado
+  // para "Comprovante de inscrição estadual/municipal": reavalia o tipo pelo texto
+  // do pedido quando ele NÃO sustenta "Cartão CNPJ" mas sustenta outro tipo.
+  if (item.tipoSugerido === "Cartão CNPJ" && item.nome) {
+    const tipos = detectRequestedTypes(item.nome);
+    if (tipos.length > 0 && !tipos.some((t) => t.label === "Cartão CNPJ")) {
+      item = { ...item, tipoSugerido: tipos[0].label };
+    }
+  }
   return {
     tipoSugerido: item.tipoSugerido,
     categoriaSugerida: item.categoriaSugerida,
@@ -25508,13 +25557,24 @@ async function processarLote(solicitacao, { companies, usuarioProcessamento, dep
   const zipFile = new File([blob], pkg.zipName, { type: "application/zip" });
   const uploadRes = await _tryPersistUploadedFile(zipFile, {
     pasta: pastaLoteParaSolicitacao(solicitacao.cliente, solicitacao.id),
+    maxBytes: 30 * 1024 * 1024,
+    tentativas: 3,
   });
   if (!uploadRes.ok) {
-    return falhar(
-      "armazenamento",
-      "Não foi possível salvar o ZIP gerado no repositório agora — tente novamente em instantes.",
-      itensAtualizados,
-    );
+    const mb = (zipFile.size / (1024 * 1024)).toFixed(1).replace(".", ",");
+    let motivo;
+    if (uploadRes.reason === "arquivo_grande_demais" || uploadRes.status === 413) {
+      motivo = `O ZIP gerado tem ${mb} MB e passa do limite de envio ao repositório (30 MB). Divida as documentações em dois envios menores.`;
+    } else if (uploadRes.status === 401 || uploadRes.status === 403) {
+      motivo = "O servidor recusou o envio (chave de acesso do portal inválida ou expirada).";
+    } else if (uploadRes.status === 0) {
+      motivo = "Sem conexão com o servidor do repositório. Verifique a internet e tente novamente.";
+    } else if (uploadRes.status) {
+      motivo = `O Drive/servidor retornou erro (HTTP ${uploadRes.status}${uploadRes.detalhe ? ": " + uploadRes.detalhe : ""}) ao salvar o ZIP de ${mb} MB, mesmo após 3 tentativas. Tente novamente em alguns minutos.`;
+    } else {
+      motivo = "Não foi possível salvar o ZIP gerado no repositório agora — tente novamente em instantes.";
+    }
+    return falhar("armazenamento", motivo, itensAtualizados);
   }
   marcarEtapa("armazenamento", "ok");
   const novaVersao = {
