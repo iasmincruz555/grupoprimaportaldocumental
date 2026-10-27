@@ -25152,6 +25152,10 @@ function EnvioLoteStyles() {
       .lote-item-row:last-child { border-bottom: none; }
       .lote-item-row-head { display:flex; align-items:center; gap:7px; width:100%; background:none; border:none; padding:2px 0; margin:0; cursor:pointer; text-align:left; font:inherit; color:inherit; }
       .lote-item-row-head:hover .lote-item-titulo { color: var(--texto); }
+      .lote-item-headline { display:flex; align-items:center; gap:8px; }
+      .lote-item-headline .lote-item-row-head { flex: 1 1 auto; min-width: 0; width: auto; }
+      .lote-item-edit-btn { flex-shrink: 0; padding: 3px 9px; font-size: 11.5px; }
+      .lote-item-selmanual { color: var(--azul, #2E7DA6); opacity: 1; font-weight: 700; }
       .lote-item-chevron { color: var(--carvao); opacity:0.55; flex-shrink:0; }
       .lote-item-titulo { font-size: 12.5px; font-weight: 700; color: var(--texto); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex: 1 1 auto; min-width: 0; }
       .lote-item-origem { font-size: 9.5px; color: var(--carvao); opacity:0.65; text-transform: uppercase; letter-spacing: 0.03em; flex-shrink:0; }
@@ -25268,6 +25272,11 @@ function analisarLote(solicitacao, { companies, permitirVencidos, excluirDocIds 
     // as filiais selecionadas"). `statusPorBase` continua sendo marcado pra
     // CADA base normalmente logo abaixo (cada base realmente "tem" esse
     // documento) — só a entrada no ZIP é que nunca duplica o mesmo `id`.
+    // Seleção manual (2026-10-27, pedido da Iasmin): `item.docsEscolhidos` guarda os ids
+    // dos documentos que ela escolheu ao editar a documentação solicitada (ex.: só UMA
+    // alteração contratual em vez de todas). Vazio/ausente = automático (todos os
+    // encontrados). Se nenhum dos escolhidos existir mais no catálogo, volta ao automático.
+    const escolhidosDoItem = Array.isArray(item.docsEscolhidos) && item.docsEscolhidos.length > 0 ? new Set(item.docsEscolhidos) : null;
     const idsCorporativosJaIncluidos = new Set();
     function pushResolvido(doc, baseLabel) {
       const ehCorporativo = doc.abrangencia === "empresa" || doc.abrangencia === "corporativa";
@@ -25320,7 +25329,11 @@ function analisarLote(solicitacao, { companies, permitirVencidos, excluirDocIds 
           statusPorBase[baseId] = "pendente";
         }
       } else if (r.status === "grupo" || r.status === "ambiguo") {
-        const candidatosPermitidos = r.candidatos.filter(docPermitido);
+        let candidatosPermitidos = r.candidatos.filter(docPermitido);
+        if (escolhidosDoItem) {
+          const soEscolhidos = candidatosPermitidos.filter((d) => escolhidosDoItem.has(d.id));
+          if (soEscolhidos.length > 0) candidatosPermitidos = soEscolhidos;
+        }
         if (candidatosPermitidos.length > 0) {
           algumRecebivel = true;
           candidatosPermitidos.forEach((doc) => pushResolvido(doc, company ? companyLabelFor(company) : ""));
@@ -26142,7 +26155,7 @@ function LoteItemBaseRow({ item, baseId, company, statusAtual, anexo, onUsarEnco
  *  com print): a lista ficava grande e repetitiva quando praticamente tudo
  *  já tinha sido recebido — não faz sentido mostrar 7 linhas de "Recebido"
  *  por extenso quando um resumo de uma linha já diz tudo. */
-function LoteItemCard({ it, companiesPorId, anexosRecebidos, enviandoAnexoChave, onUsarEncontrado, onAnexar, onRemoverAnexo, onAlterarStatus, onVer, onBaixar }) {
+function LoteItemCard({ it, companiesPorId, anexosRecebidos, enviandoAnexoChave, onUsarEncontrado, onAnexar, onRemoverAnexo, onAlterarStatus, onVer, onBaixar, onEditar }) {
   const baseIds = Object.keys(it.statusPorBase || {});
   const resolvido = (st) => st === "recebido" || st === "conferido" || st === "nao_aplicavel";
   const statuses = baseIds.map((b) => it.statusPorBase[b]);
@@ -26157,12 +26170,24 @@ function LoteItemCard({ it, companiesPorId, anexosRecebidos, enviandoAnexoChave,
     "div",
     { className: "lote-item-row" },
     React.createElement(
-      "button",
-      { type: "button", className: "lote-item-row-head", onClick: () => setExpanded((v) => !v) },
-      React.createElement(expanded ? ChevronDown : ChevronRight, { size: 14, className: "lote-item-chevron" }),
-      React.createElement("span", { className: "lote-item-titulo" }, it.nome),
-      React.createElement("span", { className: "lote-item-origem" }, it.origem === "manual" ? "manual" : "checklist"),
-      React.createElement("span", { className: "lote-item-resumo" }, resumo),
+      "div",
+      { className: "lote-item-headline" },
+      React.createElement(
+        "button",
+        { type: "button", className: "lote-item-row-head", onClick: () => setExpanded((v) => !v) },
+        React.createElement(expanded ? ChevronDown : ChevronRight, { size: 14, className: "lote-item-chevron" }),
+        React.createElement("span", { className: "lote-item-titulo" }, it.nome),
+        React.createElement("span", { className: "lote-item-origem" }, it.origem === "manual" ? "manual" : "checklist"),
+        Array.isArray(it.docsEscolhidos) && it.docsEscolhidos.length > 0 && React.createElement("span", { className: "lote-item-origem lote-item-selmanual", title: "Documentos escolhidos manualmente" }, "seleção manual"),
+        React.createElement("span", { className: "lote-item-resumo" }, resumo),
+      ),
+      onEditar &&
+        React.createElement(
+          "button",
+          { type: "button", className: "mini-download-btn lote-item-edit-btn", onClick: () => onEditar(it.id), "aria-label": `Editar ${it.nome}`, "data-testid": "lote-item-editar" },
+          React.createElement(Pencil, { size: 12 }),
+          " Editar",
+        ),
     ),
     expanded &&
       React.createElement(
@@ -26189,6 +26214,130 @@ function LoteItemCard({ it, companiesPorId, anexosRecebidos, enviandoAnexoChave,
       ),
   );
 }
+/** LoteItemEditModal: edita UMA documentação solicitada de um envio em lote —
+ *  (1) descrição do pedido e (2) quais dos documentos encontrados entram (ex.:
+ *  só uma alteração contratual). Pedido da Iasmin, 2026-10-27. Os candidatos são
+ *  recalculados AO VIVO com a mesma função do processamento
+ *  (matchChecklistItemToCompany). Salvar grava `nome`/`tipoSugerido`/`docsEscolhidos`
+ *  no item; "Salvar e reprocessar" abre em seguida a pré-visualização do ZIP. */
+function LoteItemEditModal({ it, companiesPorId, onClose, onSalvar }) {
+  const [nome, setNome] = useState(it.nome || "");
+  const nomeAlterado = nome.trim() !== (it.nome || "").trim();
+  const tipoNovo = useMemo(() => {
+    if (!nomeAlterado) return it.tipoSugerido || null;
+    const t = tiposDistintosParaChecklist(nome.trim());
+    return (t[0] && t[0].label) || null;
+  }, [nome, nomeAlterado, it.tipoSugerido]);
+  const candidatos = useMemo(() => {
+    const porId = new Map();
+    Object.keys(it.statusPorBase || {}).forEach((baseId) => {
+      if (it.statusPorBase[baseId] === "nao_aplicavel") return;
+      const company = companiesPorId.get(baseId);
+      if (!company) return;
+      const r = matchChecklistItemToCompany(
+        loteItemParaMatch({ ...it, nome: nome.trim() || it.nome, tipoSugerido: tipoNovo, categoriaSugerida: nomeAlterado ? null : it.categoriaSugerida }),
+        company,
+      );
+      const docs = r.status === "encontrado" ? [r.doc] : r.status === "grupo" || r.status === "ambiguo" ? r.candidatos : [];
+      docs.forEach((d) => {
+        const atual = porId.get(d.id) || { doc: d, bases: [] };
+        const label = companyLabelFor(company);
+        if (label && !atual.bases.includes(label)) atual.bases.push(label);
+        porId.set(d.id, atual);
+      });
+    });
+    return [...porId.values()];
+  }, [it, nome, tipoNovo, nomeAlterado, companiesPorId]);
+  const [selecionados, setSelecionados] = useState(() => (Array.isArray(it.docsEscolhidos) && it.docsEscolhidos.length > 0 ? new Set(it.docsEscolhidos) : null));
+  // null = automático (todos os encontrados marcados)
+  const marcado = (id) => (selecionados === null ? true : selecionados.has(id));
+  function alternar(id) {
+    const base = selecionados === null ? new Set(candidatos.map((c) => c.doc.id)) : new Set(selecionados);
+    if (base.has(id)) base.delete(id);
+    else base.add(id);
+    setSelecionados(base);
+  }
+  const idsMarcados = candidatos.map((c) => c.doc.id).filter(marcado);
+  const todosMarcados = candidatos.length > 0 && idsMarcados.length === candidatos.length;
+  const semNenhum = candidatos.length > 0 && idsMarcados.length === 0;
+  const nomeVazio = nome.trim() === "";
+  function salvar(reprocessar) {
+    if (nomeVazio || semNenhum) return;
+    onSalvar(
+      {
+        nome: nome.trim(),
+        tipoSugerido: tipoNovo,
+        categoriaSugerida: nomeAlterado ? null : it.categoriaSugerida || null,
+        docsEscolhidos: todosMarcados || candidatos.length === 0 ? null : idsMarcados,
+      },
+      reprocessar,
+    );
+  }
+  return React.createElement(
+    "div",
+    { className: "docs-modal-overlay", onClick: onClose },
+    React.createElement(
+      "div",
+      { className: "docs-modal homolog-form-modal lote-previa-modal", "data-testid": "lote-item-edit-modal", onClick: (e) => e.stopPropagation() },
+      React.createElement(
+        "div",
+        { className: "docs-modal-head" },
+        React.createElement(
+          "div",
+          null,
+          React.createElement("div", { className: "docs-modal-title" }, React.createElement(Pencil, { size: 16 }), " Editar documentação solicitada"),
+          React.createElement("div", { className: "docs-modal-sub" }, "Ajuste o pedido e escolha quais documentos encontrados entram no ZIP."),
+        ),
+        React.createElement("button", { className: "icon-btn-dark", onClick: onClose, "aria-label": "Fechar" }, React.createElement(X, { size: 18 })),
+      ),
+      React.createElement(
+        "div",
+        { className: "docs-modal-body" },
+        React.createElement(
+          "label",
+          { className: "homolog-field" },
+          React.createElement("span", null, "Descrição do pedido"),
+          React.createElement("input", { type: "text", value: nome, onChange: (e) => setNome(e.target.value), "data-testid": "lote-item-edit-nome" }),
+          nomeAlterado && React.createElement("small", { className: "homolog-bases-hint" }, tipoNovo ? `Tipo reconhecido: ${tipoNovo}. A seleção de documentos é refeita.` : "Tipo de documento não reconhecido neste texto."),
+        ),
+        React.createElement(
+          "div",
+          { className: "lote-previa-toolbar", style: { marginTop: 10 } },
+          React.createElement("span", { className: "lote-previa-contador" }, candidatos.length === 0 ? "Nenhum documento encontrado no catálogo para este pedido." : `${idsMarcados.length} de ${candidatos.length} documento(s) selecionado(s)${selecionados === null ? " (automático)" : ""}`),
+          candidatos.length > 1 &&
+            React.createElement("button", { type: "button", className: "mini-download-btn", onClick: () => setSelecionados(null) }, "Usar todos (automático)"),
+          candidatos.length > 1 &&
+            React.createElement("button", { type: "button", className: "mini-download-btn", onClick: () => setSelecionados(new Set()) }, "Desmarcar todos"),
+        ),
+        candidatos.map((c) =>
+          React.createElement(
+            "label",
+            { key: c.doc.id, className: "lote-previa-linha" + (marcado(c.doc.id) ? "" : " desmarcado"), "data-testid": "lote-item-edit-doc" },
+            React.createElement("input", { type: "checkbox", checked: marcado(c.doc.id), onChange: () => alternar(c.doc.id), "aria-label": `Usar ${docTituloExibido(c.doc)}` }),
+            React.createElement(
+              "div",
+              { className: "lote-previa-info" },
+              React.createElement("span", { className: "homolog-anexo-nome" }, docTituloExibido(c.doc)),
+              React.createElement(
+                "div",
+                { className: "lote-previa-meta" },
+                [c.bases.join(", "), c.doc.emissao ? `emissão ${c.doc.emissao}` : null, c.doc.versao || null, c.doc.status === "vencido" ? "vencido" : null].filter(Boolean).join(" · "),
+              ),
+            ),
+          ),
+        ),
+        semNenhum && React.createElement("div", { className: "lote-previa-vencido lote-previa-naoenc" }, React.createElement(AlertTriangle, { size: 12 }), " Marque ao menos um documento."),
+      ),
+      React.createElement(
+        "div",
+        { className: "homolog-form-actions", style: { padding: "12px 16px" } },
+        React.createElement("button", { type: "button", className: "filters-clear-btn", onClick: onClose, style: { flex: "none" } }, "Cancelar"),
+        React.createElement("button", { type: "button", className: "mini-download-btn", disabled: nomeVazio || semNenhum, onClick: () => salvar(false), "data-testid": "lote-item-edit-salvar" }, "Salvar"),
+        React.createElement("button", { type: "button", className: "doc-download-btn", disabled: nomeVazio || semNenhum, onClick: () => salvar(true), "data-testid": "lote-item-edit-reprocessar" }, "Salvar e reprocessar"),
+      ),
+    ),
+  );
+}
 /** EnvioLoteDetailView: tela de UMA solicitação — documentações solicitadas
  *  (uma linha por item, expandida por base), compilado da documentação
  *  (contadores derivados ao vivo), etapas do último processamento,
@@ -26209,6 +26358,11 @@ function EnvioLoteDetailView({ item, companies, onBack, onNotify, onView, onUpda
   // solicitadas" logo abaixo). Disponível pra qualquer perfil que já pode
   // ver a solicitação (não é uma ação administrativa como excluir).
   const [verOriginalOpen, setVerOriginalOpen] = useState(false);
+  // itemEditandoId: documentação solicitada aberta no modal "Editar" (2026-10-27);
+  // reprocessarAposRef: depois de "Salvar e reprocessar", espera o registro atualizado
+  // chegar e então abre a pré-visualização do ZIP (handleProcessar).
+  const [itemEditandoId, setItemEditandoId] = useState(null);
+  const reprocessarAposRef = useRef(null);
   // vencidosPendentes/vencidosSelecionados (2026-09-30, pedido explícito da
   // Iasmin: "quando for solicitado algum documento que esteja vencido no
   // envio de documentação em lote, adicione um aviso sobre o vencimento e
@@ -26242,6 +26396,33 @@ function EnvioLoteDetailView({ item, companies, onBack, onNotify, onView, onUpda
   function persistPatch(patch) {
     onUpdate(patch);
   }
+  function handleSalvarItemEditado(itemId, campos, reprocessar) {
+    const documentacoesSolicitadas = item.documentacoesSolicitadas.map((it) => {
+      if (it.id !== itemId) return it;
+      const novo = { ...it, nome: campos.nome, tipoSugerido: campos.tipoSugerido, categoriaSugerida: campos.categoriaSugerida };
+      if (campos.docsEscolhidos && campos.docsEscolhidos.length > 0) novo.docsEscolhidos = campos.docsEscolhidos;
+      else delete novo.docsEscolhidos;
+      return novo;
+    });
+    persistPatch({ documentacoesSolicitadas, status: computeLoteStatusGeral(documentacoesSolicitadas) });
+    logDocumentAction("editou_documentacao_lote", {
+      cliente: item.cliente,
+      documento: campos.nome,
+      selecao: campos.docsEscolhidos && campos.docsEscolhidos.length > 0 ? `${campos.docsEscolhidos.length} documento(s) escolhido(s)` : "automática",
+    });
+    setItemEditandoId(null);
+    if (reprocessar) reprocessarAposRef.current = { itemId, sig: JSON.stringify([campos.nome, campos.docsEscolhidos || null]) };
+    else onNotify?.("Documentação atualizada. Use \"Processar\" para gerar o ZIP novamente com a nova seleção.", "info");
+  }
+  useEffect(() => {
+    const pend = reprocessarAposRef.current;
+    if (!pend) return;
+    const atual = (item.documentacoesSolicitadas || []).find((x) => x.id === pend.itemId);
+    if (atual && JSON.stringify([atual.nome, atual.docsEscolhidos || null]) === pend.sig) {
+      reprocessarAposRef.current = null;
+      handleProcessar();
+    }
+  }, [item]);
   async function handleExcluir() {
     setExcluindo(true);
     await onDelete?.(item.id);
@@ -26993,8 +27174,18 @@ function EnvioLoteDetailView({ item, companies, onBack, onNotify, onView, onUpda
           onAlterarStatus: alterarStatus,
           onVer: handleVer,
           onBaixar: handleBaixar,
+          onEditar: item.status === "processando" ? null : setItemEditandoId,
         }),
       ),
+      itemEditandoId &&
+        (item.documentacoesSolicitadas || []).some((x) => x.id === itemEditandoId) &&
+        React.createElement(LoteItemEditModal, {
+          key: itemEditandoId,
+          it: item.documentacoesSolicitadas.find((x) => x.id === itemEditandoId),
+          companiesPorId,
+          onClose: () => setItemEditandoId(null),
+          onSalvar: (campos, reprocessar) => handleSalvarItemEditado(itemEditandoId, campos, reprocessar),
+        }),
       React.createElement(
         "div",
         { style: { display: "flex", gap: 8, marginTop: 8 } },
