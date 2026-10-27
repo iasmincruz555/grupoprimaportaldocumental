@@ -25154,6 +25154,8 @@ function EnvioLoteStyles() {
       .lote-item-row-head:hover .lote-item-titulo { color: var(--texto); }
       .lote-item-headline { display:flex; align-items:center; gap:8px; }
       .lote-item-headline .lote-item-row-head { flex: 1 1 auto; min-width: 0; width: auto; }
+      .lote-anexo-linha { display:flex; align-items:center; gap:6px; flex-wrap:wrap; max-width:100%; }
+      .lote-anexo-linha .homolog-anexo-nome { overflow-wrap:anywhere; }
       .lote-item-edit-btn { flex-shrink: 0; padding: 3px 9px; font-size: 11.5px; }
       .lote-item-selmanual { color: var(--azul, #2E7DA6); opacity: 1; font-weight: 700; }
       .lote-item-chevron { color: var(--carvao); opacity:0.55; flex-shrink:0; }
@@ -25290,30 +25292,33 @@ function analisarLote(solicitacao, { companies, permitirVencidos, excluirDocIds 
       const stAtual = statusPorBase[baseId];
       if (stAtual === "nao_aplicavel") return;
       const company = companiesPorId.get(baseId);
-      const anexo = (solicitacao.anexosRecebidos || []).find(
+      // Vários arquivos podem ser anexados ao mesmo item×base (2026-10-27).
+      const anexosDoItemBase = (solicitacao.anexosRecebidos || []).filter(
         (a) => a.itemAssociadoId === item.id && a.baseId === baseId,
       );
-      if (anexo) {
+      if (anexosDoItemBase.length > 0) {
         algumRecebivel = true;
-        anexosConsumidos.add(anexo.id);
-        // Desmarcado na pré-visualização do ZIP: não entra no pacote, mas o
-        // anexo continua registrado na solicitação (nada é apagado).
-        if (excluirDocIds && excluirDocIds.has(anexo.id)) return;
-        resolvidosDoItem.push({
-          baseLabel: company ? companyLabelFor(company) : "",
-          doc: {
-            id: anexo.id,
-            categoria: null,
-            tipo: anexo.nome,
-            titulo: anexo.nome,
-            arquivo: {
-              driveFileId: anexo.driveFileId || null,
-              assetId: anexo.assetId || null,
-              mimeType: anexo.tipo || null,
-              nomeOriginal: anexo.nome,
+        anexosDoItemBase.forEach((anexo) => {
+          anexosConsumidos.add(anexo.id);
+          // Desmarcado na pré-visualização do ZIP: não entra no pacote, mas o
+          // anexo continua registrado na solicitação (nada é apagado).
+          if (excluirDocIds && excluirDocIds.has(anexo.id)) return;
+          resolvidosDoItem.push({
+            baseLabel: company ? companyLabelFor(company) : "",
+            doc: {
+              id: anexo.id,
+              categoria: null,
+              tipo: anexo.nome,
+              titulo: anexo.nome,
+              arquivo: {
+                driveFileId: anexo.driveFileId || null,
+                assetId: anexo.assetId || null,
+                mimeType: anexo.tipo || null,
+                nomeOriginal: anexo.nome,
+              },
+              __anexoManualLote: true,
             },
-            __anexoManualLote: true,
-          },
+          });
         });
         return;
       }
@@ -25636,11 +25641,12 @@ function LoteAnexoInlinePicker({ onFile, disabled, label }) {
       ref: inputRef,
       type: "file",
       accept: ".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png",
+      multiple: true,
       hidden: true,
       onChange: (e) => {
-        const file = e.target.files?.[0];
+        const files = Array.from(e.target.files || []);
         e.target.value = "";
-        if (file) onFile(file);
+        if (files.length > 0) onFile(files);
       },
     }),
   );
@@ -26081,7 +26087,7 @@ function EnvioLoteFormModal({ companies, onClose, onCreate, clientesCadastrados 
  *  (LoteItemStatusBadge) é sempre o persistido em statusPorBase — a busca
  *  ao vivo só informa os botões disponíveis, nunca substitui o status
  *  gravado. */
-function LoteItemBaseRow({ item, baseId, company, statusAtual, anexo, onUsarEncontrado, onAnexar, onRemoverAnexo, onAlterarStatus, onVer, onBaixar, enviandoAnexo }) {
+function LoteItemBaseRow({ item, baseId, company, statusAtual, anexos, onUsarEncontrado, onAnexar, onRemoverAnexo, onAlterarStatus, onVer, onBaixar, enviandoAnexo }) {
   const match = company ? matchChecklistItemToCompany(loteItemParaMatch(item), company) : { status: "sem_base", candidatos: [] };
   const podeUsarEncontrado =
     (match.status === "encontrado" || match.status === "grupo" || match.status === "ambiguo") &&
@@ -26123,28 +26129,34 @@ function LoteItemBaseRow({ item, baseId, company, statusAtual, anexo, onUsarEnco
         statusAtual !== "recebido" &&
         statusAtual !== "conferido" &&
         statusAtual !== "nao_aplicavel" &&
-        React.createElement(LoteAnexoInlinePicker, { onFile: onAnexar, disabled: enviandoAnexo, label: enviandoAnexo ? "Enviando..." : "Anexar arquivo" }),
-      anexo &&
-        React.createElement(
-          React.Fragment,
-          null,
+        (anexos || []).length === 0 &&
+        React.createElement(LoteAnexoInlinePicker, { onFile: onAnexar, disabled: enviandoAnexo, label: enviandoAnexo ? "Enviando..." : "Anexar arquivo(s)" }),
+      (anexos || []).map((anexo) => {
+        const docAnexo = { id: anexo.id, tipo: anexo.tipo, titulo: anexo.nome, categoria: null, arquivo: { driveFileId: anexo.driveFileId, assetId: anexo.assetId, mimeType: anexo.tipo, nomeOriginal: anexo.nome } };
+        return React.createElement(
+          "div",
+          { key: anexo.id, className: "lote-anexo-linha", "data-testid": "lote-anexo-linha" },
           React.createElement("span", { className: "homolog-anexo-nome" }, anexo.nome),
           React.createElement(
             "button",
-            { type: "button", className: "mini-download-btn", onClick: () => onVer({ id: anexo.id, tipo: anexo.tipo, titulo: anexo.nome, categoria: null, arquivo: { driveFileId: anexo.driveFileId, assetId: anexo.assetId, mimeType: anexo.tipo, nomeOriginal: anexo.nome } }), "aria-label": "Ver anexo" },
+            { type: "button", className: "mini-download-btn", onClick: () => onVer(docAnexo), "aria-label": "Ver anexo" },
             React.createElement(Eye, { size: 13 }),
           ),
           React.createElement(
             "button",
-            { type: "button", className: "mini-download-btn", onClick: () => onBaixar({ id: anexo.id, tipo: anexo.tipo, titulo: anexo.nome, categoria: null, arquivo: { driveFileId: anexo.driveFileId, assetId: anexo.assetId, mimeType: anexo.tipo, nomeOriginal: anexo.nome } }), "aria-label": "Baixar anexo" },
+            { type: "button", className: "mini-download-btn", onClick: () => onBaixar(docAnexo), "aria-label": "Baixar anexo" },
             React.createElement(Download, { size: 13 }),
           ),
           React.createElement(
             "button",
-            { type: "button", className: "icon-btn-dark", onClick: onRemoverAnexo, "aria-label": `Remover ${anexo.nome}` },
+            { type: "button", className: "icon-btn-dark", onClick: () => onRemoverAnexo(anexo), "aria-label": `Remover ${anexo.nome}` },
             React.createElement(X, { size: 13 }),
           ),
-        ),
+        );
+      }),
+      (anexos || []).length > 0 &&
+        statusAtual !== "nao_aplicavel" &&
+        React.createElement(LoteAnexoInlinePicker, { onFile: onAnexar, disabled: enviandoAnexo, label: enviandoAnexo ? "Enviando..." : "Anexar mais" }),
     ),
   );
 }
@@ -26194,18 +26206,18 @@ function LoteItemCard({ it, companiesPorId, anexosRecebidos, enviandoAnexoChave,
         "div",
         { className: "lote-item-bases" },
         baseIds.map((baseId) => {
-          const anexo = (anexosRecebidos || []).find((a) => a.itemAssociadoId === it.id && a.baseId === baseId);
+          const anexos = (anexosRecebidos || []).filter((a) => a.itemAssociadoId === it.id && a.baseId === baseId);
           return React.createElement(LoteItemBaseRow, {
             key: baseId,
             item: it,
             baseId,
             company: companiesPorId.get(baseId),
             statusAtual: it.statusPorBase[baseId],
-            anexo,
+            anexos,
             enviandoAnexo: enviandoAnexoChave === `${it.id}:${baseId}`,
             onUsarEncontrado: () => onUsarEncontrado(it.id, baseId),
             onAnexar: (file) => onAnexar(it.id, baseId, file),
-            onRemoverAnexo: () => anexo && onRemoverAnexo(anexo),
+            onRemoverAnexo: (a) => a && onRemoverAnexo(a),
             onAlterarStatus: (novoStatus) => onAlterarStatus(it.id, baseId, novoStatus),
             onVer,
             onBaixar,
@@ -26440,45 +26452,59 @@ function EnvioLoteDetailView({ item, companies, onBack, onNotify, onView, onUpda
       status: novoStatus,
     });
   }
-  async function handleAnexarArquivo(itemId, baseId, file) {
-    if (!file) return;
+  async function handleAnexarArquivo(itemId, baseId, arquivos) {
+    const files = (Array.isArray(arquivos) ? arquivos : [arquivos]).filter(Boolean);
+    if (files.length === 0) return;
     const chave = `${itemId}:${baseId}`;
     setEnviandoAnexoChave(chave);
-    const res = await tryPersistUploadedFile(file, { pasta: pastaLoteParaSolicitacao(item.cliente, item.id) });
-    const anexo = {
-      id: `anexo-lote-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
-      nome: file.name,
-      tamanho: file.size,
-      tipo: file.type || "application/octet-stream",
-      driveFileId: res.ok ? res.driveFileId || null : null,
-      assetId: res.ok ? res.assetId || null : null,
-      itemAssociadoId: itemId,
-      baseId,
-      enviadoPor: currentUser?.nome || "Usuário do portal",
-      enviadoEm: new Date().toISOString(),
-    };
+    const novos = [];
+    let falhas = 0;
+    for (const file of files) {
+      const res = await tryPersistUploadedFile(file, { pasta: pastaLoteParaSolicitacao(item.cliente, item.id) });
+      if (!res.ok) falhas++;
+      novos.push({
+        id: `anexo-lote-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
+        nome: file.name,
+        tamanho: file.size,
+        tipo: file.type || "application/octet-stream",
+        driveFileId: res.ok ? res.driveFileId || null : null,
+        assetId: res.ok ? res.assetId || null : null,
+        itemAssociadoId: itemId,
+        baseId,
+        enviadoPor: currentUser?.nome || "Usuário do portal",
+        enviadoEm: new Date().toISOString(),
+      });
+    }
     const documentacoesSolicitadas = item.documentacoesSolicitadas.map((it) =>
       it.id !== itemId ? it : { ...it, statusPorBase: { ...it.statusPorBase, [baseId]: "recebido" } },
     );
     persistPatch({
       documentacoesSolicitadas,
-      anexosRecebidos: [...(item.anexosRecebidos || []), anexo],
+      anexosRecebidos: [...(item.anexosRecebidos || []), ...novos],
       status: computeLoteStatusGeral(documentacoesSolicitadas),
     });
     setEnviandoAnexoChave(null);
-    logDocumentAction("upload_arquivo_lote", {
-      cliente: item.cliente,
-      arquivo: file.name,
-      base: companyLabelFor(companiesPorId.get(baseId)),
-    });
+    novos.forEach((n) =>
+      logDocumentAction("upload_arquivo_lote", {
+        cliente: item.cliente,
+        arquivo: n.nome,
+        base: companyLabelFor(companiesPorId.get(baseId)),
+      }),
+    );
     onNotify?.(
-      res.ok ? `"${file.name}" anexado.` : `"${file.name}" anexado (não foi possível salvá-lo no repositório agora — tente reenviar depois).`,
-      res.ok ? "info" : "error",
+      falhas === 0
+        ? files.length === 1
+          ? `"${files[0].name}" anexado.`
+          : `${files.length} arquivos anexados.`
+        : `${files.length} arquivo(s) anexado(s); ${falhas} não pôde(ram) ser salvo(s) no repositório agora — tente reenviar depois.`,
+      falhas === 0 ? "info" : "error",
     );
   }
   function handleRemoverAnexo(anexo) {
+    // Só volta a "solicitado" quando não sobrar nenhum outro anexo do mesmo item×base.
+    const sobram = (item.anexosRecebidos || []).some((a) => a.id !== anexo.id && a.itemAssociadoId === anexo.itemAssociadoId && a.baseId === anexo.baseId);
     const documentacoesSolicitadas = item.documentacoesSolicitadas.map((it) =>
-      it.id !== anexo.itemAssociadoId ? it : { ...it, statusPorBase: { ...it.statusPorBase, [anexo.baseId]: "solicitado" } },
+      it.id !== anexo.itemAssociadoId || sobram ? it : { ...it, statusPorBase: { ...it.statusPorBase, [anexo.baseId]: "solicitado" } },
     );
     persistPatch({
       documentacoesSolicitadas,
