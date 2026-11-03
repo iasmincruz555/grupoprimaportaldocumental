@@ -1934,6 +1934,9 @@ async function tryPersistUploadedFile(file, opts) {
       try {
         const formData = new FormData();
         formData.append("arquivo", file, file.name);
+        // Nome em UTF-8 como campo próprio: o nome no cabeçalho do multipart pode
+        // chegar ao servidor lido como latin1 ("AlteraÃ§Ã£o"), com acento quebrado.
+        if (file.name) formData.append("nomeArquivo", file.name);
         if (pastaDestino) formData.append("pasta", pastaDestino);
         const resp = await fetch(`${DRIVE_PROXY_URL}/api/documents/upload-file`, {
           method: "POST",
@@ -6468,15 +6471,10 @@ function docsDoTipoPedido(docs, label, keyword) {
         // pergunta — nesse caso ela chega pelo laço de TIPO acima (categoria
         // diferente, nunca zerada por esta regra — ver comentário de
         // categoryKeysEfetivos).
-        const rotulosApoliceGeral = [
-          ...tipoLabelsAceitos("Apólice RCTR-C"),
-          ...tipoLabelsAceitos("Apólice RC-DC"),
-          ...tipoLabelsAceitos("Apólice RC-V"),
-        ];
         matches = matches.filter(
           (d) =>
             (d.subcategoria || "geral") !== "clientes_especificos" &&
-            rotulosApoliceGeral.includes(d.tipo),
+            !!apoliceGeralLabelDoDoc(d),
         );
       }
     }
@@ -6587,12 +6585,32 @@ function currentDocsFor(docsFiltrados) {
  *  fazia a RC-V sumir do lote. Regra: dentro de cada tipo, ignora as marcadas como
  *  versão anterior (a menos que sejam as únicas), prefere as não vencidas e, se
  *  todas estiverem vencidas, mantém só a mais recente. A ordem original é preservada. */
+const APOLICES_GERAIS_LABELS = ["Apólice RCTR-C", "Apólice RC-DC", "Apólice RC-V"];
+/** apoliceGeralLabelDoDoc: a qual apólice geral (RCTR-C, RC-DC ou RC-V) um documento
+ *  pertence. Primeiro pelo `tipo` gravado; se o tipo ainda está genérico ("Apólice",
+ *  vazio ou "não identificado" — caso de apólices cadastradas antes do tipo RC-V
+ *  existir), decide pelo título/nome do arquivo, como o assistente faz. Devolve
+ *  "Apólice" (grupo genérico) quando é uma apólice sem sigla reconhecível, e null
+ *  quando não é apólice geral. */
+function apoliceGeralLabelDoDoc(d) {
+  if (!d) return null;
+  for (const label of APOLICES_GERAIS_LABELS) {
+    if (tipoLabelsAceitos(label).includes(d.tipo)) return label;
+  }
+  const tipoGenerico = !d.tipo || d.tipo === "Apólice" || /nao identificado/.test(normalize(d.tipo));
+  if (!tipoGenerico) return null;
+  const t = normalize(`${d.titulo || ""} ${(d.arquivo && (d.arquivo.nome || d.arquivo.nomeOriginal)) || ""}`);
+  if (/rctr[\s-]?c/.test(t)) return "Apólice RCTR-C";
+  if (/\brc[\s-]?f?[\s-]?dc\b/.test(t)) return "Apólice RC-DC";
+  if (/\brc[\s-]?f?[\s-]?v\b|responsabilidade civil (facultativa )?(de |dos |do )?veiculos?/.test(t)) return "Apólice RC-V";
+  if (d.tipo === "Apólice" || /ap[oó]lice/.test(t)) return "Apólice";
+  return null;
+}
 function apolicesGeraisVigentes(docs) {
-  const tipos = ["Apólice RCTR-C", "Apólice RC-DC", "Apólice RC-V"];
+  const tipos = [...APOLICES_GERAIS_LABELS, "Apólice"];
   const escolhidos = new Set();
   tipos.forEach((label) => {
-    const aceitos = tipoLabelsAceitos(label);
-    const doTipo = docs.filter((d) => aceitos.includes(d.tipo));
+    const doTipo = docs.filter((d) => apoliceGeralLabelDoDoc(d) === label);
     if (doTipo.length === 0) return;
     const semArquivada = doTipo.filter((d) => d.flag !== "versao_anterior");
     const pool = semArquivada.length > 0 ? semArquivada : doTipo;
@@ -6850,15 +6868,10 @@ function matchChecklistItemToCompany(item, company) {
         // Lote, mesmo já corrigido no chat — as duas implementações não
         // podem divergir (mesma regra documentada acima, no topo de
         // matchChecklistItemToCompany).
-        const rotulosApoliceGeral = [
-          ...tipoLabelsAceitos("Apólice RCTR-C"),
-          ...tipoLabelsAceitos("Apólice RC-DC"),
-          ...tipoLabelsAceitos("Apólice RC-V"),
-        ];
         brutos = brutos.filter(
           (d) =>
             (d.subcategoria || "geral") !== "clientes_especificos" &&
-            rotulosApoliceGeral.includes(d.tipo),
+            !!apoliceGeralLabelDoDoc(d),
         );
         apolicesGerais = true;
       }
