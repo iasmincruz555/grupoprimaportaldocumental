@@ -6404,6 +6404,9 @@ function docsDoTipoPedido(docs, label, keyword) {
     }
     let notFoundLabel = `${t.label}${refinado.sufixo}`;
     if (matches.length === 0) {
+      // "Apólice" genérico sem nenhum documento com esse tipo exato: as apólices reais
+      // (RCTR-C, RC-DC, RC-V) vêm pela categoria Seguros — não conta como "não encontrado".
+      if (t.label === "Apólice" && wantedCategoryKeys.includes("seguros")) return;
       notFoundLabels.push(notFoundLabel);
       return;
     }
@@ -6471,10 +6474,12 @@ function docsDoTipoPedido(docs, label, keyword) {
         // pergunta — nesse caso ela chega pelo laço de TIPO acima (categoria
         // diferente, nunca zerada por esta regra — ver comentário de
         // categoryKeysEfetivos).
-        matches = matches.filter(
-          (d) =>
-            (d.subcategoria || "geral") !== "clientes_especificos" &&
-            !!apoliceGeralLabelDoDoc(d),
+        matches = apolicesGeraisVigentes(
+          matches.filter(
+            (d) =>
+              (d.subcategoria || "geral") !== "clientes_especificos" &&
+              !!apoliceGeralLabelDoDoc(d),
+          ),
         );
       }
     }
@@ -6597,26 +6602,38 @@ function apoliceGeralLabelDoDoc(d) {
   for (const label of APOLICES_GERAIS_LABELS) {
     if (tipoLabelsAceitos(label).includes(d.tipo)) return label;
   }
-  const tipoGenerico = !d.tipo || d.tipo === "Apólice" || /nao identificado/.test(normalize(d.tipo));
+  // Tipo "genérico" = vazio, "Apólice", "não identificado" OU qualquer texto que não seja um tipo
+  // conhecido do portal (ex.: grafia diferente, hífen especial) — nesses casos decide o título/arquivo.
+  const tiposConhecidos = new Set([
+    ...DOC_TYPE_KEYWORDS.map((k) => k.label),
+    ...TIPO_LABEL_SINONIMOS_LEGADOS.map((x) => x.legado),
+  ]);
+  const tipoGenerico = !d.tipo || d.tipo === "Apólice" || /nao identificado/.test(normalize(d.tipo)) || !tiposConhecidos.has(d.tipo);
   if (!tipoGenerico) return null;
-  const t = normalize(`${d.titulo || ""} ${(d.arquivo && (d.arquivo.nome || d.arquivo.nomeOriginal)) || ""}`);
+  const t = normalize(`${d.tipo || ""} ${d.titulo || ""} ${(d.arquivo && (d.arquivo.nome || d.arquivo.nomeOriginal)) || ""}`).replace(/[\u2010-\u2015\u2212]/g, "-");
   if (/rctr[\s-]?c/.test(t)) return "Apólice RCTR-C";
   if (/\brc[\s-]?f?[\s-]?dc\b/.test(t)) return "Apólice RC-DC";
   if (/\brc[\s-]?f?[\s-]?v\b|responsabilidade civil (facultativa )?(de |dos |do )?veiculos?/.test(t)) return "Apólice RC-V";
-  if (d.tipo === "Apólice" || /ap[oó]lice/.test(t)) return "Apólice";
+  if (d.tipo === "Apólice" || (d.categoria === "seguros" && /ap[oó]lice/.test(t))) return "Apólice";
   return null;
 }
 function apolicesGeraisVigentes(docs) {
-  const tipos = [...APOLICES_GERAIS_LABELS, "Apólice"];
+  // UMA apólice por tipo (RCTR-C, RC-DC, RC-V). O grupo "Apólice" genérico (sem sigla
+  // reconhecível) só entra quando nenhuma RC-V foi identificada — nunca como um 4º documento.
   const escolhidos = new Set();
-  tipos.forEach((label) => {
-    const doTipo = docs.filter((d) => apoliceGeralLabelDoDoc(d) === label);
-    if (doTipo.length === 0) return;
+  const escolherUm = (doTipo) => {
     const semArquivada = doTipo.filter((d) => d.flag !== "versao_anterior");
     const pool = semArquivada.length > 0 ? semArquivada : doTipo;
     const vigentes = pool.filter((d) => computeDocStatus(d.validade) !== "vencido");
-    (vigentes.length > 0 ? vigentes : [sortDocumentsByVersion(pool)[0]]).forEach((d) => escolhidos.add(d));
+    escolhidos.add(sortDocumentsByVersion(vigentes.length > 0 ? vigentes : pool)[0]);
+  };
+  const porLabel = (label) => docs.filter((d) => apoliceGeralLabelDoDoc(d) === label);
+  APOLICES_GERAIS_LABELS.forEach((label) => {
+    const doTipo = porLabel(label);
+    if (doTipo.length > 0) escolherUm(doTipo);
   });
+  const genericas = porLabel("Apólice");
+  if (genericas.length > 0 && porLabel("Apólice RC-V").length === 0) escolherUm(genericas);
   return docs.filter((d) => escolhidos.has(d));
 }
 function soVigentesPorFamilia(docs) {
@@ -6836,7 +6853,10 @@ function matchChecklistItemToCompany(item, company) {
     return { status: "encontrado", doc: maisRecente, candidatos: atuais };
   }
   if (item.categoriaSugerida) {
-    let brutos = docs.filter((d) => d.categoria === item.categoriaSugerida);
+    // Pedido de "seguros"/"apólices": o pool inclui qualquer documento que seja uma
+    // apólice geral mesmo cadastrado fora da categoria Seguros (ex.: tipo "Apólice"
+    // gravado antes da classificação), como o assistente já encontra pelo tipo.
+    let brutos = docs.filter((d) => d.categoria === item.categoriaSugerida || (item.categoriaSugerida === "seguros" && !!apoliceGeralLabelDoDoc(d)));
     let apolicesGerais = false;
     // Seguros (pedido explícito da Iasmin, 2026-09-17): um item de checklist
     // que só identificou a CATEGORIA "seguros" (ex.: linha "seguro", sem
@@ -26245,6 +26265,25 @@ function LoteItemCard({ it, companiesPorId, anexosRecebidos, enviandoAnexoChave,
  *  recalculados AO VIVO com a mesma função do processamento
  *  (matchChecklistItemToCompany). Salvar grava `nome`/`tipoSugerido`/`docsEscolhidos`
  *  no item; "Salvar e reprocessar" abre em seguida a pré-visualização do ZIP. */
+/** apolicesNaoIncluidas: para pedidos de apólice/seguro, lista as apólices da base que NÃO entraram
+ *  na seleção, com o motivo — para a pessoa ver por que uma apólice conhecida ficou de fora. */
+function apolicesNaoIncluidas(company, idsIncluidos) {
+  const docs = (company && company.documentos) || [];
+  const ehApolice = (d) => {
+    const t = normalize(`${d.tipo || ""} ${d.titulo || ""} ${(d.arquivo && (d.arquivo.nome || d.arquivo.nomeOriginal)) || ""}`);
+    return /apolice/.test(t) && d.tipo !== "Endosso";
+  };
+  return docs
+    .filter((d) => ehApolice(d) && !idsIncluidos.has(d.id))
+    .map((d) => {
+      let motivo = "não reconhecida como apólice geral (tipo \"" + (d.tipo || "vazio") + "\")";
+      if ((d.subcategoria || "geral") === "clientes_especificos") motivo = "apólice de cliente específico";
+      else if (d.flag === "versao_anterior") motivo = "versão anterior";
+      else if (apoliceGeralLabelDoDoc(d)) motivo = "há outra apólice vigente do mesmo tipo";
+      else if (d.categoria !== "seguros") motivo = "cadastrada na categoria \"" + (d.categoria || "sem categoria") + "\", não em Seguros";
+      return { doc: d, motivo };
+    });
+}
 function LoteItemEditModal({ it, companiesPorId, onClose, onSalvar }) {
   const [nome, setNome] = useState(it.nome || "");
   const nomeAlterado = nome.trim() !== (it.nome || "").trim();
@@ -26273,6 +26312,17 @@ function LoteItemEditModal({ it, companiesPorId, onClose, onSalvar }) {
     });
     return [...porId.values()];
   }, [it, nome, tipoNovo, nomeAlterado, companiesPorId]);
+  const ehPedidoApolice = tipoNovo === "Apólice" || tipoNovo === "Apólice RCTR-C" || tipoNovo === "Apólice RC-DC" || tipoNovo === "Apólice RC-V" || it.categoriaSugerida === "seguros";
+  const ignoradas = useMemo(() => {
+    if (!ehPedidoApolice) return [];
+    const ids = new Set(candidatos.map((c) => c.doc.id));
+    const porId = new Map();
+    Object.keys(it.statusPorBase || {}).forEach((baseId) => {
+      const company = companiesPorId.get(baseId);
+      if (company) apolicesNaoIncluidas(company, ids).forEach((x) => porId.set(x.doc.id, x));
+    });
+    return [...porId.values()];
+  }, [ehPedidoApolice, candidatos, it, companiesPorId]);
   const [selecionados, setSelecionados] = useState(() => (Array.isArray(it.docsEscolhidos) && it.docsEscolhidos.length > 0 ? new Set(it.docsEscolhidos) : null));
   // null = automático (todos os encontrados marcados)
   const marcado = (id) => (selecionados === null ? true : selecionados.has(id));
@@ -26352,6 +26402,13 @@ function LoteItemEditModal({ it, companiesPorId, onClose, onSalvar }) {
           ),
         ),
         semNenhum && React.createElement("div", { className: "lote-previa-vencido lote-previa-naoenc" }, React.createElement(AlertTriangle, { size: 12 }), " Marque ao menos um documento."),
+        ignoradas.length > 0 &&
+          React.createElement(
+            "div",
+            { className: "lote-previa-ignoradas", "data-testid": "lote-item-edit-ignoradas" },
+            React.createElement("div", { className: "lote-previa-meta", style: { fontWeight: 700, marginBottom: 4 } }, "Apólices da base que não entraram na seleção"),
+            ignoradas.map((x) => React.createElement("div", { key: x.doc.id, className: "lote-previa-meta" }, docTituloExibido(x.doc), " — ", x.motivo)),
+          ),
       ),
       React.createElement(
         "div",
@@ -32513,6 +32570,8 @@ function vgSair() {
   vgSessao = { idToken: null, expira: 0, refreshToken: null };
   vgDonoPortal = "";
   vgEntrando = null;
+  vgPre = null;
+  vgCache = { dono: "", me: null, listas: {} };
   // Limpa o que as versões antigas deixavam guardado (refresh token do 2º login).
   try { localStorage.removeItem(VG_SESSION_KEY); } catch (e) {}
   try { sessionStorage.removeItem(VG_SESSION_KEY); } catch (e) {}
@@ -32622,6 +32681,57 @@ async function vgApi(metodo, caminho, { corpo, blob } = {}, tentativa = 0) {
     return { blob: await r.blob(), tipo: r.headers.get("Content-Type") || "", nome: m ? decodeURIComponent(m[1] || m[2]) : "arquivo" };
   }
   return r.json();
+}
+/* DESEMPENHO (2026-11, pedido da Iasmin: "o carregamento da aba está muito lento"):
+   antes, ao clicar na aba o módulo fazia em fila — entrada (token do servidor +
+   troca no Firebase) → /me → (espera de 200 ms) → /viagens + /painel. Agora:
+   1) a entrada e a 1ª carga (/me, /viagens, /painel em paralelo) começam já
+      depois do login no portal, em segundo plano (vgPrecarregar), e também ao
+      passar o mouse no item do menu — quando a aba abre, normalmente tudo já
+      está pronto;
+   2) o último resultado fica em MEMÓRIA (nunca em localStorage: são dados de
+      viagem/valores) e aparece na hora ao reabrir a aba, enquanto uma
+      atualização roda em segundo plano;
+   3) a 1ª busca da lista não espera mais os 200 ms de debounce (ele só vale
+      para quem muda filtros). */
+let vgPre = null; // { dono, criadoEm, sessao, me, lista, listaUsada }
+let vgCache = { dono: "", me: null, listas: {} };
+const VG_CHAVE_VAZIA = JSON.stringify({ consultorId: "", destino: "", de: "", ate: "", status: "" });
+function vgGuardarCache(dono, parte) {
+  if (vgCache.dono !== dono) vgCache = { dono, me: null, listas: {} };
+  if (parte.me) vgCache.me = parte.me;
+  if (parte.lista) vgCache.listas[parte.chave] = parte.lista;
+}
+function vgPrecarregar(emailPortal) {
+  const dono = vgNormEmail(emailPortal);
+  if (!dono || !VG_FIREBASE_CONFIGURADO) return null;
+  if (vgPre && vgPre.dono === dono && !vgPre.falhou) return vgPre;
+  const pre = { dono, criadoEm: Date.now(), falhou: false, listaUsada: false };
+  pre.sessao = (async () => {
+    if (!(vgTemSessao() && vgDonoPortal === dono)) { vgSair(); await vgEntrarComPortal(dono); }
+  })();
+  pre.me = pre.sessao.then(() => vgApi("GET", "/me")).then((m) => { vgGuardarCache(dono, { me: m }); return m; });
+  pre.lista = pre.sessao
+    .then(() => Promise.all([vgApi("GET", "/viagens"), vgApi("GET", "/painel")]))
+    .then(([a, b]) => { const l = { viagens: a.viagens, resumo: b.resumo }; vgGuardarCache(dono, { lista: l, chave: VG_CHAVE_VAZIA }); return l; });
+  const falhou = () => { pre.falhou = true; };
+  pre.me.catch(falhou);
+  pre.lista.catch(falhou);
+  vgPre = pre;
+  return pre;
+}
+/** Busca viagens + painel: reaproveita a pré-carga (uma vez, se recente) quando os filtros estão vazios. */
+function vgBuscarLista(filtros, chave) {
+  const pre = vgPre;
+  if (chave === VG_CHAVE_VAZIA && pre && pre.dono === vgDonoPortal && !pre.listaUsada && !pre.falhou && Date.now() - pre.criadoEm < 20000) {
+    pre.listaUsada = true;
+    return pre.lista;
+  }
+  return Promise.all([vgApi("GET", "/viagens" + vgQuery(filtros)), vgApi("GET", "/painel" + vgQuery(filtros))]).then(([a, b]) => {
+    const l = { viagens: a.viagens, resumo: b.resumo };
+    if (vgDonoPortal) vgGuardarCache(vgDonoPortal, { lista: l, chave });
+    return l;
+  });
 }
 function vgQuery(obj) {
   const p = Object.entries(obj || {}).filter(([, v]) => v !== "" && v !== null && v !== undefined);
@@ -33086,8 +33196,11 @@ function vgFiltrarLista(lista, { escopo, grupo, busca }) {
 }
 function VgLista({ me, escopo, onAbrir, onNova, onNotify, refreshKey, usuarios, tituloFixo }) {
   const admin = me.perfil === "administrador";
-  const [lista, setLista] = useState(null);
-  const [resumo, setResumo] = useState(null);
+  const chaveInicial = JSON.stringify({ consultorId: escopo === "minhas" ? me.uid : "", destino: "", de: "", ate: "", status: "" });
+  const emCache = vgCache.dono === vgDonoPortal ? vgCache.listas[chaveInicial] : null;
+  const primeiraBusca = useRef(true);
+  const [lista, setLista] = useState(emCache ? emCache.viagens : null);
+  const [resumo, setResumo] = useState(emCache ? emCache.resumo : null);
   const [grupo, setGrupo] = useState(null);
   const [busca, setBusca] = useState("");
   const [fConsultor, setFConsultor] = useState("");
@@ -33103,11 +33216,14 @@ function VgLista({ me, escopo, onAbrir, onNova, onNotify, refreshKey, usuarios, 
   const chave = JSON.stringify(filtrosServidor);
   useEffect(() => {
     let vivo = true;
+    // 1ª busca da tela: sem espera (o debounce de 200 ms é só para quem digita/muda filtros).
+    const espera = primeiraBusca.current ? 0 : 200;
+    primeiraBusca.current = false;
     const t = setTimeout(() => {
-      Promise.all([vgApi("GET", "/viagens" + vgQuery(filtrosServidor)), vgApi("GET", "/painel" + vgQuery(filtrosServidor))])
-        .then(([a, b]) => { if (vivo) { setLista(a.viagens); setResumo(b.resumo); setErro(null); } })
+      vgBuscarLista(filtrosServidor, chave)
+        .then((l) => { if (vivo) { setLista(l.viagens); setResumo(l.resumo); setErro(null); } })
         .catch((e) => { if (vivo) setErro(e.message); });
-    }, 200);
+    }, espera);
     return () => { vivo = false; clearTimeout(t); };
   }, [chave, refreshKey, tick]);
   const visiveis = lista ? vgFiltrarLista(lista, { escopo, grupo, busca }) : [];
@@ -33787,18 +33903,22 @@ function VgNotificacoes({ onAbrir, onLidas, onNotify }) {
 
 /* ---------- Módulo (raiz) ---------- */
 function ViagensView({ currentUser, onNotify, onView, deepLinkId, onDeepLinkConsumed }) {
-  const [fase, setFase] = useState(VG_FIREBASE_CONFIGURADO ? "carregando" : "sem_config");
-  const [me, setMe] = useState(null);
+  const donoInicial = vgNormEmail(currentUser && currentUser.email);
+  const meEmCache = VG_FIREBASE_CONFIGURADO && vgCache.dono === donoInicial && vgDonoPortal === donoInicial && vgTemSessao() ? vgCache.me : null;
+  const [fase, setFase] = useState(VG_FIREBASE_CONFIGURADO ? (meEmCache ? "pronto" : "carregando") : "sem_config");
+  const [me, setMe] = useState(meEmCache);
   const [msgErro, setMsgErro] = useState("");
   const [tela, setTela] = useState({ nome: "lista" });
   const [refresh, setRefresh] = useState(0);
   const [usuarios, setUsuarios] = useState([]);
-  async function carregarMe() {
+  async function carregarMe(promessa) {
     try {
-      const m = await vgApi("GET", "/me");
+      const m = await (promessa || vgApi("GET", "/me"));
+      vgGuardarCache(vgDonoPortal, { me: m });
       setMe(m);
       setFase("pronto");
     } catch (e) {
+      if (meEmCache && e.status !== 403) return; // já há dados na tela: uma falha passageira não derruba a aba
       if (e.status === 403) { setMsgErro(e.message); setFase("sem_acesso"); }
       else { setMsgErro(e.message); setFase("erro"); }
     }
@@ -33807,9 +33927,12 @@ function ViagensView({ currentUser, onNotify, onView, deepLinkId, onDeepLinkCons
     if (!VG_FIREBASE_CONFIGURADO) return;
     let vivo = true;
     (async () => {
+      const dono = vgNormEmail(currentUser && currentUser.email);
+      // Usa a pré-carga (iniciada após o login ou ao passar o mouse no menu); sem ela, começa agora.
+      const pre = vgPrecarregar(dono);
       try {
-        const dono = vgNormEmail(currentUser && currentUser.email);
-        if (!(vgTemSessao() && vgDonoPortal === dono)) { vgSair(); await vgEntrarComPortal(dono); }
+        if (pre) await pre.sessao;
+        else if (!(vgTemSessao() && vgDonoPortal === dono)) { vgSair(); await vgEntrarComPortal(dono); }
       } catch (e) {
         if (!vivo) return;
         setMsgErro(e.message || "Não foi possível entrar no módulo agora.");
@@ -33817,7 +33940,8 @@ function ViagensView({ currentUser, onNotify, onView, deepLinkId, onDeepLinkCons
         return;
       }
       if (!vivo) return;
-      await carregarMe();
+      // Com dados já em memória a tela está pronta; /me só atualiza em segundo plano.
+      await carregarMe(meEmCache ? null : pre && pre.me);
     })();
     return () => { vivo = false; };
   }, []);
@@ -34369,6 +34493,13 @@ function GrupoprimaPortal() {
   useEffect(() => {
     if (authenticated && vgDeepLink) setView("viagens");
   }, [authenticated, vgDeepLink]);
+  // Viagens e Despesas: entrada + 1ª carga em segundo plano logo após o login (ver vgPrecarregar),
+  // para a aba abrir já pronta. Falhas aqui são silenciosas — a aba tenta de novo ao abrir.
+  useEffect(() => {
+    if (!authenticated || !currentUser || !can(currentUser, "viagensDespesas")) return;
+    const t = setTimeout(() => { try { vgPrecarregar(currentUser.email); } catch (e) {} }, 1200);
+    return () => clearTimeout(t);
+  }, [authenticated, currentUser && currentUser.email]);
   const [selectedId, setSelectedId] = useState(null);
   const [search, setSearch] = useState("");
   const [chatOpen, setChatOpen] = useState(false); // chatSeed: pergunta pronta enviada automaticamente quando o ChatDrawer é
@@ -36346,6 +36477,8 @@ function GrupoprimaPortal() {
           "button",
           {
             className: "nav-item" + (view === "viagens" ? " active" : ""),
+            onMouseEnter: () => { try { vgPrecarregar(currentUser.email); } catch (e) {} },
+            onFocus: () => { try { vgPrecarregar(currentUser.email); } catch (e) {} },
             onClick: () => goTo("viagens"),
           },
           /*#__PURE__*/ React.createElement(Plane, { size: 16 }),
