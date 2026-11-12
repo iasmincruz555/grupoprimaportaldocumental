@@ -23965,8 +23965,7 @@ function ClientAnalysisFilePicker({ anexos, setAnexos, onNotify }) {
               /*#__PURE__*/ React.createElement(
                 "span",
                 {
-                  className: "homolog-anexo-tamanho",
-                  style: { color: "#b45309" },
+                  className: "homolog-anexo-tamanho client-analysis-warn-amber",
                   title: assetIssueMessage(a.assetIssue),
                 },
                 /*#__PURE__*/ React.createElement(AlertTriangle, { size: 12 }),
@@ -24361,8 +24360,7 @@ function ClientAnalysisDocumentosSection({ documentos, onView, onNotify }) {
             /*#__PURE__*/ React.createElement(
               "span",
               {
-                className: "homolog-anexo-tamanho",
-                style: { color: "#a13333" },
+                className: "homolog-anexo-tamanho client-analysis-warn-red",
                 title: motivoParaTexto(d.motivoFalhaExtracao),
               },
               /*#__PURE__*/ React.createElement(AlertTriangle, { size: 12 }),
@@ -34962,6 +34960,19 @@ function GrupoprimaPortal() {
         }
         .portal-root[data-theme="dark"] .homolog-base-badge { border-color: rgba(255,255,255,0.18); }
         .portal-root[data-theme="dark"] .homolog-security-note { background: rgba(46,125,166,0.16); color: #6FBBE3; }
+        /* Análise Documental — legibilidade no modo noturno (2026-11-12): o texto
+           corrido, as listas e as descrições dos pontos usavam cinza fixo (#333)
+           e sumiam no fundo escuro; os avisos "conteúdo não lido"/"não salvo"
+           usavam cor inline. No claro continua exatamente igual. */
+        .homolog-anexo-tamanho.client-analysis-warn-red { color: #a13333; }
+        .homolog-anexo-tamanho.client-analysis-warn-amber { color: #b45309; }
+        .portal-root[data-theme="dark"] .client-analysis-section p,
+        .portal-root[data-theme="dark"] .client-analysis-list,
+        .portal-root[data-theme="dark"] .client-analysis-list li { color: #DCE6ED; }
+        .portal-root[data-theme="dark"] .client-analysis-point { background: rgba(255,255,255,0.03); }
+        .portal-root[data-theme="dark"] .client-analysis-point-conf { color: #AAB7C2; }
+        .portal-root[data-theme="dark"] .homolog-anexo-tamanho.client-analysis-warn-red { color: #FF9B9B; }
+        .portal-root[data-theme="dark"] .homolog-anexo-tamanho.client-analysis-warn-amber { color: #E3A83B; }
         .portal-root[data-theme="dark"] .client-analysis-mock-banner { background: rgba(255,214,10,0.18); color: #E3C23B; border-color: rgba(255,214,10,0.35); }
         .portal-root[data-theme="dark"] .client-analysis-point-tag-informativo { background: rgba(46,125,166,0.20); color: #6FBBE3; }
         .portal-root[data-theme="dark"] .client-analysis-point-tag-atencao { background: rgba(255,214,10,0.22); color: #E3C23B; }
