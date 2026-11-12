@@ -6062,8 +6062,22 @@ function ehCertidaoSimplificadaDoc(d) {
   const t = normalize(`${d.titulo || ""} ${(d.arquivo && d.arquivo.nome) || ""}`);
   return d.tipo === LABEL_CERT_SIMPLIFICADA || RE_CERT_SIMPLIFICADA_NOME.test(t) || /certid\w*.{0,60}\bjunta comercial\b|\bjunta comercial\b.{0,60}certid/.test(t);
 }
+/** singularizarPedido: aceita plurais e a sigla "IE" nos pedidos do chat
+ *  ("inscrições estaduais", "certidões negativas", "procurações") — antes só
+ *  o singular exato era reconhecido e a frase caía na consulta genérica da
+ *  base. Texto já normalizado (sem acento, minúsculo). */
+function singularizarPedido(t) {
+  return t
+    .replace(/\binscricoes\b/g, "inscricao")
+    .replace(/\bestaduais\b/g, "estadual")
+    .replace(/\bmunicipais\b/g, "municipal")
+    .replace(/\bfederais\b/g, "federal")
+    .replace(/\b(certidoes|procuracoes|alteracoes|consolidacoes)\b/g, (m) => m.replace(/oes$/, "ao"))
+    .replace(/\bcontratos sociais\b/g, "contrato social")
+    .replace(/\bie\b/g, "inscricao estadual");
+}
 function detectRequestedTypes(text) {
-  const t = dobrarPluralDeSiglas(normalize(text));
+  const t = singularizarPedido(dobrarPluralDeSiglas(normalize(text)));
   const tipos = DOC_TYPE_KEYWORDS.filter((k) => k.match.test(t));
   if (pedeCertidaoSimplificada(t) && !tipos.some((k) => k.label === LABEL_CERT_SIMPLIFICADA)) {
     const cert = DOC_TYPE_KEYWORDS.find((k) => k.label === LABEL_CERT_SIMPLIFICADA);
@@ -6078,7 +6092,7 @@ function detectRequestedTypes(text) {
   return tipos;
 }
 function detectRequestedCategories(text) {
-  let t = dobrarPluralDeSiglas(normalize(text));
+  let t = singularizarPedido(dobrarPluralDeSiglas(normalize(text)));
   // "certidão simplificada"/"junta comercial" avulso é UM documento, não a categoria inteira
   // de Contratos Sociais.
   if (pedeCertidaoSimplificada(t)) t = t.replace(RE_CERT_SIMPLIFICADA_FRASE, " ");
@@ -7759,6 +7773,7 @@ async function amostrarViaBackend({ system, turns, tools }) {
     "Seja natural e direto; não force um tamanho de resposta artificial — curto quando a pergunta é simples, mais completo quando a pessoa realmente precisa de detalhe.",
     "Nunca use marcação markdown (**negrito**, *itálico*, __sublinhado__, `código`, títulos com #, listas com - ou *): a interface do chat exibe o texto puro, sem interpretar esses símbolos, e eles apareceriam literalmente na tela. Para destacar algo, use apenas o nome exato (ex.: o botão Baixar ZIP) sem nenhum símbolo ao redor. Quando a resposta for um passo a passo (como enviar uma homologação em lote, criar uma nova homologação, ou baixar um documento), numere os passos em texto simples (1. 2. 3.), nunca com marcadores.",
     "Interprete pedidos curtos e informais sem exigir que a pessoa fale como um sistema (ex.: 'CNPJ de PE' = Cartão CNPJ da filial de Pernambuco; 'alvará de MG'; 'tudo da matriz'). Se a intenção for clara, execute direto. Só pergunte quando houver dúvida real sobre qual documento a pessoa quer, e faça uma única pergunta simples. Quando houver várias versões do mesmo documento, entregue a mais recente, salvo se a pessoa pedir o histórico. Só entregue o que as ferramentas realmente encontraram — nunca invente documento, data, validade ou CNPJ.",
+    "Você enxerga a conversa anterior: uma resposta curta da pessoa (ex.: só 'matriz', 'PE', 'sim', 'o de 2025') responde à sua última pergunta — retome o pedido anterior e execute-o com as ferramentas, sem recomeçar nem tratar a frase isolada. Mensagem avulsa que cita um documento ou categoria, mesmo sem verbo e com erros de digitação ou plural (ex.: 'inscricoes estadual matriz', 'alvara mg', 'seguros'), é pedido de ENVIO: chame a ferramenta de entrega em vez de só conversar. Quando a pessoa pedir um documento sem citar a base e ele não for corporativo, entregue o da Matriz e diga que é da Matriz (ela pede outra base se quiser), em vez de perguntar a base; pergunte só quando o TIPO de documento for realmente ambíguo, com uma única pergunta simples.",
     CONHECIMENTO_INSTITUCIONAL_GRUPOPRIMA,
   ].join(" ");
   const conversationTurns = [
@@ -12611,6 +12626,11 @@ function ChatDrawer({
   const idCounter = useRef(1); // Memória de curto prazo do que foi encontrado por último, para permitir
   // frases contextuais como "junta esses documentos" / "cria um ZIP com eles".
   const lastFoundRef = useRef({ company: null, docs: [] });
+  // Memória da conversa ATIVA (some ao recarregar a página): quando a última
+  // resposta do assistente (IA) terminou numa pergunta, a próxima mensagem
+  // curta da pessoa é a resposta a ela e segue para a IA com o histórico —
+  // em vez de ser lida isoladamente pelo motor de regras (ex.: "matriz").
+  const aguardandoIARef = useRef(false);
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, open]);
@@ -13462,6 +13482,13 @@ function ChatDrawer({
         text: `Entendi ${correcoesDigitacao.map((c) => `"${c.de}" como "${c.para}"`).join(" e ")}.`,
       });
     }
+    const seguirConversaIA =
+      aguardandoIARef.current && textoDigitado.split(/\s+/).length <= 8;
+    aguardandoIARef.current = false;
+    if (seguirConversaIA) {
+      await responderComIA(text);
+      return;
+    }
     const explicitCompany = findCompanyInQuery(text, companies);
     const company = resolveContextualCompany(text, explicitCompany);
     if (isHelpQuestion(text)) {
@@ -13720,6 +13747,13 @@ function ChatDrawer({
         return;
       }
     }
+    return responderComIA(text);
+  }
+  /** responderComIA: conversa com a IA (Claude) usando o histórico da
+   *  conversa ativa. Chamada pelo fim do motor de regras (quando ele não
+   *  soube responder) e quando a pessoa está respondendo a uma pergunta
+   *  feita pela própria IA. */
+  async function responderComIA(text) {
     const pendingId = nextId();
     setMessages((prev) => [
       ...prev,
@@ -13812,6 +13846,7 @@ function ChatDrawer({
     // mensagem abaixo explica isso, mas todo o motor de regras (consultas,
     // entrega de documento, ZIP, homologações) continua funcionando normalmente.
     if (aiText) {
+      aguardandoIARef.current = /\?\s*$/.test(aiText.trim());
       updateMessage(pendingId, { text: aiText });
     } else if (unavailable) {
       updateMessage(pendingId, {
