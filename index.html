@@ -3497,6 +3497,7 @@ const AUDIT_ACTION_LABELS = {
   alterou_status_homologacao: "Alterou status de homologação",
   revelou_credenciais_homologacao: "Revelou credenciais (homologação)",
   excluiu_homologacao: "Excluiu homologação",
+  encaminhou_homologacao_termo_abertura: "Encaminhou cliente da homologação ao Termo de Abertura de Projeto",
   reabriu_homologacao: "Reabriu homologação",
   editou_homologacao: "Editou homologação",
   editou_homologacao_atualizacao: "Editou atualização de homologação",
@@ -15296,6 +15297,58 @@ async function downloadHomologAnexo(anexo, { onNotify, onAuditDownload } = {}) {
     );
   }
 }
+/** HomologTapEncaminhamento: botão de check (✓) que encaminha o cliente de uma
+ *  Homologação CONCLUÍDA ao Termo de Abertura de Projeto. Só aparece para o
+ *  consultor que criou a solicitação (tapEstadoEncaminhamento); depois de
+ *  usado vira o selo "Encaminhado" (visível a quem enxerga o registro). */
+function HomologTapEncaminhamento({ h: hm, currentUser, onEncaminhar, variante }) {
+  const [aberto, setAberto] = useState(false);
+  const [enviando, setEnviando] = useState(false);
+  const est = tapEstadoEncaminhamento(hm, currentUser);
+  if (est.encaminhado) {
+    const t = hm.encaminhadoTap || {};
+    return React.createElement(
+      "span",
+      { className: "homolog-tap-enc", "data-testid": "homolog-tap-encaminhado", title: `Encaminhado ao Termo de Abertura de Projeto por ${t.por || "—"} em ${t.em ? formatAuditWhen(new Date(t.em)) : "—"}` },
+      React.createElement(CheckCircle2, { size: 13 }),
+      " Encaminhado ao Termo de Abertura",
+    );
+  }
+  if (!est.acionavel) return null;
+  async function confirmar() {
+    if (enviando) return;
+    setEnviando(true);
+    try {
+      const r = await onEncaminhar(hm.id);
+      if (r && r.ok) setAberto(false);
+    } finally {
+      setEnviando(false);
+    }
+  }
+  const rotulo = "Encaminhar cliente ao Termo de Abertura de Projeto";
+  return React.createElement(
+    React.Fragment,
+    null,
+    React.createElement(
+      "button",
+      { type: "button", className: variante === "linha" ? "homolog-tap-check" : "doc-view-btn homolog-tap-check-detalhe", title: rotulo, "aria-label": rotulo, "data-testid": "homolog-tap-check", onClick: (e) => { e.stopPropagation(); setAberto(true); } },
+      React.createElement(CheckCircle2, { size: variante === "linha" ? 18 : 14 }),
+      variante === "linha" ? null : " Encaminhar ao Termo de Abertura de Projeto",
+    ),
+    aberto &&
+      React.createElement(
+        FinModal,
+        { titulo: "Encaminhar ao Termo de Abertura de Projeto", subtitulo: hm.cliente, icon: React.createElement(CheckCircle2, { size: 16 }), onClose: () => (enviando ? null : setAberto(false)) },
+        React.createElement("p", { className: "homolog-tap-confirma", "data-testid": "homolog-tap-confirma" }, `Confirma o encaminhamento de "${hm.cliente}" ao Termo de Abertura de Projeto? Será criada uma nova solicitação de abertura de cliente (etapas Comercial, Operacional e Financeiro), vinculada a esta homologação. Isso só pode ser feito uma vez.`),
+        React.createElement(
+          "div",
+          { className: "doc-row-delete-confirm-actions homolog-tap-confirma-acoes" },
+          React.createElement("button", { type: "button", className: "kpi-new-homolog-btn", disabled: enviando, "data-testid": "homolog-tap-confirmar", onClick: confirmar }, enviando ? "Encaminhando..." : "Confirmar encaminhamento"),
+          React.createElement("button", { type: "button", className: "filters-clear-btn filters-clear-inline", disabled: enviando, onClick: () => setAberto(false) }, "Cancelar"),
+        ),
+      ),
+  );
+}
 function HomologacaoStatusBadge({ status, atrasada }) {
   const meta = HOMOLOGACAO_STATUS_META[status] || {
     label: status,
@@ -16508,6 +16561,7 @@ function HomologacaoEnvioDetalhe({ homolog: h, isAdmin, revelando, credRevelada,
   companies,
   onAbrirLote,
   onPublicadoLote,
+  onEncaminharTap,
 }) {
   // Homologação de lote já concluída e ainda sem as documentações na pasta do
   // Drive (ex.: concluída antes deste recurso): copia ao abrir o detalhe.
@@ -16863,6 +16917,12 @@ function HomologacaoEnvioDetalhe({ homolog: h, isAdmin, revelando, credRevelada,
         " · Solicitada em ",
         formatAuditWhen(new Date(h.dataSolicitacao)),
       ),
+      !ehAtu &&
+        /*#__PURE__*/ React.createElement(
+          "div",
+          { className: "homolog-tap-bloco" },
+          /*#__PURE__*/ React.createElement(HomologTapEncaminhamento, { h, currentUser, onEncaminhar: onEncaminharTap, variante: "detalhe" }),
+        ),
       !isAdmin &&
         podeEditar &&
         /*#__PURE__*/ React.createElement(
@@ -17434,6 +17494,8 @@ function HomologacaoEnvioDetalhe({ homolog: h, isAdmin, revelando, credRevelada,
                     `${ev.usuario} atualizou as bases solicitadas.`,
                   ev.evento === "editada" &&
                     `${ev.usuario} editou os dados da solicitação.`,
+                  ev.evento === "encaminhado_tap" &&
+                    `${ev.usuario} encaminhou o cliente ao Termo de Abertura de Projeto.`,
                 ),
                 /*#__PURE__*/ React.createElement(
                   "div",
@@ -17578,6 +17640,51 @@ function HomologacaoEnvioDetalhe({ homolog: h, isAdmin, revelando, credRevelada,
     if (!atual) return;
     persist({ ...atual, ...patch });
   }
+  /** handleEncaminharTap: cria a abertura de cliente no Termo de Abertura de
+   *  Projeto a partir de uma Homologação concluída (confirmação feita no botão).
+   *  Id fixo da abertura + marcador no registro + checagem na coleção = nunca
+   *  duplica, nem com clique duplo, nem em duas abas. */
+  const encaminhandoTapRef = useRef({});
+  async function handleEncaminharTap(id) {
+    const atual = itemsMemoriaRef.current[id] || items.find((it) => it.id === id);
+    if (!atual) return { ok: false, erro: "Homologação não encontrada." };
+    if (encaminhandoTapRef.current[id]) return { ok: false, erro: "Encaminhamento em andamento." };
+    const res = finCriarSolicitacaoDeHomologacao(atual, currentUser, finModeloAtual().versao || null);
+    if (!res.ok) {
+      onNotify?.(res.erro, "error");
+      return res;
+    }
+    encaminhandoTapRef.current[id] = true;
+    try {
+      const db = await getDb();
+      if (!db) {
+        onNotify?.("O armazenamento persistente não está disponível agora; não foi possível encaminhar. Tente novamente em instantes.", "error");
+        return { ok: false, erro: "Armazenamento indisponível." };
+      }
+      const col = db.collection(FIN_COLECAO_SOLICITACOES);
+      const snap = await col.get();
+      const existente = snap.docs
+        .map((d) => d.data())
+        .find((x) => x && (x.id === res.item.id || (x.origemHomologacao && x.origemHomologacao.homologacaoId === id)));
+      const tapId = existente ? existente.id : res.item.id;
+      if (!existente) await col.doc(res.item.id).set(res.item);
+      const agora = new Date().toISOString();
+      const ultimo = itemsMemoriaRef.current[id] || atual;
+      persist({
+        ...ultimo,
+        encaminhadoTap: { tapId, em: agora, por: currentUser?.nome || "Usuário do portal", porEmail: currentUser?.email || "" },
+        historico: [...(ultimo.historico || []), { at: agora, usuario: currentUser?.nome || "Usuário do portal", evento: "encaminhado_tap", tapId }],
+      });
+      logDocumentAction("encaminhou_homologacao_termo_abertura", { homologacao: atual.cliente, consultor: atual.consultor?.nome });
+      onNotify?.(`"${atual.cliente}" foi encaminhado ao Termo de Abertura de Projeto.`, "info");
+      return { ok: true, tapId };
+    } catch (e) {
+      onNotify?.("Não foi possível encaminhar o cliente agora. Tente novamente.", "error");
+      return { ok: false, erro: "Falha ao gravar." };
+    } finally {
+      delete encaminhandoTapRef.current[id];
+    }
+  }
   /** registrarPublicacaoLote: grava no registro (versão MAIS RECENTE, pelo ref —
    *  nunca a cópia antiga de um clique) que as documentações do lote foram
    *  copiadas para a pasta do Drive. */
@@ -17698,6 +17805,7 @@ function HomologacaoEnvioDetalhe({ homolog: h, isAdmin, revelando, credRevelada,
       companies: companies,
       onAbrirLote: (loteId) => onIrParaRegistro?.("envio_lote", loteId),
       onPublicadoLote: registrarPublicacaoLote,
+      onEncaminharTap: handleEncaminharTap,
     });
   }
   const ehAtu = aba === "atualizacao";
@@ -17955,6 +18063,7 @@ function HomologacaoEnvioDetalhe({ homolog: h, isAdmin, revelando, credRevelada,
               h("th", null, "Status"),
               h("th", null, "Prazo"),
               h("th", null, "Link"),
+              !ehAtu && h("th", null, "Abertura de cliente"),
             ),
           ),
           h(
@@ -17997,6 +18106,17 @@ function HomologacaoEnvioDetalhe({ homolog: h, isAdmin, revelando, credRevelada,
                   { onClick: (e) => e.stopPropagation() },
                   h(HomologacaoLinkCell, { link: it.linkHomologacao }),
                 ),
+                !ehAtu &&
+                  h(
+                    "td",
+                    { className: "homolog-cell-tap", onClick: (e) => e.stopPropagation() },
+                    (() => {
+                      const est = tapEstadoEncaminhamento(it, currentUser);
+                      return est.acionavel || est.encaminhado
+                        ? h(HomologTapEncaminhamento, { h: it, currentUser, onEncaminhar: handleEncaminharTap, variante: "linha" })
+                        : "—";
+                    })(),
+                  ),
               );
             }),
           ),
@@ -18065,6 +18185,14 @@ function HomologacaoEnvioDetalhe({ homolog: h, isAdmin, revelando, credRevelada,
                 { className: "company-card-mobile-row" },
                 h("span", null, "Link"),
                 h(HomologacaoLinkCell, { link: it.linkHomologacao }),
+              ),
+            !ehAtu &&
+              (tapEstadoEncaminhamento(it, currentUser).acionavel || tapEstadoEncaminhamento(it, currentUser).encaminhado) &&
+              h(
+                "div",
+                { className: "company-card-mobile-row", onClick: (e) => e.stopPropagation() },
+                h("span", null, "Abertura de cliente"),
+                h(HomologTapEncaminhamento, { h: it, currentUser, onEncaminhar: handleEncaminharTap, variante: "detalhe" }),
               ),
           );
         }),
@@ -30504,33 +30632,35 @@ function finPodeVerRegistro(user, reg) {
 function finCriarSolicitacao(campos, user, modeloVersao) {
   const cliente = String(campos?.cliente || "").trim();
   const raizCnpj = finMascararRaizCnpj(campos?.raizCnpj);
-  const dataEnvio = String(campos?.dataEnvio || "").trim();
   const observacoes = String(campos?.observacoes || "").trim();
+  // Abertura que nasce de uma Homologação concluída: a Homologação não guarda o CNPJ,
+  // então a raiz fica em branco e é preenchida a partir do CNPJ da etapa Comercial.
+  const origem = campos?.origemHomologacao && campos.origemHomologacao.homologacaoId ? campos.origemHomologacao : null;
   if (!cliente) return { ok: false, erro: "Informe o cliente." };
-  if (!finRaizCnpjValida(raizCnpj)) return { ok: false, erro: "Informe a raiz do CNPJ do cliente (8 dígitos)." };
-  if (dataEnvio) {
-    if (!finDataIsoValida(dataEnvio)) return { ok: false, erro: "Data do envio inválida." };
-    if (dataEnvio > finHojeIso()) return { ok: false, erro: "A data do envio não pode ser futura." };
-  }
+  if (!origem && !finRaizCnpjValida(raizCnpj)) return { ok: false, erro: "Informe a raiz do CNPJ do cliente (8 dígitos)." };
   const nomeUsuario = user?.nome || "Usuário do portal";
+  // Data de criação: gerada pelo sistema, nunca digitada. Este valor é só o
+  // carimbo imediato da tela; o servidor grava o dele na primeira gravação do
+  // registro e o preserva em toda edição posterior (ver backend, PUT /api/db).
   const agora = new Date().toISOString();
   const eventos = [finEvento(nomeUsuario, "criada", { observacoes })];
   if (modeloVersao) eventos.push(finEvento(nomeUsuario, "modelo_disponibilizado", { versao: modeloVersao }));
-  if (dataEnvio) eventos.push(finEvento(nomeUsuario, "enviado_ao_cliente", { data: dataEnvio }));
+  if (origem) eventos.push(finEvento(nomeUsuario, "origem_homologacao", { homologacaoId: origem.homologacaoId }));
   return {
     ok: true,
     item: {
-      id: generateFinSolicitacaoId(),
+      id: campos?.id || generateFinSolicitacaoId(),
       cliente,
       consultor: { nome: nomeUsuario, email: user?.email || "" },
-      raizCnpj,
+      raizCnpj: finRaizCnpjValida(raizCnpj) ? raizCnpj : "",
       emailCliente: "",
-      dataEnvio: dataEnvio || null,
+      dataEnvio: null,
       observacoes,
       modeloVersao: modeloVersao || null,
-      status: dataEnvio ? "aguardando_cliente" : "modelo_nao_enviado",
+      status: "aguardando_cliente",
       respostas: [],
-      tap: { comercial: {}, operacional: {}, financeiro: {} },
+      tap: { comercial: origem ? { fezHomologacao: "Sim" } : {}, operacional: {}, financeiro: {} },
+      origemHomologacao: origem ? { ...origem, encaminhadoEm: agora, encaminhadoPor: nomeUsuario } : null,
       encaminhamentos: [],
       emailFinanceiro: null,
       dataEncaminhamento: null,
@@ -30542,17 +30672,39 @@ function finCriarSolicitacao(campos, user, modeloVersao) {
     },
   };
 }
-function finRegistrarEnvio(item, campos, usuarioNome) {
-  if (item.dataEnvio) return { ok: false, erro: "O envio do modelo ao cliente já foi registrado." };
-  const data = String(campos?.dataEnvio || "").trim();
-  if (!finDataIsoValida(data)) return { ok: false, erro: "Informe a data do envio." };
-  if (data > finHojeIso()) return { ok: false, erro: "A data do envio não pode ser futura." };
-  const patch = { dataEnvio: data };
-  if (item.status === "modelo_nao_enviado") patch.status = "aguardando_cliente";
-  return {
-    ok: true,
-    item: finAplicar(item, patch, finEvento(usuarioNome, "enviado_ao_cliente", { data }), usuarioNome),
-  };
+/** Homologação → Termo de Abertura de Projeto (pedido da Iasmin, 2026-11-12).
+ *  Só o fluxo de Homologação de NOVOS clientes (nunca "Atualização"), só com o
+ *  status Concluída, só pelo consultor que criou a solicitação (o Administrador
+ *  acompanha, mas não recebe a ação como se fosse o consultor) e uma única vez
+ *  por homologação (marcador `encaminhadoTap` + id fixo da abertura). */
+function tapEstadoEncaminhamento(hm, user) {
+  const elegivel = !!hm && homologacaoFluxoDe(hm) === "homologacao" && hm.status === "concluida";
+  const encaminhado = !!(hm && hm.encaminhadoTap && hm.encaminhadoTap.tapId);
+  const dono = !!hm && !!user && registroPertenceAoUsuario(hm.consultor, user);
+  return { elegivel, encaminhado, dono, acionavel: elegivel && dono && !encaminhado && !!user && can(user, "financeiroOperar") };
+}
+function finIdDeHomologacao(homologacaoId) {
+  return `fin-hm-${homologacaoId}`;
+}
+function finCriarSolicitacaoDeHomologacao(hm, user, modeloVersao) {
+  if (!hm || !hm.id) return { ok: false, erro: "Homologação não encontrada." };
+  if (homologacaoFluxoDe(hm) !== "homologacao") return { ok: false, erro: "Atualizações de Homologação não geram abertura de cliente." };
+  if (hm.status !== "concluida") return { ok: false, erro: "A homologação precisa estar com o status Concluída." };
+  const est = tapEstadoEncaminhamento(hm, user);
+  if (!est.dono) return { ok: false, erro: "Somente o consultor responsável por esta solicitação pode encaminhar o cliente." };
+  if (est.encaminhado) return { ok: false, erro: "Este cliente já foi encaminhado ao Termo de Abertura de Projeto." };
+  if (!can(user, "financeiroOperar")) return { ok: false, erro: "Seu perfil não tem permissão para criar solicitações no Termo de Abertura de Projeto." };
+  return finCriarSolicitacao(
+    {
+      id: finIdDeHomologacao(hm.id),
+      cliente: hm.cliente,
+      raizCnpj: "",
+      observacoes: "",
+      origemHomologacao: { homologacaoId: hm.id, concluidaEm: hm.dataConclusao || null, consultor: { nome: hm.consultor?.nome || "", email: hm.consultor?.email || "" } },
+    },
+    user,
+    modeloVersao,
+  );
 }
 /** finAnexarResposta: SEMPRE acrescenta uma nova versão — nunca substitui a
  *  anterior (pedido explícito: "não permitir que o arquivo seja substituído
@@ -30705,7 +30857,6 @@ const FIN_CAMPOS_EDITAVEIS = {
   consultorNome: "Consultor",
   consultorEmail: "E-mail do consultor",
   raizCnpj: "Raiz do CNPJ",
-  dataEnvio: "Data do envio",
   emailFinanceiro: "E-mail do Financeiro",
   observacoes: "Observações",
 };
@@ -30715,7 +30866,6 @@ function finEditarDados(item, campos, usuarioNome) {
     consultorNome: String(campos?.consultorNome ?? item.consultor?.nome ?? "").trim(),
     consultorEmail: String(campos?.consultorEmail ?? item.consultor?.email ?? "").trim(),
     raizCnpj: finMascararRaizCnpj(campos?.raizCnpj ?? finRaizCnpj(item)),
-    dataEnvio: String(campos?.dataEnvio ?? item.dataEnvio ?? "").trim(),
     emailFinanceiro: finNormalizarEmails(campos?.emailFinanceiro ?? item.emailFinanceiro ?? "").texto,
     observacoes: String(campos?.observacoes ?? item.observacoes ?? "").trim(),
   };
@@ -30724,12 +30874,6 @@ function finEditarDados(item, campos, usuarioNome) {
   if (!novo.consultorNome) return { ok: false, erro: "Informe o consultor responsável." };
   if (novo.consultorEmail && !finEmailValido(novo.consultorEmail)) return { ok: false, erro: "O e-mail do consultor não parece válido." };
   if (!finRaizCnpjValida(novo.raizCnpj)) return { ok: false, erro: "Informe a raiz do CNPJ do cliente (8 dígitos)." };
-  if (novo.dataEnvio) {
-    if (!finDataIsoValida(novo.dataEnvio)) return { ok: false, erro: "Data do envio inválida." };
-    if (novo.dataEnvio > finHojeIso()) return { ok: false, erro: "A data do envio não pode ser futura." };
-  } else if (item.dataEnvio) {
-    return { ok: false, erro: "A data do envio não pode ser removida depois que o modelo foi enviado." };
-  }
   if (temEncaminhamento) {
     if (!novo.emailFinanceiro) return { ok: false, erro: "O e-mail do Financeiro é obrigatório (já há um encaminhamento registrado)." };
     { const inv = finNormalizarEmails(novo.emailFinanceiro).invalido; if (inv) return { ok: false, erro: `O e-mail do Financeiro "${inv}" não parece válido.` }; }
@@ -30741,7 +30885,6 @@ function finEditarDados(item, campos, usuarioNome) {
     consultorNome: item.consultor?.nome || "",
     consultorEmail: item.consultor?.email || "",
     raizCnpj: finRaizCnpj(item),
-    dataEnvio: item.dataEnvio || "",
     emailFinanceiro: temEncaminhamento ? item.emailFinanceiro || "" : "",
     observacoes: item.observacoes || "",
   };
@@ -30753,7 +30896,6 @@ function finEditarDados(item, campos, usuarioNome) {
     cliente: novo.cliente,
     consultor: { nome: novo.consultorNome, email: novo.consultorEmail },
     raizCnpj: novo.raizCnpj,
-    dataEnvio: novo.dataEnvio || null,
     observacoes: novo.observacoes,
   };
   if (temEncaminhamento) {
@@ -30820,8 +30962,6 @@ const TAP_ETAPAS = [
           { id: "participouBid", rotulo: "Participou de BID?", tipo: "sn", obrig: true },
           { id: "fezHomologacao", rotulo: "Fez homologação no cliente?", tipo: "sn", obrig: true },
           { id: "respOperacionalGrupoprima", rotulo: "Responsável operacional Grupoprima", tipo: "texto", obrig: true },
-          { id: "respOperacionalCliente", rotulo: "Responsável operacional Cliente", tipo: "texto", obrig: true },
-          { id: "respFinanceiroCliente", rotulo: "Responsável Financeiro Cliente", tipo: "texto", obrig: true },
         ],
       },
       {
@@ -30848,7 +30988,7 @@ const TAP_ETAPAS = [
     grupos: [
       {
         titulo: "Contatos na empresa — Operações",
-        campos: [{ id: "contatosOperacoes", rotulo: "Contatos Operações", tipo: "contatos", obrig: true, dica: "Informe ao menos um contato com nome e telefone ou e-mail." }],
+        campos: [{ id: "contatosOperacoes", rotulo: "Contatos Operações", tipo: "contatos", obrig: true, dica: "Informe ao menos um contato com nome e telefone ou e-mail. Inclua aqui o responsável operacional do cliente." }],
       },
       {
         titulo: "1. Acionamento do cliente",
@@ -30883,7 +31023,6 @@ const TAP_ETAPAS = [
           { id: "q2_2_2", num: "2.2.2", rotulo: "Qual valor ou porcentagem do frete de devolução?", tipo: "texto", obrig: true, aplicaSe: (r) => r.q2_2_1 === "Sim" },
           { id: "q2_2_3", num: "2.2.3", rotulo: "Qual a forma de cobrança dos fretes de devolução?", tipo: "opcao", opcoes: ["CT-e complementar", "CT-e normal com nota de devolução"], obrig: true, aplicaSe: (r) => r.q2_2_1 === "Sim" },
           { id: "q2_3", num: "2.3", rotulo: "Os comprovantes/recibos de entrega/descarga precisam ser enviados físicos ou pode ser foto?", tipo: "opcao", opcoes: ["Físicos", "Pode ser foto"], obrig: true },
-          { id: "q2_4", num: "2.4", rotulo: "A carga é rastreada? (se couber no controle da operação)", tipo: "sn", obrig: false },
           { id: "q2_5", num: "2.5", rotulo: "Pagam diárias a partir de quantas horas de veículo parado?", dica: "Se não pagam diárias, escreva “Não paga”.", tipo: "texto", obrig: true },
           { id: "q2_5_1", num: "2.5.1", rotulo: "Qual o valor das diárias?", tipo: "texto", obrig: true, aplicaSe: (r) => !tapNaoPaga(r.q2_5) },
           { id: "q2_5_2", num: "2.5.2", rotulo: "Qual a forma de cobrança das diárias?", tipo: "opcao", opcoes: ["NF de serviço", "CT-e complementar"], obrig: true, aplicaSe: (r) => !tapNaoPaga(r.q2_5) },
@@ -30900,7 +31039,7 @@ const TAP_ETAPAS = [
     grupos: [
       {
         titulo: "Contatos na empresa — Financeiro",
-        campos: [{ id: "contatosFinanceiro", rotulo: "Contatos Financeiro", tipo: "contatos", obrig: true, dica: "Informe ao menos um contato com nome e telefone ou e-mail." }],
+        campos: [{ id: "contatosFinanceiro", rotulo: "Contatos Financeiro", tipo: "contatos", obrig: true, dica: "Informe ao menos um contato com nome e telefone ou e-mail. Inclua aqui o responsável financeiro do cliente." }],
       },
       {
         titulo: "3. Faturamento e pagamento",
@@ -31019,11 +31158,46 @@ function tapCalcularEtapa(chaveOuEtapa, respostas) {
     pctInt,
   };
 }
+/** tapEfetivo: as respostas de UMA etapa já com os dados que o portal JÁ tem
+ *  (pedido da Iasmin, 2026-11-12: nada é perguntado duas vezes). Valor salvo
+ *  sempre vence; o dado compartilhado só entra quando a chave ainda não existe
+ *  nas respostas da etapa. Perguntas retiradas do formulário continuam
+ *  gravadas nos registros antigos e alimentam o campo que as substituiu:
+ *    · Razão Social ← Cliente da solicitação; CNPJ ← começa pela Raiz do CNPJ;
+ *      Observações ← observações da solicitação; Fez homologação ← "Sim" quando
+ *      a abertura veio de uma Homologação concluída;
+ *    · "Responsável operacional/financeiro do cliente" (Comercial) → contatos
+ *      de Operações/Financeiro; "A carga é rastreada?" (2.4) → pergunta 1.2. */
+function tapEfetivo(item, chave) {
+  const tap = (item && item.tap) || {};
+  const r = { ...(tap[chave] || {}) };
+  const com = tap.comercial || {};
+  const op = tap.operacional || {};
+  const padrao = {};
+  const txt = (v) => (typeof v === "string" ? v.trim() : "");
+  const contatoDe = (nome) => [{ nome: txt(nome), cargo: "", telefone: "", email: "" }];
+  if (chave === "comercial" && item) {
+    if (txt(item.cliente)) padrao.razaoSocial = txt(item.cliente);
+    const raiz = finRaizCnpj(item);
+    if (raiz) padrao.cnpj = raiz + "/";
+    if (txt(item.observacoes)) padrao.observacoes = txt(item.observacoes);
+    if (item.origemHomologacao) padrao.fezHomologacao = "Sim";
+  }
+  if (chave === "operacional") {
+    if (op.q2_4 === "Sim" || op.q2_4 === "Não") padrao.q1_2 = op.q2_4;
+    if (txt(com.respOperacionalCliente)) padrao.contatosOperacoes = contatoDe(com.respOperacionalCliente);
+  }
+  if (chave === "financeiro" && txt(com.respFinanceiroCliente)) padrao.contatosFinanceiro = contatoDe(com.respFinanceiroCliente);
+  Object.keys(padrao).forEach((k) => {
+    if (r[k] === undefined || r[k] === null) r[k] = padrao[k];
+  });
+  return r;
+}
 /** tapResumo: as três etapas + selo. "Apto" = as TRÊS verdes E nenhum campo
  *  obrigatório aplicável faltando em nenhuma delas (percentual sozinho não basta). */
 function tapResumo(item) {
   const tap = (item && item.tap) || {};
-  const etapas = TAP_ETAPAS.map((e) => tapCalcularEtapa(e, tap[e.key] || {}));
+  const etapas = TAP_ETAPAS.map((e) => tapCalcularEtapa(e, tapEfetivo(item, e.key)));
   const todasVerdes = etapas.every((e) => e.cor === "verde");
   const semFaltas = etapas.every((e) => e.faltando.length === 0);
   return { etapas, apto: todasVerdes && semFaltas, todasVerdes, semFaltas };
@@ -31048,7 +31222,9 @@ function finSalvarTap(item, campos, usuarioNome) {
   if (antesResumo.apto !== depoisResumo.apto) {
     eventos.push(finEvento(usuarioNome, depoisResumo.apto ? "tap_apto" : "tap_apto_removido", {}));
   }
-  return { ok: true, item: finAplicar(item, { tap: novoTap }, eventos, usuarioNome), eventos, resumo: depoisResumo };
+  const patchTap = { tap: novoTap };
+  if (etapa.key === "comercial" && !finRaizCnpjValida(item.raizCnpj) && tapCnpjValido(respostas.cnpj)) patchTap.raizCnpj = finMascararRaizCnpj(respostas.cnpj);
+  return { ok: true, item: finAplicar(item, patchTap, eventos, usuarioNome), eventos, resumo: depoisResumo };
 }
 /* Raiz do CNPJ (8 primeiros dígitos) do cliente, lida do CNPJ informado na etapa
    Comercial do TAP. Identifica a empresa mesmo quando surgirem novas filiais. */
@@ -31117,6 +31293,8 @@ function finDescreverEvento(ev) {
       return { titulo: `${quem} criou a solicitação.`, detalhe: ev.observacoes || null };
     case "modelo_disponibilizado":
       return { titulo: `Modelo oficial (versão ${ev.versao}) disponibilizado ao consultor.`, detalhe: null };
+    case "origem_homologacao":
+      return { titulo: `${quem} encaminhou o cliente ao Termo de Abertura de Projeto após a conclusão da Homologação.`, detalhe: null };
     case "enviado_ao_cliente":
       return { titulo: `${quem} registrou o envio do modelo ao cliente${ev.email ? ` (${ev.email})` : ""} em ${dataBR(ev.data)}.`, detalhe: null };
     case "resposta_recebida":
@@ -31187,12 +31365,6 @@ async function finEnviarArquivo(file, pasta) {
  *  pra alterar um registro, então permissão/visibilidade são checadas aqui
  *  (na lógica), nunca só escondendo um botão. */
 const FIN_OPERACOES = {
-  registrarEnvio: {
-    fn: finRegistrarEnvio,
-    exigir: "operar",
-    audit: "registrou_envio_financeiro",
-    msg: "Envio ao cliente registrado.",
-  },
   anexarResposta: {
     fn: finAnexarResposta,
     exigir: "operar",
@@ -31334,6 +31506,52 @@ function TapChip({ e, compacto }) {
 function TapChips({ item, compacto }) {
   const r = tapResumo(item);
   return finEl("span", { className: "tap-chips" }, r.etapas.map((e) => finEl(TapChip, { key: e.chave, e, compacto })));
+}
+/** Esferas do dashboard (pedido da Iasmin, 2026-11-12): uma por etapa, na linha de
+ *  cada cliente. Usam o MESMO percentual de preenchimento da solicitação
+ *  (tapResumo → pctInt), mas com as faixas próprias do dashboard:
+ *  0–60% vermelho · 61–79% amarelo · 80–100% verde. */
+const TAP_ESFERA_AMARELO_A_PARTIR_DE = 61;
+const TAP_ESFERA_VERDE_A_PARTIR_DE = 80;
+function tapCorEsfera(pct) {
+  if (pct >= TAP_ESFERA_VERDE_A_PARTIR_DE) return "verde";
+  if (pct >= TAP_ESFERA_AMARELO_A_PARTIR_DE) return "amarelo";
+  return "vermelho";
+}
+function TapEsfera({ e }) {
+  const cor = tapCorEsfera(e.pctInt);
+  const R = 15;
+  const C = 2 * Math.PI * R;
+  const cheia = e.pctInt >= 100;
+  return finEl(
+    "span",
+    {
+      className: `tap-esfera tap-cor-${cor}` + (cheia ? " tap-esfera-cheia" : ""),
+      title: `${e.titulo}: ${e.pctInt}% — ${e.estadoTexto}`,
+      role: "img",
+      "aria-label": `${e.titulo}: ${e.pctInt}% preenchido`,
+      "data-etapa": e.chave,
+      "data-pct": e.pctInt,
+      "data-cor": cor,
+    },
+    finEl(
+      "span",
+      { className: "tap-esfera-disco" },
+      finEl(
+        "svg",
+        { viewBox: "0 0 40 40", "aria-hidden": "true" },
+        finEl("circle", { className: "tap-esfera-miolo", cx: 20, cy: 20, r: R }),
+        finEl("circle", { className: "tap-esfera-trilho", cx: 20, cy: 20, r: R, fill: "none", strokeWidth: 4 }),
+        finEl("circle", { className: "tap-esfera-prog", cx: 20, cy: 20, r: R, fill: "none", strokeWidth: 4, strokeLinecap: "round", transform: "rotate(-90 20 20)", strokeDasharray: C, strokeDashoffset: C * (1 - Math.min(100, e.pctInt) / 100), style: { opacity: e.pctInt === 0 ? 0 : 1 } }),
+      ),
+      finEl("span", { className: "tap-esfera-pct" }, cheia ? finEl(CheckCircle2, { size: 16 }) : e.pctInt + "%"),
+    ),
+    finEl("span", { className: "tap-esfera-rotulo" }, e.titulo),
+  );
+}
+function TapEsferas({ item }) {
+  const r = tapResumo(item);
+  return finEl("span", { className: "tap-esferas", role: "group", "aria-label": "Preenchimento das etapas: Comercial, Operacional e Financeiro" }, r.etapas.map((e) => finEl(TapEsfera, { key: e.chave, e })));
 }
 function TapSelo({ grande }) {
   return finEl(
@@ -31512,12 +31730,11 @@ function FinErro({ erro }) {
 function FinNovaSolicitacaoModal({ currentUser, modeloVersao, onClose, onCriar }) {
   const [cliente, setCliente] = useState("");
   const [raizCnpj, setRaizCnpj] = useState("");
-  const [dataEnvio, setDataEnvio] = useState("");
   const [observacoes, setObservacoes] = useState("");
   const [erro, setErro] = useState(null);
   function handleSubmit(e) {
     e.preventDefault();
-    const res = onCriar({ cliente, raizCnpj, dataEnvio, observacoes });
+    const res = onCriar({ cliente, raizCnpj, observacoes });
     if (!res.ok) setErro(res.erro);
   }
   return finEl(
@@ -31538,34 +31755,9 @@ function FinNovaSolicitacaoModal({ currentUser, modeloVersao, onClose, onCriar }
         { rotulo: "Raiz do CNPJ", dica: " (obrigatório — 8 primeiros dígitos, comuns a todas as filiais do cliente)" },
         finEl("input", { type: "text", inputMode: "numeric", value: raizCnpj, onChange: (e) => setRaizCnpj(finMascararRaizCnpj(e.target.value)), placeholder: "00.000.000", maxLength: 10, autoComplete: "off", "data-testid": "nova-raiz-cnpj" }),
       ),
-      finEl(
-        FinCampo,
-        { rotulo: "Data do envio", dica: " (deixe em branco se ainda não enviou)" },
-        finEl("input", { type: "date", value: dataEnvio, max: finHojeIso(), onChange: (e) => setDataEnvio(e.target.value) }),
-      ),
       finEl(FinCampo, { rotulo: "Observações", dica: " (opcional)" }, finEl("textarea", { value: observacoes, onChange: (e) => setObservacoes(e.target.value), placeholder: "Contexto adicional sobre esta solicitação" })),
       finEl("p", { className: "homolog-bases-hint" }, modeloVersao ? `Modelo oficial em uso: versão ${modeloVersao}.` : "Ainda não há modelo oficial cadastrado — peça ao Administrador para enviá-lo."),
       finEl(FinAcoesForm, { onCancel: onClose, rotuloOk: "Registrar solicitação" }),
-    ),
-  );
-}
-function FinRegistrarEnvioModal({ item, onClose, onConfirmar }) {
-  const [dataEnvio, setDataEnvio] = useState(finHojeIso());
-  const [erro, setErro] = useState(null);
-  function handleSubmit(e) {
-    e.preventDefault();
-    const res = onConfirmar({ dataEnvio });
-    if (!res.ok) setErro(res.erro);
-  }
-  return finEl(
-    FinModal,
-    { titulo: "Registrar envio ao cliente", subtitulo: finRaizCnpj(item) ? `${item.cliente} · Raiz do CNPJ ${finRaizCnpj(item)}` : item.cliente, icon: finEl(Mail, { size: 16 }), onClose },
-    finEl(
-      "form",
-      { onSubmit: handleSubmit },
-      finEl(FinErro, { erro }),
-      finEl(FinCampo, { rotulo: "Data em que o modelo foi enviado" }, finEl("input", { type: "date", value: dataEnvio, max: finHojeIso(), onChange: (e) => setDataEnvio(e.target.value) })),
-      finEl(FinAcoesForm, { onCancel: onClose, rotuloOk: "Registrar envio" }),
     ),
   );
 }
@@ -31695,7 +31887,6 @@ function FinEditarModal({ item, onClose, onConfirmar }) {
     consultorNome: item.consultor?.nome || "",
     consultorEmail: item.consultor?.email || "",
     raizCnpj: finRaizCnpj(item),
-    dataEnvio: item.dataEnvio || "",
     emailFinanceiro: item.emailFinanceiro || "",
     observacoes: item.observacoes || "",
   });
@@ -31717,7 +31908,6 @@ function FinEditarModal({ item, onClose, onConfirmar }) {
       finEl(FinCampo, { rotulo: "Consultor responsável" }, finEl("input", { type: "text", value: v.consultorNome, onChange: set("consultorNome") })),
       finEl(FinCampo, { rotulo: "E-mail do consultor", dica: " (opcional)" }, finEl("input", { type: "text", value: v.consultorEmail, onChange: set("consultorEmail") })),
       finEl(FinCampo, { rotulo: "Raiz do CNPJ", dica: " (8 dígitos)" }, finEl("input", { type: "text", inputMode: "numeric", value: v.raizCnpj, maxLength: 10, placeholder: "00.000.000", onChange: (e) => setV((prev) => ({ ...prev, raizCnpj: finMascararRaizCnpj(e.target.value) })) })),
-      finEl(FinCampo, { rotulo: "Data do envio" }, finEl("input", { type: "date", value: v.dataEnvio, max: finHojeIso(), onChange: set("dataEnvio") })),
       temEncaminhamento && finEl(FinCampo, { rotulo: "E-mail(s) do Financeiro (último encaminhamento)", dica: " (separe com ponto e vírgula)" }, finEl("input", { type: "text", value: v.emailFinanceiro, onChange: set("emailFinanceiro") })),
       finEl(FinCampo, { rotulo: "Observações" }, finEl("textarea", { value: v.observacoes, onChange: set("observacoes") })),
       finEl(FinAcoesForm, { onCancel: onClose, rotuloOk: "Salvar correções" }),
@@ -31913,7 +32103,7 @@ function FinDetalheView({ item, currentUser, onBack, onExecutar, onExcluir, onSa
   salvarTapRef.current = onSalvarTap;
   function tapPersistir(chave, valores) {
     if (!chave || !valores) return;
-    const atual = (tapRef.current.item.tap || {})[chave] || {};
+    const atual = tapEfetivo(tapRef.current.item, chave);
     if (JSON.stringify(atual) !== JSON.stringify(valores)) salvarTapRef.current?.(tapRef.current.item.id, chave, valores);
     setTapSalvo(true);
   }
@@ -31934,7 +32124,7 @@ function FinDetalheView({ item, currentUser, onBack, onExecutar, onExcluir, onSa
       setTapDraft(null);
       return;
     }
-    const v = { ...((item.tap || {})[chave] || {}) };
+    const v = { ...tapEfetivo(item, chave) };
     tapRef.current.chave = chave;
     tapRef.current.valores = v;
     setTapAberta(chave);
@@ -32009,7 +32199,7 @@ function FinDetalheView({ item, currentUser, onBack, onExecutar, onExcluir, onSa
               "Consultor: ",
               item.consultor?.nome,
               item.consultor?.email ? ` (${item.consultor.email})` : "",
-              " · Solicitada em ",
+              " · Data de criação: ",
               formatAuditWhen(new Date(item.criadoEm)),
             ),
           ),
@@ -32073,7 +32263,6 @@ function FinDetalheView({ item, currentUser, onBack, onExecutar, onExcluir, onSa
         }),
       ),
     ),
-    modal === "envio" && finEl(FinRegistrarEnvioModal, { item, onClose: () => setModal(null), onConfirmar: (v) => executar("registrarEnvio", v) }),
     modal === "resposta" && finEl(FinAnexarRespostaModal, { item, onClose: () => setModal(null), onConfirmar: (v) => executar("anexarResposta", v) }),
     modal === "encaminhar" && finEl(FinEncaminharModal, { item, onClose: () => setModal(null), onConfirmar: (v) => executar("encaminhar", v) }),
     modal === "pendencia" &&
@@ -32169,8 +32358,12 @@ function FinanceiroView({ currentUser, onNotify, onView }) {
     return getDb()
       .then((db) => {
         if (!db) return;
-        return db.collection(FIN_COLECAO_SOLICITACOES).doc(item.id).set(item).then(() => {
+        return db.collection(FIN_COLECAO_SOLICITACOES).doc(item.id).set(item).then((r) => {
           if (pendentesRef.current[item.id] === item) delete pendentesRef.current[item.id];
+          // Data de criação: vale a do servidor (primeira gravação) — espelha na tela já.
+          if (r && r.criadoEm && r.criadoEm !== item.criadoEm) {
+            setItems((prev) => prev.map((it) => (it.id === item.id && it.criadoEm !== r.criadoEm ? { ...it, criadoEm: r.criadoEm } : it)));
+          }
         });
       })
       .catch(() => {
@@ -32364,7 +32557,7 @@ function FinanceiroView({ currentUser, onNotify, onView }) {
         finEl(
           "thead",
           null,
-          finEl("tr", null, ["Data", "Cliente", "Consultor", "Raiz do CNPJ", "Status", "Retorno do cliente", "Financeiro", "Última atualização", "Ação"].map((t) => finEl("th", { key: t }, t))),
+          finEl("tr", null, ["Data de criação", "Cliente", "Consultor", "Raiz do CNPJ", "Status", "Etapas", "Retorno do cliente", "Financeiro", "Última atualização", "Ação"].map((t) => finEl("th", { key: t }, t))),
         ),
         finEl(
           "tbody",
@@ -32373,11 +32566,12 @@ function FinanceiroView({ currentUser, onNotify, onView }) {
             finEl(
               "tr",
               { key: it.id, onClick: () => setSelectedId(it.id), style: { cursor: "pointer" } },
-              finEl("td", { className: "mono" }, isoDateToBR((it.criadoEm || "").slice(0, 10))),
+              finEl("td", { className: "mono", "data-testid": "fin-data-criacao" }, it.criadoEm ? formatAuditWhen(new Date(it.criadoEm)) : "—"),
               finEl("td", null, it.cliente),
               finEl("td", null, it.consultor?.nome),
               finEl("td", { className: "mono", "data-testid": "fin-raiz-cnpj" }, finRaizCnpj(it) || "—"),
               finEl("td", null, finEl(FinStatusBadge, { status: it.status })),
+              finEl("td", { className: "fin-cell-esferas", "data-testid": "fin-esferas" }, finEl(TapEsferas, { item: it })),
               finEl("td", { className: "fin-cell-retorno", onClick: (e) => e.stopPropagation() }, finRetornoCliente(it, { onView, onNotify })),
               finEl("td", { className: "fin-cell-email", title: it.emailFinanceiro || "" }, finEmailsEl(it.emailFinanceiro)),
               finEl("td", { className: "mono" }, formatAuditWhen(new Date(finUltimaAtualizacao(it)))),
@@ -32398,7 +32592,9 @@ function FinanceiroView({ currentUser, onNotify, onView }) {
           { key: it.id, className: "company-card-mobile", onClick: () => setSelectedId(it.id) },
           finEl("div", { className: "company-card-mobile-top" }, finEl("span", { className: "company-mini-tag" }, it.cliente), finEl(FinStatusBadge, { status: it.status })),
           finEl("div", { className: "company-card-mobile-row" }, finEl("span", null, "Consultor"), finEl("span", null, it.consultor?.nome)),
+          finEl("div", { className: "company-card-mobile-row" }, finEl("span", null, "Data de criação"), finEl("span", { className: "mono" }, it.criadoEm ? formatAuditWhen(new Date(it.criadoEm)) : "—")),
           finEl("div", { className: "company-card-mobile-row" }, finEl("span", null, "Raiz do CNPJ"), finEl("span", { className: "mono" }, finRaizCnpj(it) || "—")),
+          finEl("div", { className: "company-card-mobile-row company-card-mobile-esferas" }, finEl("span", null, "Etapas"), finEl(TapEsferas, { item: it })),
           finEl("div", { className: "company-card-mobile-row", onClick: (e) => e.stopPropagation() }, finEl("span", null, "Retorno do cliente"), finEl("span", { className: "fin-cell-retorno" }, finRetornoCliente(it, { onView, onNotify }))),
           finEl("div", { className: "company-card-mobile-row" }, finEl("span", null, "Financeiro"), finEl("span", { className: "fin-cell-email" }, finEmailsEl(it.emailFinanceiro))),
           finEl("div", { className: "company-card-mobile-row" }, finEl("span", null, "Atualizada"), finEl("span", null, formatAuditWhen(new Date(finUltimaAtualizacao(it))))),
@@ -35803,6 +35999,31 @@ function GrupoprimaPortal() {
         .portal-root[data-theme="dark"] .tap-cor-amarelo { --tap-c: #f3c969; --tap-bg: rgba(243,201,105,0.14); --tap-bd: rgba(243,201,105,0.5); }
         .portal-root[data-theme="dark"] .tap-cor-verde { --tap-c: #7FE6A0; --tap-bg: rgba(107,254,156,0.14); --tap-bd: rgba(107,254,156,0.5); }
         .tap-chip.tap-cor-vermelho, .tap-chip.tap-cor-amarelo, .tap-chip.tap-cor-verde { color: var(--tap-c); background: var(--tap-bg); border-color: var(--tap-bd); }
+        .homolog-tap-check { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; border-radius: 50%; border: 1px solid rgba(40,170,100,0.6); background: rgba(40,170,100,0.14); color: #0b6b3a; cursor: pointer; }
+        .homolog-tap-check:hover { background: rgba(40,170,100,0.28); }
+        .portal-root[data-theme="dark"] .homolog-tap-check { color: #7FE6A0; border-color: rgba(107,254,156,0.5); background: rgba(107,254,156,0.14); }
+        .homolog-tap-enc { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; font-weight: 700; color: #0b6b3a; white-space: nowrap; }
+        .portal-root[data-theme="dark"] .homolog-tap-enc { color: #7FE6A0; }
+        .homolog-tap-bloco { margin: 10px 0 0; }
+        .homolog-tap-bloco:empty { display: none; }
+        .homolog-tap-confirma { font-size: 13.5px; line-height: 1.5; margin: 0 0 14px; }
+        .homolog-tap-confirma-acoes { display: flex; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
+        .tap-esferas { display: inline-flex; gap: 10px; align-items: flex-start; }
+        .tap-esfera { display: inline-flex; flex-direction: column; align-items: center; gap: 3px; min-width: 58px; color: var(--tap-c); }
+        .tap-esfera-disco { position: relative; width: 38px; height: 38px; display: inline-block; }
+        .tap-esfera-disco svg { width: 100%; height: 100%; display: block; }
+        .tap-esfera-miolo { fill: var(--tap-bg); }
+        .tap-esfera-trilho { stroke: var(--tap-bd); opacity: 0.55; }
+        .tap-esfera-prog { stroke: var(--tap-c); transition: stroke-dashoffset .5s cubic-bezier(.4,0,.2,1), opacity .2s; }
+        .tap-esfera-pct { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 800; color: var(--tap-c); letter-spacing: -0.02em; }
+        .tap-esfera-rotulo { font-size: 10px; font-weight: 700; color: var(--carvao); line-height: 1.1; white-space: nowrap; }
+        .tap-esfera-cheia .tap-esfera-miolo { fill: var(--tap-c); }
+        .tap-esfera-cheia .tap-esfera-pct { color: #fff; }
+        .portal-root[data-theme="dark"] .tap-esfera-cheia .tap-esfera-pct { color: #0b2a1a; }
+        .fin-cell-esferas { min-width: 200px; }
+        .company-card-mobile-esferas { align-items: flex-start; }
+        @media (max-width: 640px) { .tap-esferas { gap: 6px; flex-wrap: wrap; justify-content: flex-end; } .tap-esfera { min-width: 52px; } }
+        @media (prefers-reduced-motion: reduce) { .tap-esfera-prog { transition: none; } }
         .tap-selo { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; font-weight: 800; padding: 3px 10px; border-radius: 999px; color: #0b4a2c; background: rgba(107,254,156,0.35); border: 1px solid rgba(40,170,100,0.7); white-space: nowrap; }
         .portal-root[data-theme="dark"] .tap-selo { color: #b9f7cd; background: rgba(107,254,156,0.18); border-color: rgba(107,254,156,0.6); }
         .tap-selo-grande { font-size: 15px; padding: 8px 18px; margin-top: 12px; box-shadow: 0 0 0 3px rgba(107,254,156,0.18); }
