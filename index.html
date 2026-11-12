@@ -7689,6 +7689,50 @@ async function amostrarViaBackend({ system, turns, tools }) {
       },
     },
     {
+      name: "listar_vencimentos",
+      description:
+        "Lista os documentos REAIS vencidos e/ou próximos do vencimento (com a validade) em toda a base ou numa empresa/filial. Use para 'o que está vencido', 'o que vence este mês', 'vencendo nos próximos 30 dias', 'o que vence em PE'. Documentos de abrangência da empresa aparecem uma vez só.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          situacao: {
+            type: "string",
+            description: "'vencido', 'proximo' ou 'ambos' (padrão: ambos)",
+          },
+          referencia: {
+            type: "string",
+            description: "opcional: município, número da filial ou 'matriz' para limitar a uma base",
+          },
+        },
+      },
+      execute: (input) => {
+        const sit = String((input && input.situacao) || "ambos").toLowerCase();
+        const ref = String((input && input.referencia) || "").trim();
+        const alvo = ref ? findCompanyInQuery(ref, companies) : null;
+        if (ref && !alvo) return { encontrada: false };
+        const origem = alvo ? [alvo] : companies;
+        const vistos = new Map();
+        origem.forEach((c) =>
+          (c.documentos || []).forEach((d) => {
+            if (vistos.has(d.id)) return;
+            const ehVenc = d.status === "vencido";
+            const ehProx = d.status === "proximo";
+            if (!(ehVenc || ehProx)) return;
+            if (sit.startsWith("vencid") && !ehVenc) return;
+            if (sit.startsWith("prox") && !ehProx) return;
+            vistos.set(d.id, {
+              documento: d.tipo,
+              onde: docScopeLabel(d, companies),
+              situacao: ehVenc ? "vencido" : "próximo do vencimento",
+              validade: d.validade || null,
+            });
+          }),
+        );
+        const lista = [...vistos.values()];
+        return { total: lista.length, documentos: lista.slice(0, 60) };
+      },
+    },
+    {
       name: "estatisticas_gerais_da_base",
       description:
         "Retorna totais REAIS da base documental inteira: número de empresas, número de documentos, quantos estão vencidos, próximos do vencimento e necessitando conferência.",
@@ -7773,7 +7817,7 @@ async function amostrarViaBackend({ system, turns, tools }) {
     "Seja natural e direto; não force um tamanho de resposta artificial — curto quando a pergunta é simples, mais completo quando a pessoa realmente precisa de detalhe.",
     "Nunca use marcação markdown (**negrito**, *itálico*, __sublinhado__, `código`, títulos com #, listas com - ou *): a interface do chat exibe o texto puro, sem interpretar esses símbolos, e eles apareceriam literalmente na tela. Para destacar algo, use apenas o nome exato (ex.: o botão Baixar ZIP) sem nenhum símbolo ao redor. Quando a resposta for um passo a passo (como enviar uma homologação em lote, criar uma nova homologação, ou baixar um documento), numere os passos em texto simples (1. 2. 3.), nunca com marcadores.",
     "Interprete pedidos curtos e informais sem exigir que a pessoa fale como um sistema (ex.: 'CNPJ de PE' = Cartão CNPJ da filial de Pernambuco; 'alvará de MG'; 'tudo da matriz'). Se a intenção for clara, execute direto. Só pergunte quando houver dúvida real sobre qual documento a pessoa quer, e faça uma única pergunta simples. Quando houver várias versões do mesmo documento, entregue a mais recente, salvo se a pessoa pedir o histórico. Só entregue o que as ferramentas realmente encontraram — nunca invente documento, data, validade ou CNPJ.",
-    "Você enxerga a conversa anterior: uma resposta curta da pessoa (ex.: só 'matriz', 'PE', 'sim', 'o de 2025') responde à sua última pergunta — retome o pedido anterior e execute-o com as ferramentas, sem recomeçar nem tratar a frase isolada. Mensagem avulsa que cita um documento ou categoria, mesmo sem verbo e com erros de digitação ou plural (ex.: 'inscricoes estadual matriz', 'alvara mg', 'seguros'), é pedido de ENVIO: chame a ferramenta de entrega em vez de só conversar. Quando a pessoa pedir um documento sem citar a base e ele não for corporativo, entregue o da Matriz e diga que é da Matriz (ela pede outra base se quiser), em vez de perguntar a base; pergunte só quando o TIPO de documento for realmente ambíguo, com uma única pergunta simples.",
+    "Você enxerga a conversa anterior: uma resposta curta da pessoa (ex.: só 'matriz', 'PE', 'sim', 'o de 2025') responde à sua última pergunta — retome o pedido anterior e execute-o com as ferramentas, sem recomeçar nem tratar a frase isolada. Mensagem avulsa que cita um documento ou categoria, mesmo sem verbo e com erros de digitação ou plural (ex.: 'inscricoes estadual matriz', 'alvara mg', 'seguros'), é pedido de ENVIO: chame a ferramenta de entrega em vez de só conversar. Quando a pessoa pedir um documento sem citar a base e ele não for corporativo, entregue o da Matriz e diga que é da Matriz (ela pede outra base se quiser), em vez de perguntar a base; pergunte só quando o TIPO de documento for realmente ambíguo, com uma única pergunta simples. Para vencimentos (o que está vencido, o que vence em N dias, o que vence em uma base) use a ferramenta de vencimentos. Sempre que precisar de uma resposta da pessoa, termine a mensagem com a pergunta (com ponto de interrogação), nunca com frase solta tipo 'é só dizer'.",
     CONHECIMENTO_INSTITUCIONAL_GRUPOPRIMA,
   ].join(" ");
   const conversationTurns = [
@@ -12631,6 +12675,11 @@ function ChatDrawer({
   // curta da pessoa é a resposta a ela e segue para a IA com o histórico —
   // em vez de ser lida isoladamente pelo motor de regras (ex.: "matriz").
   const aguardandoIARef = useRef(false);
+  // "IA primeiro": toda mensagem vai primeiro para o Claude (com o histórico
+  // da conversa); o motor de regras só entra como reserva quando a IA não
+  // está disponível. Vira false quando o servidor informa que a IA não está
+  // configurada (evita tentar de novo a cada mensagem).
+  const iaDisponivelRef = useRef(true);
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, open]);
@@ -13489,6 +13538,14 @@ function ChatDrawer({
       await responderComIA(text);
       return;
     }
+    // IA primeiro (exceto perguntas de "como usar o portal", que têm resposta
+    // pronta): se a IA responder, acabou; se não puder, segue para o motor de regras.
+    let iaTentada = false;
+    if (iaDisponivelRef.current && !isHelpQuestion(text)) {
+      iaTentada = true;
+      const r = await responderComIA(text, { aoFalharContinuar: true });
+      if (r !== "fallback") return;
+    }
     const explicitCompany = findCompanyInQuery(text, companies);
     const company = resolveContextualCompany(text, explicitCompany);
     if (isHelpQuestion(text)) {
@@ -13747,13 +13804,23 @@ function ChatDrawer({
         return;
       }
     }
-    return responderComIA(text);
+    return responderComIA(text, { pularChamada: iaTentada });
   }
   /** responderComIA: conversa com a IA (Claude) usando o histórico da
-   *  conversa ativa. Chamada pelo fim do motor de regras (quando ele não
-   *  soube responder) e quando a pessoa está respondendo a uma pergunta
-   *  feita pela própria IA. */
-  async function responderComIA(text) {
+   *  conversa ativa. É a PRIMEIRA etapa de toda mensagem (opts.aoFalharContinuar:
+   *  se a IA não puder responder e nada foi entregue, devolve "fallback" e o
+   *  motor de regras assume), e também o fim do motor de regras. */
+  async function responderComIA(text, opts = {}) {
+    if (opts.pularChamada) {
+      // A IA já foi tentada nesta mensagem e falhou; o motor de regras também
+      // não soube responder.
+      pushMessage({
+        role: "assistant",
+        type: "text",
+        text: "Não encontrei essa informação na base documental, e a conversa por IA não está disponível agora. Consultas diretas à base (documentos, homologações, vencimentos, pendências) e dúvidas sobre o uso do portal continuam funcionando normalmente.",
+      });
+      return "erro";
+    }
     const pendingId = nextId();
     setMessages((prev) => [
       ...prev,
@@ -13832,6 +13899,21 @@ function ChatDrawer({
         };
       },
     };
+    let houveEntrega = false;
+    {
+      const docOrig = deliverActions.deliverDocument;
+      const todosOrig = deliverActions.deliverAll;
+      deliverActions.deliverDocument = (a, b) => {
+        const r = docOrig(a, b);
+        if (r && r.entregue) houveEntrega = true;
+        return r;
+      };
+      deliverActions.deliverAll = (a) => {
+        const r = todosOrig(a);
+        if (r && r.entregue) houveEntrega = true;
+        return r;
+      };
+    }
     let { text: aiText, unavailable, erro: aiErro } = await trySampleAnswer(
       history,
       text,
@@ -13846,9 +13928,31 @@ function ChatDrawer({
     // mensagem abaixo explica isso, mas todo o motor de regras (consultas,
     // entrega de documento, ZIP, homologações) continua funcionando normalmente.
     if (aiText) {
-      aguardandoIARef.current = /\?\s*$/.test(aiText.trim());
-      updateMessage(pendingId, { text: aiText });
-    } else if (unavailable) {
+      // A IA está esperando uma resposta quando a mensagem faz pergunta ou pede
+      // uma escolha ("qual base", "é só dizer", "me diga"...), mesmo sem "?" no fim.
+      aguardandoIARef.current =
+        /\?|\b(qual|quais)\b|[eé] s[oó] (dizer|avisar)|\bme (diga|informe|avise|confirme)\b|pode me (dizer|informar)|\bse quiser\b/i.test(
+          aiText.trim().slice(-400),
+        );
+      // A resposta final entra sempre no FIM da conversa (depois de qualquer
+      // cartão/aviso que as ferramentas tenham exibido enquanto a IA trabalhava).
+      setMessages((prev) => prev.filter((m) => m.id !== pendingId));
+      pushMessage({ role: "assistant", type: "text", text: aiText });
+      return "ok";
+    }
+    if (unavailable) iaDisponivelRef.current = false;
+    if (houveEntrega) {
+      setMessages((prev) => prev.filter((m) => m.id !== pendingId));
+      pushMessage({ role: "assistant", type: "text", text: "Pronto — o(s) documento(s) acima atendem ao seu pedido." });
+      return "ok";
+    }
+    if (opts.aoFalharContinuar) {
+      // Nada foi entregue: tira o "Pensando..." e deixa o motor de regras responder.
+      setMessages((prev) => prev.filter((m) => m.id !== pendingId));
+      if (aiErro) pushMessage({ role: "assistant", type: "text", text: `${aiErro} Seguindo no modo básico.` });
+      return "fallback";
+    }
+    if (unavailable) {
       updateMessage(pendingId, {
         text: "Não encontrei essa informação na base documental, e a conversa livre do assistente não está disponível agora. Consultas diretas à base (documentos, homologações, vencimentos, pendências) e dúvidas sobre o uso do portal continuam funcionando normalmente.",
       });
@@ -13859,6 +13963,7 @@ function ChatDrawer({
           "Não consegui obter uma resposta agora. Pode tentar reformular a pergunta ou perguntar de novo em um instante?",
       });
     }
+    return "erro";
   }
   const baseCtx = screenContext && screenContext.view === "company" && screenContext.company;
   const suggestions = [
