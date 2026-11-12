@@ -2019,6 +2019,100 @@ const DRIVE_KNOWN_SUBFOLDERS = [
  *  alternativa (ex.: se o backend estiver fora do ar). */ const DRIVE_PROXY_URL =
   "https://grupoprima-drive-proxy-350155686890.southamerica-east1.run.app";
 const DRIVE_PROXY_KEY = "Z8ib8D02tbTvCsc4O54KjMbdTU1WGSBsx14m9Ng8";
+/* =========================================================================
+   SESSÃO DO PORTAL (2026-11) — o login agora é conferido no SERVIDOR
+   (POST /api/auth/login) e devolve um token assinado. Este token vai no
+   cabeçalho X-Portal-Session de TODA chamada ao backend (o fetch abaixo
+   faz isso sozinho, para nenhuma tela precisar saber disso). O servidor é
+   quem decide: sessão válida, usuário ativo/autorizado e dono do registro.
+   O que a interface esconde é só conveniência — a barreira é o servidor.
+   ========================================================================= */
+const PORTAL_TOKEN_STORAGE_KEY = "grupoprima_portal_token";
+const PORTAL_ATIVIDADE_STORAGE_KEY = "grupoprima_portal_atividade";
+const PORTAL_INATIVIDADE_LIMITE_MS = 30 * 60 * 1000; // logout após 30 min SEM atividade real
+const PORTAL_INATIVIDADE_AVISO_MS = 2 * 60 * 1000; // aviso nos 2 min finais
+const MSG_ACESSO_PENDENTE =
+  "Seu cadastro foi realizado com sucesso e está aguardando autorização de acesso. Para liberar sua utilização da plataforma, entre em contato com o administrador responsável e informe que seu cadastro foi concluído.";
+let portalSessionToken = null;
+try {
+  portalSessionToken = localStorage.getItem(PORTAL_TOKEN_STORAGE_KEY) || null;
+} catch (e) {
+  portalSessionToken = null;
+}
+function getPortalSessionToken() {
+  return portalSessionToken;
+}
+function definirTokenSessaoPortal(token) {
+  portalSessionToken = token || null;
+  try {
+    if (token) localStorage.setItem(PORTAL_TOKEN_STORAGE_KEY, token);
+    else localStorage.removeItem(PORTAL_TOKEN_STORAGE_KEY);
+  } catch (e) {
+    /* sem localStorage: a sessão vale só nesta aba */
+  }
+}
+/* fetch com sessão: acrescenta X-Portal-Session nas chamadas ao backend do
+   portal e avisa o App (evento) quando o servidor encerra a sessão
+   (inatividade, acesso desativado) ou quando o cadastro volta a ficar
+   pendente. Chamadas a outros domínios passam intactas. */
+(function instalarFetchComSessao() {
+  if (typeof window === "undefined" || typeof window.fetch !== "function" || window.__portalFetchComSessao) return;
+  window.__portalFetchComSessao = true;
+  const fetchOriginal = window.fetch.bind(window);
+  window.fetch = function fetchComSessao(input, init) {
+    let url = "";
+    try {
+      url = typeof input === "string" ? input : (input && input.url) || String(input || "");
+    } catch (e) {
+      url = "";
+    }
+    const doBackend = !!DRIVE_PROXY_URL && url.indexOf(DRIVE_PROXY_URL) === 0;
+    const tokenEnviado = doBackend ? portalSessionToken : null;
+    let initFinal = init;
+    if (tokenEnviado) {
+      try {
+        const h = new Headers((init && init.headers) || (typeof input !== "string" && input && input.headers) || undefined);
+        if (!h.has("X-Portal-Session")) h.set("X-Portal-Session", tokenEnviado);
+        initFinal = { ...(init || {}), headers: h };
+      } catch (e) {
+        initFinal = init;
+      }
+    }
+    const promessa = fetchOriginal(input, initFinal);
+    if (!doBackend) return promessa;
+    return promessa.then((resp) => {
+      if ((resp.status === 401 || resp.status === 403) && tokenEnviado && tokenEnviado === portalSessionToken) {
+        resp
+          .clone()
+          .json()
+          .then((j) => {
+            const codigo = j && j.codigo;
+            if (codigo === "sessao_invalida" || codigo === "sessao_expirada" || codigo === "acesso_desativado" || codigo === "aguardando_autorizacao") {
+              window.dispatchEvent(new CustomEvent("portal:sessao-encerrada", { detail: { codigo } }));
+            }
+          })
+          .catch(() => {});
+      }
+      return resp;
+    });
+  };
+})();
+function registrarAtividadeCompartilhada(ts) {
+  try {
+    localStorage.setItem(PORTAL_ATIVIDADE_STORAGE_KEY, String(ts));
+  } catch (e) {
+    /* ignora */
+  }
+}
+function lerAtividadeCompartilhada() {
+  try {
+    const v = Number(localStorage.getItem(PORTAL_ATIVIDADE_STORAGE_KEY));
+    return Number.isFinite(v) && v > 0 ? v : 0;
+  } catch (e) {
+    return 0;
+  }
+}
+
 /** Login com Google (2026-09-29, pedido da Iasmin) — ADICIONAL ao login por
  *  e-mail/senha, nunca substitui. Client ID OAuth tipo "Web application",
  *  criado no Console do Google Cloud (ver NOTAS DE DEPLOY em index.js,
@@ -2980,73 +3074,30 @@ function slugUserId(email) {
   );
 }
 const DEFAULT_PREFERENCIAS_USUARIO = { tema: "claro", notificacoes: true };
-/* Garante que exista pelo menos 1 usuário (Iasmin, admin) na coleção
-   "users" — mesmo padrão de semente já usado em conference_queue. Só roda
-   1x (a própria checagem de coleção vazia evita recriar em toda consulta). */ async function ensureSeedUsers(
-  db,
-) {
-  try {
-    const snap = await db.collection("users").get();
-    if (snap && snap.docs && snap.docs.length > 0) return;
-  } catch (e) {
-    return;
-  }
-  const senhaHash = await hashSenha(PORTAL_PASSWORD);
-  const admin = {
-    id: slugUserId("iasmin.oliveira@grupoprimalog.com.br"),
-    nome: "Iasmin Oliveira",
-    email: "iasmin.oliveira@grupoprimalog.com.br",
-    perfil: "admin",
-    senhaHash,
-    precisaTrocarSenha: true,
-    status: "ativo",
-    criadoEm: new Date().toISOString(),
-    criadoPor: "sistema",
-    ultimoAcesso: null,
-    preferencias: DEFAULT_PREFERENCIAS_USUARIO,
-  };
-  await db
-    .collection("users")
-    .doc(admin.id)
-    .set(admin)
-    .catch(() => {});
-}
-/** findPortalUserAsync: devolve o usuário, `null` (e-mail realmente não
- *  cadastrado) ou LANÇA erro quando não conseguiu consultar o servidor
- *  (rede/backend). Antes, qualquer falha de rede devolvia `null` e a pessoa
- *  via "E-mail não encontrado" mesmo com o cadastro existindo (caso do
- *  celular, 2026-10-09). Tenta 2x antes de desistir. */
-async function findPortalUserAsync(email) {
-  const e = (email || "").trim().toLowerCase();
-  if (!e) return null;
-  const db = await getDb().catch(() => null);
-  if (!db) throw new Error("sem_banco");
-  await ensureSeedUsers(db).catch(() => {});
-  let ultimoErro = null;
-  for (let tentativa = 0; tentativa < 2; tentativa++) {
-    try {
-      const snap = await db.collection("users").get();
-      const docs = (snap && snap.docs) || [];
-      const found = docs.find((d) => {
-        const u = d.data();
-        return u && (u.email || "").trim().toLowerCase() === e;
-      });
-      return found ? found.data() : null;
-    } catch (err) {
-      ultimoErro = err;
-      await new Promise((r) => setTimeout(r, 600));
-    }
-  }
-  throw ultimoErro || new Error("falha_consulta_usuarios");
-}
 const MSG_LOGIN_SEM_CONEXAO =
   "Não foi possível conectar ao servidor do portal agora. Verifique a conexão e tente de novo — o seu e-mail não foi recusado.";
-/** authenticate: valida e-mail (presença + formato) e senha juntos contra a
- *  coleção "users". Retorna { ok: true, user } ou { ok: false, message }.
- *  Único ponto de entrada do login. `user.perfil` já modela o nível de
- *  acesso (admin/comercial/usuario) para o resto do portal reagir a ele
- *  via `can()`. Assíncrona (consulta a coleção + hash da senha), diferente
- *  da etapa anterior — quem chama precisa de `await`. */ async function authenticate({
+/** chamarAuth: chamada JSON ao backend (o X-Portal-Session é acrescentado
+ *  pelo fetch instalado em instalarFetchComSessao). Nunca lança por erro de
+ *  rede? Lança — quem chama decide a mensagem. */
+async function chamarAuth(caminho, { method = "POST", body } = {}) {
+  const resp = await fetch(`${DRIVE_PROXY_URL}${caminho}`, {
+    method,
+    headers: { "Content-Type": "application/json", "X-Portal-Key": DRIVE_PROXY_KEY },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  let json = null;
+  try {
+    json = await resp.json();
+  } catch (e) {
+    json = null;
+  }
+  return { status: resp.status, json: json || {} };
+}
+/** authenticate: valida e-mail (formato) e senha no navegador só para dar
+ *  uma resposta rápida; a conferência de verdade é feita no SERVIDOR
+ *  (POST /api/auth/login), que devolve o usuário e o token da sessão.
+ *  Retorna { ok: true, user } ou { ok: false, message }. `user.status` pode
+ *  ser "aguardando_autorizacao" (cadastro novo ainda sem liberação). */ async function authenticate({
   email,
   senha,
 }) {
@@ -3056,52 +3107,31 @@ const MSG_LOGIN_SEM_CONEXAO =
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail))
     return { ok: false, message: "Informe um e-mail em formato válido." };
   if (!senha) return { ok: false, message: "Informe sua senha." };
-  let knownUser;
   try {
-    knownUser = await findPortalUserAsync(trimmedEmail);
+    const { json } = await chamarAuth("/api/auth/login", {
+      body: { email: trimmedEmail, senha },
+    });
+    if (!json.ok || !json.token)
+      return { ok: false, message: json.message || json.erro || "Não foi possível entrar agora. Tente novamente." };
+    definirTokenSessaoPortal(json.token);
+    return { ok: true, user: json.user };
   } catch (err) {
     return { ok: false, message: MSG_LOGIN_SEM_CONEXAO };
   }
-  if (!knownUser)
-    return {
-      ok: false,
-      message: "E-mail não encontrado. Fale com o administrador do portal.",
-    };
-  if (knownUser.status === "inativo")
-    return {
-      ok: false,
-      message: "Este acesso está desativado. Fale com o administrador do portal.",
-    };
-  const senhaHash = await hashSenha(senha);
-  if (senhaHash !== knownUser.senhaHash)
-    return { ok: false, message: "Senha incorreta. Tente novamente." };
-  return {
-    ok: true,
-    user: {
-      id: knownUser.id,
-      nome: knownUser.nome,
-      email: knownUser.email,
-      perfil: knownUser.perfil,
-      precisaTrocarSenha: !!knownUser.precisaTrocarSenha,
-      preferencias: knownUser.preferencias || DEFAULT_PREFERENCIAS_USUARIO,
-    },
-  };
 }
 /** authenticateWithGoogle: envia a credencial (ID token) do Google
  *  Identity Services pro backend verificar de verdade (assinatura,
  *  emissor, audiência) e casar o e-mail com um usuário já cadastrado em
- *  "users" — ver POST /api/auth/google em index.js. Devolve exatamente o
- *  mesmo formato de authenticate() ({ok:true,user} ou {ok:false,message}),
- *  de propósito, pra reaproveitar entrarComoLogado() sem nenhuma mudança
- *  em LoginScreen além de chamar esta função em vez daquela. */
+ *  "users" — ver POST /api/auth/google em index.js. Devolve o mesmo
+ *  formato de authenticate() ({ok:true,user} ou {ok:false,message}). */
 async function authenticateWithGoogle(credential) {
   try {
-    const resposta = await fetch(`${DRIVE_PROXY_URL}/api/auth/google`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Portal-Key": DRIVE_PROXY_KEY },
-      body: JSON.stringify({ credential }),
-    });
-    return await resposta.json();
+    const { json } = await chamarAuth("/api/auth/google", { body: { credential } });
+    if (json.ok && json.token) {
+      definirTokenSessaoPortal(json.token);
+      return { ok: true, user: json.user };
+    }
+    return { ok: false, message: json.message || "Não foi possível verificar seu acesso com o Google agora." };
   } catch (err) {
     return {
       ok: false,
@@ -3109,16 +3139,14 @@ async function authenticateWithGoogle(credential) {
     };
   }
 }
-/** registrarNovoUsuario: autocadastro a partir da tela de login ("Primeiro
- *  acesso? Cadastre-se", pedido da Iasmin, 2026-09-25). Só e-mails
- *  @PORTAL_EMAIL_DOMAIN passam; a pessoa escolhe a própria senha na hora
- *  (por isso `precisaTrocarSenha` já nasce `false`, diferente de uma conta
- *  criada pelo Administrador). Perfil sempre "usuario" — o menos
- *  privilegiado — só o Administrador eleva depois, se for o caso. Retorna
- *  { ok:true, user } no mesmo formato de `authenticate()`, pra permitir
- *  logar direto após o cadastro, sem pedir a senha de novo. */ async function registrarNovoUsuario(
-  { nome, email, senha },
-) {
+/* CADASTRO COM CÓDIGO POR E-MAIL (2026-11): só e-mails @PORTAL_EMAIL_DOMAIN.
+   Passo 1 — iniciarCadastro: o servidor envia um código de 6 dígitos para o
+   e-mail corporativo (vale 10 min, uso único, máx. 5 tentativas). NENHUM
+   cadastro existe até o código ser confirmado.
+   Passo 2 — confirmarCadastro: com o código correto o cadastro é criado com
+   status "aguardando_autorizacao" e SEM nível de acesso — um administrador
+   precisa autorizar em "Gerenciar usuários". */
+async function iniciarCadastro({ nome, email, senha }) {
   const trimmedNome = (nome || "").trim();
   const trimmedEmail = (email || "").trim();
   if (!trimmedNome) return { ok: false, message: "Informe seu nome completo." };
@@ -3134,116 +3162,91 @@ async function authenticateWithGoogle(credential) {
   if (!senha) return { ok: false, message: "Crie uma senha." };
   if (!senhaAtendeRequisitoMinimo(senha))
     return { ok: false, message: REQUISITO_SENHA_MSG };
-  const usuariosAtuais = await listUsersDb();
-  if (
-    usuariosAtuais.some(
-      (u) => (u.email || "").trim().toLowerCase() === trimmedEmail.toLowerCase(),
-    )
-  )
-    return {
-      ok: false,
-      message: "Este e-mail já tem cadastro. Faça login normalmente.",
-    };
-  const senhaHash = await hashSenha(senha);
-  const novo = {
-    id: slugUserId(trimmedEmail),
-    nome: trimmedNome,
-    email: trimmedEmail,
-    perfil: "usuario",
-    senhaHash,
-    precisaTrocarSenha: false,
-    status: "ativo",
-    criadoEm: new Date().toISOString(),
-    criadoPor: "autocadastro",
-    ultimoAcesso: null,
-    preferencias: DEFAULT_PREFERENCIAS_USUARIO,
-  };
-  const ok = await salvarUsuarioDb(novo);
-  if (!ok)
-    return { ok: false, message: "Não foi possível concluir o cadastro agora. Tente novamente." };
-  return {
-    ok: true,
-    user: {
-      id: novo.id,
-      nome: novo.nome,
-      email: novo.email,
-      perfil: novo.perfil,
-      precisaTrocarSenha: false,
-      preferencias: novo.preferencias,
-    },
-  };
+  try {
+    const { json } = await chamarAuth("/api/auth/cadastro/iniciar", {
+      body: { nome: trimmedNome, email: trimmedEmail, senha },
+    });
+    return json.ok ? { ok: true } : { ok: false, message: json.message || json.erro || "Não foi possível iniciar o cadastro agora." };
+  } catch (err) {
+    return { ok: false, message: MSG_LOGIN_SEM_CONEXAO };
+  }
+}
+async function reenviarCodigoCadastro(email) {
+  try {
+    const { json } = await chamarAuth("/api/auth/cadastro/reenviar", { body: { email: (email || "").trim() } });
+    return json.ok ? { ok: true } : { ok: false, message: json.message || "Não foi possível reenviar o código agora.", aguardarSegundos: json.aguardarSegundos };
+  } catch (err) {
+    return { ok: false, message: MSG_LOGIN_SEM_CONEXAO };
+  }
+}
+async function confirmarCadastro({ email, codigo }) {
+  try {
+    const { json } = await chamarAuth("/api/auth/cadastro/confirmar", {
+      body: { email: (email || "").trim(), codigo: String(codigo || "").trim() },
+    });
+    if (json.ok && json.token) {
+      definirTokenSessaoPortal(json.token);
+      return { ok: true, user: json.user };
+    }
+    return { ok: false, message: json.message || "Não foi possível confirmar o código agora.", expirado: !!json.expirado };
+  } catch (err) {
+    return { ok: false, message: MSG_LOGIN_SEM_CONEXAO };
+  }
 }
 /* =========================================================================
-   CRUD da coleção "users" — usado pelo login, por "Meu Perfil" (a própria
-   usuária alterando senha/preferências) e por "Gerenciar usuários"
-   (Administrador criando/editando outras contas). Um único conjunto de
-   funções para tudo isso, seguindo o pedido explícito de não duplicar
-   lógica (item 19.6 do pedido: "implemente o sistema de permissões de
-   forma centralizada").
-   ========================================================================= */ async function listUsersDb() {
-  const db = await getDb().catch(() => null);
-  if (!db) return [];
-  await ensureSeedUsers(db).catch(() => {});
+   Usuários — tudo passa pelo servidor (/api/usuarios, /api/auth/*). Só o
+   Administrador lista/cria/edita/autoriza/exclui outros usuários; a própria
+   pessoa só altera a própria senha e as próprias preferências.
+   ========================================================================= */
+async function listUsersDb() {
   try {
-    const snap = await db.collection("users").get();
-    return ((snap && snap.docs) || []).map((d) => d.data());
+    const { json } = await chamarAuth("/api/usuarios", { method: "GET" });
+    return json.ok ? json.usuarios || [] : [];
   } catch (e) {
     return [];
   }
 }
-/** updateUserDoc: aplica um patch parcial num usuário existente. Nenhuma
- *  das duas implementações de "db" deste portal (a capability nativa do
- *  Artifact nem createRestDb(), o backend próprio) expõe um `.update()`
- *  parcial de verdade — as duas só têm `.doc(id).set(objetoInteiro)`,
- *  mesmo padrão já usado em todas as outras coleções do portal
- *  (client_document_analysis, homologacoes etc.) — então aqui é sempre
- *  ler o doc inteiro, mesclar o patch e regravar. Nunca lança — retorna
- *  true/false. */ async function updateUserDoc(
-  userId,
-  patch,
-) {
+/** fetchMeuRegistro: dados da própria pessoa (Meu Perfil) — vale para qualquer perfil. */
+async function fetchMeuRegistro() {
   try {
-    const db = await getDb();
-    if (!db || !userId) return false;
-    const snap = await db.collection("users").get().catch(() => null);
-    const found = snap && snap.docs.find((d) => d.id === userId);
-    if (!found) return false;
-    await db
-      .collection("users")
-      .doc(userId)
-      .set({ ...found.data(), ...patch });
-    return true;
+    const { json } = await chamarAuth("/api/usuarios/eu", { method: "GET" });
+    return json.ok ? json.usuario : null;
+  } catch (e) {
+    return null;
+  }
+}
+async function acaoUsuarioAdmin(caminho, method, body, msgErro) {
+  try {
+    const { json } = await chamarAuth(caminho, { method, body });
+    if (json.ok) return { ok: true, usuario: json.usuario };
+    return { ok: false, message: json.message || json.erro || msgErro };
+  } catch (e) {
+    return { ok: false, message: msgErro };
+  }
+}
+function criarUsuarioAdmin({ nome, email, perfil }) {
+  return acaoUsuarioAdmin("/api/usuarios", "POST", { nome, email, perfil }, "Não foi possível criar o usuário agora.");
+}
+function editarUsuarioAdmin(id, patch) {
+  return acaoUsuarioAdmin(`/api/usuarios/${encodeURIComponent(id)}`, "PUT", patch, "Não foi possível salvar as alterações agora.");
+}
+function autorizarUsuarioAdmin(id, perfil) {
+  return acaoUsuarioAdmin(`/api/usuarios/${encodeURIComponent(id)}/autorizar`, "POST", { perfil }, "Não foi possível autorizar o acesso agora.");
+}
+function redefinirSenhaUsuarioAdmin(id) {
+  return acaoUsuarioAdmin(`/api/usuarios/${encodeURIComponent(id)}/redefinir-senha`, "POST", {}, "Não foi possível redefinir a senha agora.");
+}
+function excluirUsuarioAdmin(id) {
+  return acaoUsuarioAdmin(`/api/usuarios/${encodeURIComponent(id)}`, "DELETE", undefined, "Não foi possível excluir o usuário agora.");
+}
+/** salvarPreferenciasProprias: preferências da própria pessoa (tema, notificações). */
+async function salvarPreferenciasProprias(preferencias) {
+  try {
+    const { json } = await chamarAuth("/api/auth/preferencias", { method: "PUT", body: { preferencias } });
+    return !!json.ok;
   } catch (e) {
     return false;
   }
-}
-/** salvarUsuarioDb: cria ou substitui um usuário inteiro (usado só pelo
- *  Administrador, na criação de novos usuários — edição de campos usa
- *  updateUserDoc). */ async function salvarUsuarioDb(userObj) {
-  try {
-    const db = await getDb();
-    if (!db) return false;
-    await db.collection("users").doc(userObj.id).set(userObj);
-    return true;
-  } catch (e) {
-    return false;
-  }
-}
-async function excluirUsuarioDb(userId) {
-  try {
-    const db = await getDb();
-    if (!db || !userId) return false;
-    await db.collection("users").doc(userId).delete();
-    return true;
-  } catch (e) {
-    return false;
-  }
-}
-/** registrarAcessoUsuario: best-effort, atualiza ultimoAcesso depois de um
- *  login bem-sucedido — nunca bloqueia/derruba o login se falhar. */ async function registrarAcessoUsuario(
-  userId,
-) {
-  await updateUserDoc(userId, { ultimoAcesso: new Date().toISOString() });
 }
 /** notificarHomologacao: dispara o e-mail de notificação de Homologação
  *  (POST /api/homologacao/notify, ver index.js) em "fire-and-forget" — o
@@ -3349,29 +3352,33 @@ function senhaAtendeRequisitoMinimo(senha) {
   const s = String(senha || "");
   return s.length >= 6 && /[a-zA-Z]/.test(s) && /[0-9]/.test(s);
 }
-/** trocarSenhaUsuario: valida e grava a nova senha (em hash) + limpa
- *  precisaTrocarSenha. Retorna { ok, message? }. Não confere a senha atual
- *  aqui (quem chama — o modal "Alterar senha" — já validou antes contra o
- *  hash do usuário logado; o primeiro acesso não pede senha atual, pois a
- *  usuária acabou de digitá-la pra entrar). */ async function trocarSenhaUsuario(
+/** trocarSenhaUsuario: valida e troca a senha NO SERVIDOR
+ *  (POST /api/auth/alterar-senha). `senhaAtual` é conferida pelo servidor;
+ *  no primeiro acesso (senha inicial) o servidor dispensa — a pessoa acabou
+ *  de digitá-la para entrar. Retorna { ok, message? }. */ async function trocarSenhaUsuario(
   userId,
   novaSenha,
+  senhaAtual,
 ) {
   if (!novaSenha)
     return { ok: false, message: "Informe a nova senha." };
   if (!senhaAtendeRequisitoMinimo(novaSenha))
     return { ok: false, message: REQUISITO_SENHA_MSG };
-  const senhaHash = await hashSenha(novaSenha);
-  const ok = await updateUserDoc(userId, {
-    senhaHash,
-    precisaTrocarSenha: false,
-  });
-  if (!ok)
+  try {
+    const { json } = await chamarAuth("/api/auth/alterar-senha", {
+      body: { novaSenha, senhaAtual },
+    });
+    if (json.ok) return { ok: true };
+    return {
+      ok: false,
+      message: json.message || "Não foi possível alterar a senha. Verifique os dados informados.",
+    };
+  } catch (e) {
     return {
       ok: false,
       message: "Não foi possível alterar a senha. Verifique os dados informados.",
     };
-  return { ok: true };
+  }
 }
 /* Sessão persistida no navegador (pedido explícito da Iasmin, 2026-09-18):
    antes, um simples F5 derrubava o login (o estado `authenticated` vivia só
@@ -3388,7 +3395,8 @@ function loadPortalSession() {
     const raw = localStorage.getItem(PORTAL_SESSION_STORAGE_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw);
-    return parsed && parsed.email ? parsed : null;
+    // Sem token de sessão (ex.: sessão guardada antes desta versão) não há login válido.
+    return parsed && parsed.email && getPortalSessionToken() ? parsed : null;
   } catch (e) {
     return null;
   }
@@ -3547,6 +3555,7 @@ const AUDIT_ACTION_LABELS = {
   cadastrou_propria_conta: "Criou a própria conta (autocadastro)",
   atualizou_preferencias: "Atualizou preferências",
   criou_usuario: "Criou usuário",
+  autorizou_usuario: "Autorizou acesso de usuário",
   editou_usuario: "Editou usuário",
   alterou_perfil_usuario: "Alterou perfil de usuário",
   ativou_usuario: "Ativou usuário",
@@ -28657,8 +28666,13 @@ function AuditLogView({ companies }) {
       `;
 function LoginScreen({
   onLogin,
+  aviso,
 }) {
-  const [mode, setMode] = useState("login"); // "login" | "cadastro" — item pedido pela Iasmin, 2026-09-25
+  const [mode, setMode] = useState("login"); // "login" | "cadastro" | "codigo" (confirmação por e-mail) — item pedido pela Iasmin, 2026-09-25
+  const [codigo, setCodigo] = useState("");
+  const [reenvioLiberadoEm, setReenvioLiberadoEm] = useState(0);
+  const [agoraMs, setAgoraMs] = useState(Date.now());
+  const [infoCodigo, setInfoCodigo] = useState("");
   const [nome, setNome] = useState("");
   const [email, setEmail] = useState("");
   const [senha, setSenha] = useState("");
@@ -28671,7 +28685,6 @@ function LoginScreen({
   function entrarComoLogado(result) {
     setStatus("success");
     setAuditSessionUser(result.user?.nome || result.user?.email || null);
-    registrarAcessoUsuario(result.user?.id);
     setTimeout(() => onLogin(result.user), 260);
   }
   // authenticate() agora é assíncrona (consulta a coleção "users" + calcula
@@ -28689,11 +28702,14 @@ function LoginScreen({
       setError(result.message);
       return;
     }
-    logDocumentAction("login", { email: email.trim() }); // pequena transição antes de revelar o portal, conforme pedido
+    if (result.user?.status === "ativo") logDocumentAction("login", { email: email.trim() }); // pequena transição antes de revelar o portal, conforme pedido
     entrarComoLogado(result);
   }
-  // registrarNovoUsuario (autocadastro): só @PORTAL_EMAIL_DOMAIN, perfil
-  // sempre "usuario" — ver comentário completo na definição da função.
+  // Cadastro em DUAS etapas (2026-11): 1) nome/e-mail/senha -> o servidor
+  // envia um código de 6 dígitos ao e-mail corporativo; 2) o cadastro só
+  // passa a existir quando o código é confirmado. Quem confirma entra com
+  // status "aguardando autorização" (sem nenhum acesso até um administrador
+  // liberar).
   async function handleCadastro() {
     if (status === "loading" || status === "success") return;
     setError("");
@@ -28702,18 +28718,62 @@ function LoginScreen({
       return;
     }
     setStatus("loading");
-    const result = await registrarNovoUsuario({ nome, email, senha }).catch(() => ({
+    const result = await iniciarCadastro({ nome, email, senha }).catch(() => ({
       ok: false,
-      message: "Não foi possível concluir o cadastro agora. Tente novamente.",
+      message: "Não foi possível iniciar o cadastro agora. Tente novamente.",
+    }));
+    setStatus("idle");
+    if (!result.ok) {
+      setError(result.message);
+      return;
+    }
+    setCodigo("");
+    setInfoCodigo(`Enviamos um código de 6 dígitos para ${email.trim()}. Ele vale por 10 minutos.`);
+    setReenvioLiberadoEm(Date.now() + 60000);
+    setMode("codigo");
+  }
+  async function handleConfirmarCodigo() {
+    if (status === "loading" || status === "success") return;
+    setError("");
+    if (!/^\d{6}$/.test(codigo.trim())) {
+      setError("Digite o código de 6 dígitos enviado ao seu e-mail.");
+      return;
+    }
+    setStatus("loading");
+    const result = await confirmarCadastro({ email, codigo }).catch(() => ({
+      ok: false,
+      message: "Não foi possível confirmar o código agora. Tente novamente.",
     }));
     if (!result.ok) {
       setStatus("idle");
       setError(result.message);
       return;
     }
-    logDocumentAction("cadastrou_propria_conta", { email: email.trim() });
     entrarComoLogado(result);
   }
+  async function handleReenviarCodigo() {
+    if (status === "loading" || status === "success" || Date.now() < reenvioLiberadoEm) return;
+    setError("");
+    setStatus("loading");
+    const result = await reenviarCodigoCadastro(email).catch(() => ({
+      ok: false,
+      message: "Não foi possível reenviar o código agora.",
+    }));
+    setStatus("idle");
+    if (!result.ok) {
+      setError(result.message);
+      if (result.aguardarSegundos) setReenvioLiberadoEm(Date.now() + result.aguardarSegundos * 1000);
+      return;
+    }
+    setCodigo("");
+    setInfoCodigo(`Enviamos um novo código para ${email.trim()}. Ele vale por 10 minutos.`);
+    setReenvioLiberadoEm(Date.now() + 60000);
+  }
+  useEffect(() => {
+    if (mode !== "codigo") return;
+    const t = setInterval(() => setAgoraMs(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [mode]);
   // "Entrar com Google" (2026-09-29, pedido da Iasmin) — ADICIONAL ao login
   // por senha, nunca substitui. Só funciona pra um e-mail que já é usuário
   // cadastrado no portal (o backend confere isso em /api/auth/google);
@@ -28761,7 +28821,7 @@ function LoginScreen({
   function handleFieldKeyDown(e) {
     if (e.key === "Enter") {
       e.preventDefault();
-      mode === "cadastro" ? handleCadastro() : handleSubmit();
+      mode === "codigo" ? handleConfirmarCodigo() : mode === "cadastro" ? handleCadastro() : handleSubmit();
     }
   }
   function toggleMode() {
@@ -28793,15 +28853,25 @@ function LoginScreen({
       /*#__PURE__*/ React.createElement(
         "h1",
         { className: "login-title" },
-        mode === "cadastro" ? "Criar conta" : "Portal Documental",
+        mode === "codigo" ? "Confirme seu e-mail" : mode === "cadastro" ? "Criar conta" : "Portal Documental",
       ),
       /*#__PURE__*/ React.createElement(
         "p",
         { className: "login-sub" },
-        mode === "cadastro"
-          ? `Cadastro disponível para e-mails @${PORTAL_EMAIL_DOMAIN}`
-          : "Acesse o ambiente corporativo",
+        mode === "codigo"
+          ? "Falta pouco para concluir o cadastro"
+          : mode === "cadastro"
+            ? `Cadastro disponível para e-mails @${PORTAL_EMAIL_DOMAIN}`
+            : "Acesse o ambiente corporativo",
       ),
+      aviso && mode === "login" &&
+        /*#__PURE__*/ React.createElement(
+          "div",
+          { className: "login-hint", role: "status" },
+          /*#__PURE__*/ React.createElement(Lock, { size: 14 }),
+          " ",
+          aviso,
+        ),
       error &&
         /*#__PURE__*/ React.createElement(
           "div",
@@ -28810,7 +28880,77 @@ function LoginScreen({
           " ",
           error,
         ),
-      mode === "cadastro"
+      mode === "codigo"
+        ? /*#__PURE__*/ React.createElement(
+            "div",
+            null,
+            infoCodigo &&
+              /*#__PURE__*/ React.createElement(
+                "div",
+                { className: "login-hint" },
+                /*#__PURE__*/ React.createElement(Mail, { size: 14 }),
+                " ",
+                infoCodigo,
+              ),
+            /*#__PURE__*/ React.createElement(
+              "div",
+              { className: "login-field" },
+              /*#__PURE__*/ React.createElement("label", null, "Código de confirmação"),
+              /*#__PURE__*/ React.createElement(
+                "div",
+                { className: "login-field-input-wrap" },
+                /*#__PURE__*/ React.createElement(Lock, { size: 15 }),
+                /*#__PURE__*/ React.createElement("input", {
+                  type: "text",
+                  inputMode: "numeric",
+                  autoComplete: "one-time-code",
+                  autoFocus: true,
+                  maxLength: 6,
+                  value: codigo,
+                  onChange: (e) => setCodigo(e.target.value.replace(/\D/g, "").slice(0, 6)),
+                  onKeyDown: handleFieldKeyDown,
+                  placeholder: "000000",
+                }),
+              ),
+            ),
+            /*#__PURE__*/ React.createElement(
+              "button",
+              {
+                className: "login-submit",
+                type: "button",
+                onClick: handleConfirmarCodigo,
+                disabled: status !== "idle",
+              },
+              status !== "idle" ? "Confirmando..." : "Confirmar cadastro",
+            ),
+            /*#__PURE__*/ React.createElement(
+              "button",
+              {
+                type: "button",
+                className: "login-alt-link",
+                onClick: handleReenviarCodigo,
+                disabled: status !== "idle" || agoraMs < reenvioLiberadoEm,
+                style: agoraMs < reenvioLiberadoEm ? { opacity: 0.6, cursor: "default" } : undefined,
+              },
+              agoraMs < reenvioLiberadoEm
+                ? `Reenviar código (aguarde ${Math.ceil((reenvioLiberadoEm - agoraMs) / 1000)}s)`
+                : "Reenviar código",
+            ),
+            /*#__PURE__*/ React.createElement(
+              "button",
+              {
+                type: "button",
+                className: "login-alt-link",
+                onClick: () => {
+                  setError("");
+                  setCodigo("");
+                  setMode("cadastro");
+                },
+              },
+              "Voltar e corrigir meus dados",
+            ),
+          )
+        : mode === "cadastro"
         ? /*#__PURE__*/ React.createElement(
             "div",
             null,
@@ -29036,6 +29176,133 @@ function LoginScreen({
       ),
     ),
   );
+}
+/* =========================================================================
+   ACESSO PENDENTE (2026-11) — cadastro concluído e confirmado por e-mail,
+   mas ainda SEM autorização de um administrador. É a ÚNICA tela que a
+   pessoa enxerga: nenhum documento, download, solicitação ou informação
+   interna é carregado (e o servidor recusa essas chamadas de qualquer
+   jeito). Confere o status a cada 30 s; ao ser autorizada, entra sozinha.
+   ========================================================================= */
+function AcessoPendenteScreen({ user, onStatus, onLogout }) {
+  const [verificando, setVerificando] = useState(false);
+  const [msg, setMsg] = useState("");
+  async function verificar(manual) {
+    if (verificando) return;
+    setVerificando(true);
+    try {
+      const { json } = await chamarAuth("/api/auth/sessao", { method: "GET" });
+      if (json.ok && json.user) {
+        if (json.user.status !== "aguardando_autorizacao") onStatus(json.user);
+        else if (manual) setMsg("Seu acesso ainda não foi autorizado.");
+      }
+    } catch (e) {
+      if (manual) setMsg("Não foi possível verificar agora. Tente novamente.");
+    }
+    setVerificando(false);
+  }
+  useEffect(() => {
+    const t = setInterval(() => verificar(false), 30000);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  return /*#__PURE__*/ React.createElement(
+    "div",
+    { className: "login-screen" },
+    /*#__PURE__*/ React.createElement("style", null, LOGIN_SCREEN_CSS),
+    /*#__PURE__*/ React.createElement(
+      "div",
+      { className: "login-card" },
+      /*#__PURE__*/ React.createElement(
+        "div",
+        { className: "login-logo-wrap" },
+        /*#__PURE__*/ React.createElement("img", {
+          className: "login-logo",
+          src: GRUPOPRIMA_LOGO,
+          alt: "Grupoprima",
+        }),
+      ),
+      /*#__PURE__*/ React.createElement("h1", { className: "login-title" }, "Cadastro concluído"),
+      /*#__PURE__*/ React.createElement(
+        "p",
+        { className: "login-sub" },
+        user?.nome ? `Olá, ${user.nome}` : "Olá",
+      ),
+      /*#__PURE__*/ React.createElement(
+        "div",
+        { className: "login-hint", role: "status" },
+        /*#__PURE__*/ React.createElement(Lock, { size: 14 }),
+        " ",
+        MSG_ACESSO_PENDENTE,
+      ),
+      /*#__PURE__*/ React.createElement(
+        "div",
+        { style: { textAlign: "center", marginBottom: 14 } },
+        /*#__PURE__*/ React.createElement(
+          "span",
+          { className: "status-badge status-proximo" },
+          "Acesso pendente de autorização",
+        ),
+      ),
+      msg &&
+        /*#__PURE__*/ React.createElement("div", { className: "login-hint" }, msg),
+      /*#__PURE__*/ React.createElement(
+        "button",
+        {
+          className: "login-submit",
+          type: "button",
+          onClick: () => {
+            setMsg("");
+            verificar(true);
+          },
+          disabled: verificando,
+        },
+        verificando ? "Verificando..." : "Verificar novamente",
+      ),
+      /*#__PURE__*/ React.createElement(
+        "button",
+        { type: "button", className: "login-alt-link", onClick: onLogout },
+        "Sair",
+      ),
+      /*#__PURE__*/ React.createElement(
+        "div",
+        { className: "login-footer" },
+        "Grupoprima Logística · Ambiente corporativo",
+      ),
+    ),
+  );
+}
+/** atualizarAvisoInatividade: faixa (fora da árvore React, para valer em
+ *  QUALQUER tela) que avisa, nos últimos 2 minutos, que a sessão vai expirar
+ *  por inatividade. `segundos == null` remove a faixa. Qualquer clique/tecla
+ *  já conta como atividade e a faixa some sozinha. */
+function atualizarAvisoInatividade(segundos) {
+  if (typeof document === "undefined") return;
+  let el = document.getElementById("portal-aviso-inatividade");
+  if (segundos == null) {
+    if (el) el.remove();
+    return;
+  }
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "portal-aviso-inatividade";
+    el.setAttribute("role", "alert");
+    el.style.cssText =
+      "position:fixed;left:50%;bottom:18px;transform:translateX(-50%);z-index:99999;background:#003753;color:#fff;padding:12px 18px;border-radius:10px;box-shadow:0 6px 24px rgba(0,0,0,0.35);font:600 13px/1.3 inherit;display:flex;align-items:center;gap:12px;max-width:92vw;";
+    const txt = document.createElement("span");
+    txt.id = "portal-aviso-inatividade-txt";
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = "Continuar conectado";
+    btn.style.cssText = "background:#6BFE9C;color:#003753;border:none;border-radius:8px;padding:6px 12px;font-weight:700;cursor:pointer;";
+    el.appendChild(txt);
+    el.appendChild(btn);
+    document.body.appendChild(el);
+  }
+  const mm = Math.floor(segundos / 60);
+  const ss = String(segundos % 60).padStart(2, "0");
+  const txt = document.getElementById("portal-aviso-inatividade-txt");
+  if (txt) txt.textContent = `Sua sessão expira em ${mm}:${ss} por inatividade.`;
 }
 /* =========================================================================
    PRIMEIRO ACESSO — troca de senha obrigatória (item 10 do pedido da
@@ -29297,17 +29564,8 @@ function LoginScreen({
       return;
     }
     setStatus("loading");
-    const usuarios = await listUsersDb();
-    const registro = usuarios.find((u) => u.id === user?.id);
-    const hashAtual = await hashSenha(senhaAtual);
-    if (!registro || hashAtual !== registro.senhaHash) {
-      setStatus("idle");
-      setErro(
-        "Não foi possível alterar a senha. Verifique os dados informados.",
-      );
-      return;
-    }
-    const result = await trocarSenhaUsuario(user.id, novaSenha);
+    // A senha atual é conferida pelo SERVIDOR (POST /api/auth/alterar-senha).
+    const result = await trocarSenhaUsuario(user.id, novaSenha, senhaAtual);
     if (!result.ok) {
       setStatus("idle");
       setErro(result.message);
@@ -29496,8 +29754,7 @@ function ProfileView({
   const [atividade, setAtividade] = useState([]);
   const [mostrarTudoAtividade, setMostrarTudoAtividade] = useState(false);
   async function carregarRegistro() {
-    const usuarios = await listUsersDb();
-    setRegistro(usuarios.find((u) => u.id === currentUser?.id) || null);
+    setRegistro(await fetchMeuRegistro());
   }
   useEffect(() => {
     carregarRegistro();
@@ -29537,7 +29794,7 @@ function ProfileView({
       ...(registro?.preferencias || DEFAULT_PREFERENCIAS_USUARIO),
       notificacoes: next,
     };
-    updateUserDoc(currentUser.id, { preferencias: novasPreferencias }).then(
+    salvarPreferenciasProprias(novasPreferencias).then(
       (ok) => {
         if (ok) {
           onUpdateCurrentUser({ preferencias: novasPreferencias });
@@ -29929,7 +30186,25 @@ function ProfileView({
   {
     ativo: { label: "Ativo", className: "status-ok" },
     inativo: { label: "Inativo", className: "status-vencido" },
+    aguardando_autorizacao: { label: "Aguardando autorização", className: "status-proximo" },
   };
+/* Rótulos do histórico de acesso de cada usuário (quem autorizou/alterou, quando). */
+const HISTORICO_ACESSO_LABELS = {
+  cadastro_confirmado: "Cadastro confirmado por e-mail",
+  acesso_autorizado: "Acesso autorizado",
+  perfil_alterado: "Nível de acesso alterado",
+  acesso_revogado: "Acesso revogado",
+  acesso_reativado: "Acesso reativado",
+  criado_pelo_administrador: "Cadastro criado pelo administrador",
+  senha_redefinida: "Senha redefinida pelo administrador",
+};
+function descreverEventoHistoricoAcesso(ev) {
+  const base = HISTORICO_ACESSO_LABELS[ev.evento] || ev.evento;
+  if (ev.evento === "acesso_autorizado" && ev.perfil) return `${base} — nível ${PERFIL_LABELS[ev.perfil] || ev.perfil}`;
+  if (ev.evento === "perfil_alterado") return `${base}: ${PERFIL_LABELS[ev.de] || ev.de || "—"} → ${PERFIL_LABELS[ev.para] || ev.para}`;
+  if (ev.evento === "criado_pelo_administrador" && ev.perfil) return `${base} — nível ${PERFIL_LABELS[ev.perfil] || ev.perfil}`;
+  return base;
+}
 function UserFormModal({ mode, initial, onClose, onSave }) {
   const [nome, setNome] = useState(initial?.nome || "");
   const [email, setEmail] = useState(initial?.email || "");
@@ -30075,9 +30350,15 @@ function UsersManagementView({ currentUser, onNotify, onBack }) {
   const [formMode, setFormMode] = useState(null); // null | "novo" | "editar"
   const [usuarioEditando, setUsuarioEditando] = useState(null);
   const [confirmandoExclusao, setConfirmandoExclusao] = useState(null);
+  const [autorizandoId, setAutorizandoId] = useState(null);
+  const [perfilAutorizar, setPerfilAutorizar] = useState("usuario");
+  const [historicoAbertoId, setHistoricoAbertoId] = useState(null);
+  const [soPendentes, setSoPendentes] = useState(false);
   async function carregar() {
     const lista = await listUsersDb();
-    setUsuarios(lista.slice().sort((a, b) => (a.nome || "").localeCompare(b.nome || "")));
+    // cadastros aguardando autorização aparecem primeiro; depois, ordem alfabética
+    const pend = (u) => (u.status === "aguardando_autorizacao" ? 0 : 1);
+    setUsuarios(lista.slice().sort((a, b) => pend(a) - pend(b) || (a.nome || "").localeCompare(b.nome || "")));
   }
   useEffect(() => {
     carregar();
@@ -30099,26 +30380,8 @@ function UsersManagementView({ currentUser, onNotify, onBack }) {
     );
   }
   async function handleCriar({ nome, email, perfil }) {
-    const usuariosAtuais = await listUsersDb();
-    if (usuariosAtuais.some((u) => u.email.toLowerCase() === email.toLowerCase())) {
-      return { ok: false, message: "Já existe um usuário com este e-mail." };
-    }
-    const senhaHash = await hashSenha(PORTAL_PASSWORD);
-    const novo = {
-      id: slugUserId(email),
-      nome,
-      email,
-      perfil,
-      senhaHash,
-      precisaTrocarSenha: true,
-      status: "ativo",
-      criadoEm: new Date().toISOString(),
-      criadoPor: currentUser?.nome || currentUser?.email || "admin",
-      ultimoAcesso: null,
-      preferencias: DEFAULT_PREFERENCIAS_USUARIO,
-    };
-    const ok = await salvarUsuarioDb(novo);
-    if (!ok) return { ok: false, message: "Não foi possível criar o usuário agora." };
+    const r = await criarUsuarioAdmin({ nome, email, perfil });
+    if (!r.ok) return { ok: false, message: r.message };
     logDocumentAction("criou_usuario", { usuarioCriado: email, perfil });
     onNotify && onNotify(`Usuário ${nome} criado com a senha inicial padrão.`, "info");
     setFormMode(null);
@@ -30127,8 +30390,8 @@ function UsersManagementView({ currentUser, onNotify, onBack }) {
   }
   async function handleEditar(userId, { nome, perfil }) {
     const anterior = usuarios.find((u) => u.id === userId);
-    const ok = await updateUserDoc(userId, { nome, perfil });
-    if (!ok) return { ok: false, message: "Não foi possível salvar as alterações agora." };
+    const r = await editarUsuarioAdmin(userId, { nome, perfil });
+    if (!r.ok) return { ok: false, message: r.message };
     logDocumentAction("editou_usuario", { usuarioEditado: anterior?.email });
     if (anterior && anterior.perfil !== perfil) {
       logDocumentAction("alterou_perfil_usuario", {
@@ -30148,9 +30411,9 @@ function UsersManagementView({ currentUser, onNotify, onBack }) {
       return;
     }
     const novoStatus = u.status === "inativo" ? "ativo" : "inativo";
-    const ok = await updateUserDoc(u.id, { status: novoStatus });
-    if (!ok) {
-      onNotify && onNotify("Não foi possível atualizar o status agora.");
+    const r = await editarUsuarioAdmin(u.id, { status: novoStatus });
+    if (!r.ok) {
+      onNotify && onNotify(r.message || "Não foi possível atualizar o status agora.");
       return;
     }
     logDocumentAction(
@@ -30159,14 +30422,21 @@ function UsersManagementView({ currentUser, onNotify, onBack }) {
     );
     carregar();
   }
+  async function handleAutorizar(u) {
+    const r = await autorizarUsuarioAdmin(u.id, perfilAutorizar);
+    if (!r.ok) {
+      onNotify && onNotify(r.message || "Não foi possível autorizar o acesso agora.");
+      return;
+    }
+    logDocumentAction("autorizou_usuario", { usuarioAlvo: u.email, perfil: perfilAutorizar });
+    onNotify && onNotify(`Acesso de ${u.nome} autorizado como ${PERFIL_LABELS[perfilAutorizar] || perfilAutorizar}.`, "info");
+    setAutorizandoId(null);
+    carregar();
+  }
   async function handleRedefinirSenha(u) {
-    const senhaHash = await hashSenha(PORTAL_PASSWORD);
-    const ok = await updateUserDoc(u.id, {
-      senhaHash,
-      precisaTrocarSenha: true,
-    });
-    if (!ok) {
-      onNotify && onNotify("Não foi possível redefinir a senha agora.");
+    const r = await redefinirSenhaUsuarioAdmin(u.id);
+    if (!r.ok) {
+      onNotify && onNotify(r.message || "Não foi possível redefinir a senha agora.");
       return;
     }
     logDocumentAction("redefiniu_senha_usuario", { usuarioAlvo: u.email });
@@ -30183,14 +30453,100 @@ function UsersManagementView({ currentUser, onNotify, onBack }) {
       setConfirmandoExclusao(null);
       return;
     }
-    const ok = await excluirUsuarioDb(u.id);
+    const r = await excluirUsuarioAdmin(u.id);
     setConfirmandoExclusao(null);
-    if (!ok) {
-      onNotify && onNotify("Não foi possível excluir o usuário agora.");
+    if (!r.ok) {
+      onNotify && onNotify(r.message || "Não foi possível excluir o usuário agora.");
       return;
     }
     logDocumentAction("excluiu_usuario", { usuarioAlvo: u.email });
     carregar();
+  }
+  const pendentes = (usuarios || []).filter((u) => u.status === "aguardando_autorizacao");
+  const listaVisivel = soPendentes ? pendentes : usuarios || [];
+  const usuarioHistorico = (usuarios || []).find((u) => u.id === historicoAbertoId) || null;
+  /** Ações de um cadastro AGUARDANDO AUTORIZAÇÃO: o administrador escolhe um dos
+   *  níveis de acesso que já existem (Usuário, Comercial, Administrador). */
+  function acoesPendente(u) {
+    return /*#__PURE__*/ React.createElement(
+      "div",
+      { style: { display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" } },
+      autorizandoId === u.id
+        ? [
+            /*#__PURE__*/ React.createElement(
+              "select",
+              {
+                key: "sel",
+                value: perfilAutorizar,
+                onChange: (e) => setPerfilAutorizar(e.target.value),
+                "aria-label": "Nível de acesso",
+              },
+              /*#__PURE__*/ React.createElement("option", { value: "usuario" }, "Usuário"),
+              /*#__PURE__*/ React.createElement("option", { value: "comercial" }, "Comercial"),
+              /*#__PURE__*/ React.createElement("option", { value: "admin" }, "Administrador"),
+            ),
+            /*#__PURE__*/ React.createElement(
+              "button",
+              { key: "ok", className: "doc-download-btn", onClick: () => handleAutorizar(u) },
+              "Confirmar autorização",
+            ),
+            /*#__PURE__*/ React.createElement(
+              "button",
+              { key: "no", className: "doc-view-btn", onClick: () => setAutorizandoId(null) },
+              "Cancelar",
+            ),
+          ]
+        : /*#__PURE__*/ React.createElement(
+            "button",
+            {
+              className: "doc-download-btn",
+              onClick: () => {
+                setPerfilAutorizar("usuario");
+                setAutorizandoId(u.id);
+              },
+            },
+            "Autorizar acesso",
+          ),
+      /*#__PURE__*/ React.createElement(
+        "button",
+        {
+          className: "doc-view-btn",
+          onClick: () => setHistoricoAbertoId(historicoAbertoId === u.id ? null : u.id),
+        },
+        "Histórico",
+      ),
+      confirmandoExclusao === u.id
+        ? /*#__PURE__*/ React.createElement(
+            "span",
+            { className: "doc-row-delete-confirm" },
+            /*#__PURE__*/ React.createElement(
+              "button",
+              { className: "doc-row-delete-btn", onClick: () => handleExcluir(u) },
+              "Confirmar exclusão",
+            ),
+            /*#__PURE__*/ React.createElement(
+              "button",
+              { className: "doc-view-btn", onClick: () => setConfirmandoExclusao(null) },
+              "Cancelar",
+            ),
+          )
+        : /*#__PURE__*/ React.createElement(
+            "button",
+            { className: "doc-row-delete-btn", onClick: () => setConfirmandoExclusao(u.id) },
+            /*#__PURE__*/ React.createElement(Trash2, { size: 12 }),
+            " Excluir",
+          ),
+    );
+  }
+  function botaoHistorico(u) {
+    return /*#__PURE__*/ React.createElement(
+      "button",
+      {
+        className: "doc-view-btn",
+        onClick: () => setHistoricoAbertoId(historicoAbertoId === u.id ? null : u.id),
+      },
+      "Histórico",
+    );
   }
   return /*#__PURE__*/ React.createElement(
     "div",
@@ -30224,6 +30580,23 @@ function UsersManagementView({ currentUser, onNotify, onBack }) {
         " Novo usuário",
       ),
     ),
+    pendentes.length > 0 &&
+      /*#__PURE__*/ React.createElement(
+        "div",
+        { className: "login-hint", role: "status", style: { display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" } },
+        /*#__PURE__*/ React.createElement(
+          "span",
+          null,
+          pendentes.length === 1
+            ? "1 cadastro aguardando autorização de acesso."
+            : `${pendentes.length} cadastros aguardando autorização de acesso.`,
+        ),
+        /*#__PURE__*/ React.createElement(
+          "button",
+          { className: "doc-view-btn", onClick: () => setSoPendentes((v) => !v) },
+          soPendentes ? "Mostrar todos" : "Mostrar só os pendentes",
+        ),
+      ),
     /*#__PURE__*/ React.createElement(
       "div",
       { className: "table-wrap desktop-only" },
@@ -30248,7 +30621,7 @@ function UsersManagementView({ currentUser, onNotify, onBack }) {
         /*#__PURE__*/ React.createElement(
           "tbody",
           null,
-          (usuarios || []).map((u) =>
+          listaVisivel.map((u) =>
             /*#__PURE__*/ React.createElement(
               "tr",
               { key: u.id },
@@ -30257,7 +30630,7 @@ function UsersManagementView({ currentUser, onNotify, onBack }) {
               /*#__PURE__*/ React.createElement(
                 "td",
                 null,
-                PERFIL_LABELS[u.perfil] || u.perfil,
+                u.status === "aguardando_autorizacao" ? "—" : PERFIL_LABELS[u.perfil] || u.perfil,
               ),
               /*#__PURE__*/ React.createElement(
                 "td",
@@ -30285,9 +30658,12 @@ function UsersManagementView({ currentUser, onNotify, onBack }) {
               /*#__PURE__*/ React.createElement(
                 "td",
                 null,
-                /*#__PURE__*/ React.createElement(
+                u.status === "aguardando_autorizacao"
+                  ? acoesPendente(u)
+                  : /*#__PURE__*/ React.createElement(
                   "div",
                   { style: { display: "flex", gap: 6, flexWrap: "wrap" } },
+                  botaoHistorico(u),
                   /*#__PURE__*/ React.createElement(
                     "button",
                     {
@@ -30363,17 +30739,17 @@ function UsersManagementView({ currentUser, onNotify, onBack }) {
           ),
         ),
       ),
-      usuarios && usuarios.length === 0 &&
+      usuarios && listaVisivel.length === 0 &&
         /*#__PURE__*/ React.createElement(
           "div",
           { className: "empty-state" },
-          "Nenhum usuário cadastrado ainda.",
+          soPendentes ? "Nenhum cadastro aguardando autorização." : "Nenhum usuário cadastrado ainda.",
         ),
     ),
     /*#__PURE__*/ React.createElement(
       "div",
       { className: "company-cards mobile-only" },
-      (usuarios || []).map((u) =>
+      listaVisivel.map((u) =>
         /*#__PURE__*/ React.createElement(
           "div",
           { key: u.id, className: "company-card-mobile" },
@@ -30404,12 +30780,15 @@ function UsersManagementView({ currentUser, onNotify, onBack }) {
             /*#__PURE__*/ React.createElement(
               "span",
               null,
-              PERFIL_LABELS[u.perfil] || u.perfil,
+              u.status === "aguardando_autorizacao" ? "—" : PERFIL_LABELS[u.perfil] || u.perfil,
             ),
           ),
-          /*#__PURE__*/ React.createElement(
+          u.status === "aguardando_autorizacao"
+            ? /*#__PURE__*/ React.createElement("div", { style: { marginTop: 8 } }, acoesPendente(u))
+            : /*#__PURE__*/ React.createElement(
             "div",
             { style: { display: "flex", gap: 6, flexWrap: "wrap", marginTop: 8 } },
+            botaoHistorico(u),
             /*#__PURE__*/ React.createElement(
               "button",
               {
@@ -30477,6 +30856,34 @@ function UsersManagementView({ currentUser, onNotify, onBack }) {
         ),
       ),
     ),
+    usuarioHistorico &&
+      /*#__PURE__*/ React.createElement(
+        "div",
+        { className: "login-hint", style: { display: "block", marginTop: 14 } },
+        /*#__PURE__*/ React.createElement(
+          "div",
+          { style: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 6 } },
+          /*#__PURE__*/ React.createElement("strong", null, `Histórico de acesso — ${usuarioHistorico.nome}`),
+          /*#__PURE__*/ React.createElement(
+            "button",
+            { className: "doc-view-btn", onClick: () => setHistoricoAbertoId(null) },
+            "Fechar",
+          ),
+        ),
+        (usuarioHistorico.historicoAcesso || []).length === 0
+          ? /*#__PURE__*/ React.createElement("div", null, "Nenhum evento de acesso registrado para este usuário.")
+          : (usuarioHistorico.historicoAcesso || [])
+              .slice()
+              .reverse()
+              .map((ev, i) =>
+                /*#__PURE__*/ React.createElement(
+                  "div",
+                  { key: i, style: { padding: "3px 0", fontWeight: 500 } },
+                  `${formatAuditWhen(new Date(ev.em))} — ${descreverEventoHistoricoAcesso(ev)}`,
+                  ev.porNome ? ` · por ${ev.porNome}${ev.porEmail ? ` (${ev.porEmail})` : ""}` : "",
+                ),
+              ),
+      ),
     formMode &&
       /*#__PURE__*/ React.createElement(UserFormModal, {
         mode: formMode,
@@ -34551,7 +34958,30 @@ function GrupoprimaPortal() {
   // arquivo aqui. null = ainda não sincronizado com o armazenamento
   // persistente (useDerived trata como lista vazia).
   const [confirmedDocs, setConfirmedDocs] = useState(null);
+  // (a leitura de documentos_confirmados fica logo abaixo do estado de login — só começa com sessão válida e autorizada)
+  // autoDrive: documentos localizados AGORA MESMO na pasta oficial do Google
+  // Drive via o backend próprio, classificados na hora (ver
+  // useAutoSyncedDriveDocuments) — garante que os documentos reais apareçam
+  // para qualquer pessoa que abra o portal, mesmo sem "db" disponível (ex.:
+  // a cópia publicada fora do claude.ai). Quando o MESMO arquivo já existir
+  // em confirmedDocs (revisão/persistência administrativa real feita por um
+  // administrador), a versão do "db" prevalece — nunca duplica nem
+  // substitui uma classificação já confirmada por uma pessoa.
+  // Sessão restaurada do localStorage (pedido explícito da Iasmin,
+  // 2026-09-18) — se havia um login salvo, a usuária já entra autenticada,
+  // sem precisar refazer o login a cada F5. (Declarado ANTES de autoDrive:
+  // a leitura dos documentos do Drive só começa depois do login.)
+  const [authenticated, setAuthenticated] = useState(() => !!loadPortalSession());
+  const [currentUser, setCurrentUser] = useState(() => loadPortalSession());
+  // Sessão guardada (F5) só é aceita depois de o SERVIDOR confirmar que ainda vale.
+  const [sessaoVerificada, setSessaoVerificada] = useState(() => !loadPortalSession());
+  const [erroVerificacao, setErroVerificacao] = useState("");
+  const [avisoLogin, setAvisoLogin] = useState("");
+  const ultimaAtividadeRef = useRef(Date.now());
+  const handleLogoutRef = useRef(null);
+  const pendente = currentUser?.status === "aguardando_autorizacao";
   useEffect(() => {
+    if (!authenticated || !sessaoVerificada || pendente) return;
     let unsub = null;
     let cancelled = false;
     getDb().then((db) => {
@@ -34569,21 +34999,8 @@ function GrupoprimaPortal() {
       cancelled = true;
       if (unsub) unsub();
     };
-  }, []); // autoDrive: documentos localizados AGORA MESMO na pasta oficial do Google
-  // Drive via o backend próprio, classificados na hora (ver
-  // useAutoSyncedDriveDocuments) — garante que os documentos reais apareçam
-  // para qualquer pessoa que abra o portal, mesmo sem "db" disponível (ex.:
-  // a cópia publicada fora do claude.ai). Quando o MESMO arquivo já existir
-  // em confirmedDocs (revisão/persistência administrativa real feita por um
-  // administrador), a versão do "db" prevalece — nunca duplica nem
-  // substitui uma classificação já confirmada por uma pessoa.
-  // Sessão restaurada do localStorage (pedido explícito da Iasmin,
-  // 2026-09-18) — se havia um login salvo, a usuária já entra autenticada,
-  // sem precisar refazer o login a cada F5. (Declarado ANTES de autoDrive:
-  // a leitura dos documentos do Drive só começa depois do login.)
-  const [authenticated, setAuthenticated] = useState(() => !!loadPortalSession());
-  const [currentUser, setCurrentUser] = useState(() => loadPortalSession());
-  const autoDrive = useAutoSyncedDriveDocuments(authenticated);
+  }, [authenticated, sessaoVerificada, pendente]);
+  const autoDrive = useAutoSyncedDriveDocuments(authenticated && sessaoVerificada && !pendente);
   const allDocuments = useMemo(() => {
     const base = confirmedDocs || [];
     const idsConhecidos = new Set(
@@ -34754,6 +35171,11 @@ function GrupoprimaPortal() {
     setViewer(null); // a revogação do blob URL é feita pelo próprio ViewerModal, no cleanup do efeito
   }
   function handleLogin(user) {
+    ultimaAtividadeRef.current = Date.now();
+    registrarAtividadeCompartilhada(ultimaAtividadeRef.current);
+    setAvisoLogin("");
+    setErroVerificacao("");
+    setSessaoVerificada(true);
     setAuthenticated(true);
     setCurrentUser(user || null);
     savePortalSession(user || null);
@@ -34770,16 +35192,175 @@ function GrupoprimaPortal() {
       return next;
     });
   }
+  /** aplicarUsuarioDoServidor: o servidor é a fonte da verdade do nível de
+   *  acesso e do status (autorização, revogação, troca de perfil). */
+  function aplicarUsuarioDoServidor(u) {
+    if (!u) return;
+    setCurrentUser((prev) => {
+      if (!prev) return prev;
+      if (
+        prev.perfil === u.perfil &&
+        prev.status === u.status &&
+        prev.nome === u.nome &&
+        !!prev.precisaTrocarSenha === !!u.precisaTrocarSenha
+      )
+        return prev;
+      const next = {
+        ...prev,
+        perfil: u.perfil,
+        status: u.status,
+        nome: u.nome,
+        precisaTrocarSenha: !!u.precisaTrocarSenha,
+      };
+      savePortalSession(next);
+      return next;
+    });
+  }
+  const MSGS_SESSAO_ENCERRADA = {
+    inatividade: "Sua sessão foi encerrada por inatividade. Entre novamente.",
+    sessao_expirada: "Sua sessão foi encerrada por inatividade. Entre novamente.",
+    sessao_invalida: "Sua sessão não é mais válida. Entre novamente.",
+    acesso_desativado: "Este acesso está desativado. Fale com o administrador do portal.",
+  };
   function handleLogout(reason) {
     logDocumentAction("logout", reason ? { motivo: reason } : {});
+    // encerra a sessão no servidor (best-effort) ANTES de apagar o token local
+    if (getPortalSessionToken()) chamarAuth("/api/auth/sair", { body: {} }).catch(() => {});
     vgSair();
+    definirTokenSessaoPortal(null);
+    atualizarAvisoInatividade(null);
     setAuditSessionUser(null);
+    setAvisoLogin(MSGS_SESSAO_ENCERRADA[reason] || "");
     setAuthenticated(false);
     setCurrentUser(null);
+    setConfirmedDocs(null);
+    setSessaoVerificada(true);
     savePortalSession(null);
     setView("dashboard");
     setChatOpen(false);
   }
+  handleLogoutRef.current = handleLogout;
+  // Valida no SERVIDOR a sessão guardada no navegador (F5 / aba reaberta):
+  // enquanto isso nada do portal é mostrado.
+  useEffect(() => {
+    if (!authenticated || sessaoVerificada) return;
+    let cancelado = false;
+    (async () => {
+      try {
+        const { status, json } = await chamarAuth("/api/auth/sessao", { method: "GET" });
+        if (cancelado) return;
+        if (json.ok && json.user) {
+          const restante = Number(json.restanteMs) || 0;
+          ultimaAtividadeRef.current = Math.max(
+            lerAtividadeCompartilhada(),
+            Date.now() - (PORTAL_INATIVIDADE_LIMITE_MS - restante),
+          );
+          setCurrentUser((prev) => {
+            const next = { ...(prev || {}), ...json.user };
+            savePortalSession(next);
+            return next;
+          });
+          setAuditSessionUser(json.user.nome || json.user.email || null);
+          setErroVerificacao("");
+          setSessaoVerificada(true);
+        } else if (status === 401 || status === 403) {
+          definirTokenSessaoPortal(null);
+          savePortalSession(null);
+          setAvisoLogin(MSGS_SESSAO_ENCERRADA[json.codigo] || MSGS_SESSAO_ENCERRADA.sessao_invalida);
+          setAuthenticated(false);
+          setCurrentUser(null);
+          setSessaoVerificada(true);
+        } else {
+          setErroVerificacao("Não foi possível verificar sua sessão agora.");
+        }
+      } catch (e) {
+        if (!cancelado) setErroVerificacao("Não foi possível conectar ao servidor do portal agora.");
+      }
+    })();
+    return () => {
+      cancelado = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authenticated, sessaoVerificada, erroVerificacao === ""]);
+  // O servidor encerrou a sessão (inatividade, acesso desativado...): volta ao login.
+  useEffect(() => {
+    function aoEncerrar(e) {
+      const codigo = e && e.detail && e.detail.codigo;
+      if (codigo === "aguardando_autorizacao") {
+        setCurrentUser((prev) => (prev && prev.status !== "aguardando_autorizacao" ? { ...prev, perfil: null, status: "aguardando_autorizacao" } : prev));
+        return;
+      }
+      if (handleLogoutRef.current) handleLogoutRef.current(codigo || "sessao_invalida");
+    }
+    function aoMudarStorage(e) {
+      if (e.key === PORTAL_ATIVIDADE_STORAGE_KEY) {
+        const v = Number(e.newValue) || 0;
+        if (v > ultimaAtividadeRef.current) ultimaAtividadeRef.current = v;
+      } else if (e.key === PORTAL_TOKEN_STORAGE_KEY && !e.newValue && getPortalSessionToken()) {
+        // saiu em outra aba do mesmo navegador
+        portalSessionToken = null;
+        if (handleLogoutRef.current) handleLogoutRef.current("manual");
+      }
+    }
+    window.addEventListener("portal:sessao-encerrada", aoEncerrar);
+    window.addEventListener("storage", aoMudarStorage);
+    return () => {
+      window.removeEventListener("portal:sessao-encerrada", aoEncerrar);
+      window.removeEventListener("storage", aoMudarStorage);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  // INATIVIDADE (30 min): só conta atividade REAL (clique, tecla, toque,
+  // rolagem) — consultas automáticas e aba apenas aberta não renovam. A cada
+  // atividade (no máx. a cada 30 s) o navegador avisa o servidor, que é quem
+  // realmente encerra a sessão. Nos 2 últimos minutos aparece um aviso.
+  useEffect(() => {
+    if (!authenticated || !sessaoVerificada) return;
+    let ultimoHeartbeat = 0;
+    let enviando = false;
+    async function heartbeat() {
+      if (enviando) return;
+      enviando = true;
+      ultimoHeartbeat = Date.now();
+      try {
+        const { json } = await chamarAuth("/api/auth/atividade", { body: {} });
+        if (json.ok && json.user) aplicarUsuarioDoServidor(json.user);
+      } catch (e) {
+        /* falha de rede: tenta de novo na próxima atividade */
+      }
+      enviando = false;
+    }
+    function aoInteragir() {
+      const agora = Date.now();
+      if (agora - ultimaAtividadeRef.current < 1000 && agora - ultimoHeartbeat < 30000) return;
+      ultimaAtividadeRef.current = agora;
+      registrarAtividadeCompartilhada(agora);
+      atualizarAvisoInatividade(null);
+      if (agora - ultimoHeartbeat >= 30000) heartbeat();
+    }
+    const eventos = ["pointerdown", "mousedown", "keydown", "touchstart", "wheel", "scroll"];
+    eventos.forEach((n) => window.addEventListener(n, aoInteragir, { capture: true, passive: true }));
+    const timer = setInterval(() => {
+      const ult = Math.max(ultimaAtividadeRef.current, lerAtividadeCompartilhada());
+      const ocioso = Date.now() - ult;
+      if (ocioso >= PORTAL_INATIVIDADE_LIMITE_MS) {
+        clearInterval(timer);
+        if (handleLogoutRef.current) handleLogoutRef.current("inatividade");
+        return;
+      }
+      if (ocioso >= PORTAL_INATIVIDADE_LIMITE_MS - PORTAL_INATIVIDADE_AVISO_MS) {
+        atualizarAvisoInatividade(Math.max(0, Math.ceil((PORTAL_INATIVIDADE_LIMITE_MS - ocioso) / 1000)));
+      } else {
+        atualizarAvisoInatividade(null);
+      }
+    }, 1000);
+    return () => {
+      eventos.forEach((n) => window.removeEventListener(n, aoInteragir, { capture: true }));
+      clearInterval(timer);
+      atualizarAvisoInatividade(null);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authenticated, sessaoVerificada]);
   // Restaura o nome da usuária na Auditoria quando a sessão é retomada do
   // localStorage (um F5, por exemplo) — sem isso, currentSessionUser
   // (variável de módulo, reiniciada a cada carregamento de página) ficaria
@@ -34830,6 +35411,38 @@ function GrupoprimaPortal() {
   if (!authenticated) {
     return /*#__PURE__*/ React.createElement(LoginScreen, {
       onLogin: handleLogin,
+      aviso: avisoLogin,
+    });
+  }
+  if (!sessaoVerificada) {
+    return /*#__PURE__*/ React.createElement(
+      "div",
+      { className: "login-screen" },
+      /*#__PURE__*/ React.createElement("style", null, LOGIN_SCREEN_CSS),
+      /*#__PURE__*/ React.createElement(
+        "div",
+        { className: "login-card", style: { textAlign: "center" } },
+        /*#__PURE__*/ React.createElement("p", { className: "login-sub" }, erroVerificacao || "Verificando seu acesso..."),
+        erroVerificacao &&
+          /*#__PURE__*/ React.createElement(
+            "button",
+            { className: "login-submit", type: "button", onClick: () => setErroVerificacao("") },
+            "Tentar novamente",
+          ),
+        erroVerificacao &&
+          /*#__PURE__*/ React.createElement(
+            "button",
+            { className: "login-alt-link", type: "button", onClick: () => handleLogout("manual") },
+            "Sair",
+          ),
+      ),
+    );
+  }
+  if (currentUser?.status === "aguardando_autorizacao") {
+    return /*#__PURE__*/ React.createElement(AcessoPendenteScreen, {
+      user: currentUser,
+      onStatus: (u) => aplicarUsuarioDoServidor(u),
+      onLogout: () => handleLogout("manual"),
     });
   }
   if (currentUser?.precisaTrocarSenha) {
