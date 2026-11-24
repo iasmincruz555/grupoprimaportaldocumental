@@ -2645,6 +2645,16 @@ function documentosEmbutidosParaPortal(documentosExistentes) {
  *  documentação da capability "mcp"). */ async function fetchDocumentFile(
   doc,
 ) {
+  // Texto escrito (Envio em Lote > informações do cliente): vira um .txt na hora, sem Drive.
+  if (doc && typeof doc.__textoCliente === "string") {
+    const bytes = new TextEncoder().encode(doc.__textoCliente);
+    return {
+      blob: new Blob([bytes], { type: "text/plain;charset=utf-8" }),
+      filename: (doc.arquivo && doc.arquivo.nomeOriginal) || "Informações do cliente.txt",
+      mimeType: "text/plain",
+      bytes,
+    };
+  }
   if (doc.arquivo && doc.arquivo.embutidoId) {
     const b64 = DOCUMENTOS_EMBUTIDOS_PDF_B64[doc.arquivo.embutidoId];
     if (!b64) {
@@ -15390,14 +15400,52 @@ function nomeUnicoNoZip(nome, usados) {
 /** docDoArquivoCliente: adapta um arquivo do cliente ao formato de documento
  *  que fetchDocumentFile/viewDocument já entendem (nada de lógica nova). */
 function docDoArquivoCliente(a) {
+  const ehTexto = ehItemTextoCliente(a);
   return {
     id: a.id,
     categoria: null,
     tipo: a.nome,
     titulo: a.nome,
-    arquivo: { driveFileId: a.driveFileId || null, assetId: a.assetId || null, mimeType: a.tipo || null, nomeOriginal: a.nome },
+    arquivo: { driveFileId: a.driveFileId || null, assetId: a.assetId || null, mimeType: ehTexto ? "text/plain" : a.tipo || null, nomeOriginal: a.nome },
     __arquivoClienteLote: true,
+    ...(ehTexto ? { __textoCliente: a.texto } : {}),
   };
+}
+/** Texto escrito pelo cliente/consultor (2026-11-24): "Informações do cliente" — vale como um item da
+ *  mesma lista dos arquivos do cliente para preenchimento (vai no ZIP como .txt na pasta
+ *  Arquivos_para_Preenchimento e, na Homologação, fica pendente até ser marcado como preenchido).
+ *  Não tem arquivo no Drive: o conteúdo fica no próprio registro (`texto`). */
+const TEXTO_CLIENTE_MAX_CHARS = 20000;
+function ehItemTextoCliente(a) {
+  return !!a && a.tipoItem === "texto" && typeof a.texto === "string";
+}
+function nomeNovoItemTextoCliente(existentes) {
+  const n = (existentes || []).filter(ehItemTextoCliente).length + 1;
+  return n === 1 ? "Informações do cliente.txt" : `Informações do cliente (${n}).txt`;
+}
+function criarItensTextoClienteLote(textos, existentes, usuarioNome) {
+  const lista = [...(existentes || [])];
+  const novos = [];
+  (textos || []).forEach((t) => {
+    const texto = String(t || "").trim().slice(0, TEXTO_CLIENTE_MAX_CHARS);
+    if (!texto) return;
+    const entrada = {
+      id: `arq-cli-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
+      nome: nomeNovoItemTextoCliente(lista),
+      tamanho: new TextEncoder().encode(texto).length,
+      tipo: "text/plain",
+      tipoItem: "texto",
+      texto,
+      driveFileId: null,
+      assetId: null,
+      origem: "cliente",
+      enviadoPor: usuarioNome || "Usuário do portal",
+      enviadoEm: new Date().toISOString(),
+    };
+    lista.push(entrada);
+    novos.push(entrada);
+  });
+  return novos;
 }
 /** enviarArquivosClienteLote: sobe cada arquivo do cliente para a pasta da
  *  solicitação (mesma pasta/mecanismo dos anexos recebidos) e devolve os
@@ -15447,6 +15495,7 @@ function mesclarArquivosPreenchimento(arquivosCliente, existentes) {
       tipo: a.tipo || "application/octet-stream",
       driveFileId: a.driveFileId || null,
       assetId: a.assetId || null,
+      ...(ehItemTextoCliente(a) ? { tipoItem: "texto", texto: a.texto } : {}),
       status: e.status === "preenchido" ? "preenchido" : "aguardando",
       preenchidoEm: e.preenchidoEm || null,
       preenchidoPor: e.preenchidoPor || null,
@@ -16257,6 +16306,15 @@ function isoDateToBR(iso) {
  *  finge um arquivo que não tem mais). */ async function fetchHomologAnexoFile(
   anexo,
 ) {
+  if (ehItemTextoCliente(anexo)) {
+    const bytes = new TextEncoder().encode(anexo.texto);
+    return {
+      blob: new Blob([bytes], { type: "text/plain;charset=utf-8" }),
+      filename: anexo.nome,
+      mimeType: "text/plain",
+      bytes,
+    };
+  }
   if (anexo.driveFileId || anexo.assetId) {
     try {
       return await fetchDocumentFile({
@@ -26739,7 +26797,7 @@ async function processarLote(solicitacao, { companies, usuarioProcessamento, dep
   marcarEtapa("recebimento", "ok");
 
   const anexosPendentes = [...(solicitacao.anexosRecebidos || []), ...arquivosClienteAtivos].filter(
-    (a) => !a.driveFileId && !a.assetId,
+    (a) => !a.driveFileId && !a.assetId && !ehItemTextoCliente(a),
   );
   if (anexosPendentes.length > 0) {
     return falhar(
@@ -26905,6 +26963,7 @@ function EnvioLoteFormModal({ companies, onClose, onCreate, clientesCadastrados 
   // Grupoprima e vão para a pasta Arquivos_para_Preenchimento do ZIP.
   const [arquivosCliente, setArquivosCliente] = useState([]);
   const [mostrarArquivosCliente, setMostrarArquivosCliente] = useState(false);
+  const [textoCliente, setTextoCliente] = useState("");
   const arquivosClienteInputRef = useRef(null);
   // tipoSolicitacao (2026-10-20): obrigatório — define em qual aba da
   // Homologação o acompanhamento comercial é registrado automaticamente.
@@ -26993,6 +27052,7 @@ function EnvioLoteFormModal({ companies, onClose, onCreate, clientesCadastrados 
     setProcessando(true);
     await onCreate({
       arquivosClienteFiles: arquivosCliente,
+      arquivosClienteTexto: textoCliente.trim() ? [textoCliente] : [],
       cliente: clienteFinal,
       tipoSolicitacao,
       clienteOrigemId: origemSel ? origemSel.id : null,
@@ -27232,12 +27292,12 @@ function EnvioLoteFormModal({ companies, onClose, onCreate, clientesCadastrados 
         React.createElement(
           "div",
           { className: "homolog-field" },
-          !mostrarArquivosCliente && arquivosCliente.length === 0
+          !mostrarArquivosCliente && arquivosCliente.length === 0 && !textoCliente.trim()
             ? React.createElement(
                 "button",
                 { type: "button", className: "lote-add-cliente-btn", onClick: () => setMostrarArquivosCliente(true) },
                 React.createElement(Plus, { size: 13 }),
-                " O cliente enviou formulários ou arquivos para preencher ou assinar?",
+                " O cliente enviou formulários, arquivos ou informações para preencher ou assinar?",
               )
             : React.createElement(
                 React.Fragment,
@@ -27246,7 +27306,7 @@ function EnvioLoteFormModal({ companies, onClose, onCreate, clientesCadastrados 
                 React.createElement(
                   "p",
                   { className: "homolog-bases-hint" },
-                  "Formulários, RFIs, planilhas ou documentos para preencher/assinar. Vão no ZIP na pasta ",
+                  "Formulários, RFIs, planilhas ou documentos para preencher/assinar — ou informações escritas. Vão no ZIP na pasta ",
                   React.createElement("strong", null, ZIP_PASTA_CLIENTE),
                   ", separados dos documentos da Grupoprima e sem alterar o original.",
                 ),
@@ -27298,6 +27358,20 @@ function EnvioLoteFormModal({ companies, onClose, onCreate, clientesCadastrados 
                     ),
                   ),
                 ),
+                React.createElement(
+                  "label",
+                  { htmlFor: "lote-texto-cliente", style: { marginTop: 10 } },
+                  "Ou escreva aqui as informações do cliente",
+                ),
+                React.createElement("textarea", {
+                  id: "lote-texto-cliente",
+                  "data-testid": "lote-texto-cliente",
+                  rows: 5,
+                  maxLength: TEXTO_CLIENTE_MAX_CHARS,
+                  value: textoCliente,
+                  onChange: (e) => setTextoCliente(e.target.value),
+                  placeholder: "Ex.: Dados do responsável pelo cadastro: nome completo, telefone, e-mail...",
+                }),
               ),
         ),
         React.createElement(
@@ -27669,6 +27743,7 @@ function EnvioLoteDetailView({ item, companies, onBack, onNotify, onView, onUpda
   const [previaAberta, setPreviaAberta] = useState(false);
   const [previaDesmarcados, setPreviaDesmarcados] = useState(new Set());
   const [mostrarAddCliente, setMostrarAddCliente] = useState(false);
+  const [textoClienteDetalhe, setTextoClienteDetalhe] = useState("");
   const [enviandoArquivosCliente, setEnviandoArquivosCliente] = useState(false);
   const arquivosClienteDetalheRef = useRef(null);
   const arquivosCliente = item.arquivosCliente || [];
@@ -27801,6 +27876,14 @@ function EnvioLoteDetailView({ item, companies, onBack, onNotify, onView, onUpda
         : `${envio.entradas.length} arquivo(s) do cliente adicionado(s).`,
       envio.falhas.length ? "error" : "info",
     );
+  }
+  function handleAdicionarTextoCliente() {
+    const novos = criarItensTextoClienteLote([textoClienteDetalhe], arquivosCliente, currentUser?.nome);
+    if (novos.length === 0) return;
+    persistPatch({ arquivosCliente: [...arquivosCliente, ...novos] });
+    setTextoClienteDetalhe("");
+    logDocumentAction("adicionou_arquivo_cliente_lote", { cliente: item.cliente, quantidade: 1 });
+    onNotify?.("Informações do cliente adicionadas.", "info");
   }
   function handleRemoverArquivoCliente(a) {
     persistPatch({ arquivosCliente: arquivosCliente.filter((x) => x.id !== a.id) });
@@ -28405,7 +28488,7 @@ function EnvioLoteDetailView({ item, companies, onBack, onNotify, onView, onUpda
                   "div",
                   { className: "lote-previa-info" },
                   React.createElement("span", { className: "homolog-anexo-nome" }, a.nome),
-                  React.createElement("div", { className: "lote-previa-meta" }, `arquivo do cliente · ${formatBytes(a.tamanho)} · nome original preservado`),
+                  React.createElement("div", { className: "lote-previa-meta" }, ehItemTextoCliente(a) ? `informações escritas · ${formatBytes(a.tamanho)} · vai como .txt` : `arquivo do cliente · ${formatBytes(a.tamanho)} · nome original preservado`),
                 ),
                 React.createElement(
                   "button",
@@ -28518,7 +28601,7 @@ function EnvioLoteDetailView({ item, companies, onBack, onNotify, onView, onUpda
             "button",
             { type: "button", className: "lote-add-cliente-btn", onClick: () => setMostrarAddCliente(true) },
             React.createElement(Plus, { size: 13 }),
-            " O cliente enviou formulários ou arquivos para preencher ou assinar?",
+            " O cliente enviou formulários, arquivos ou informações para preencher ou assinar?",
           ),
         )
       : React.createElement(
@@ -28528,7 +28611,7 @@ function EnvioLoteDetailView({ item, companies, onBack, onNotify, onView, onUpda
           React.createElement(
             "p",
             { className: "homolog-bases-hint" },
-            "Formulários, RFIs, planilhas ou documentos enviados pelo cliente. Ficam identificados à parte dos documentos da Grupoprima e vão no ZIP na pasta ",
+            "Formulários, RFIs, planilhas, documentos ou informações escritas enviados pelo cliente. Ficam identificados à parte dos documentos da Grupoprima e vão no ZIP na pasta ",
             React.createElement("strong", null, ZIP_PASTA_CLIENTE),
             ", com o nome e o conteúdo originais.",
           ),
@@ -28539,7 +28622,7 @@ function EnvioLoteDetailView({ item, companies, onBack, onNotify, onView, onUpda
               React.createElement(FileText, { size: 14 }),
               React.createElement("span", { className: "homolog-anexo-nome" }, a.nome),
               React.createElement("span", { className: "homolog-anexo-tamanho" }, formatBytes(a.tamanho)),
-              !a.driveFileId && !a.assetId &&
+              !a.driveFileId && !a.assetId && !ehItemTextoCliente(a) &&
                 React.createElement("span", { className: "lote-previa-vencido" }, "não salvo no repositório — remova e reenvie"),
               React.createElement(
                 "button",
@@ -28574,6 +28657,33 @@ function EnvioLoteDetailView({ item, companies, onBack, onNotify, onView, onUpda
               enviandoArquivosCliente ? React.createElement(Loader2, { size: 13, className: "spin" }) : React.createElement(UploadCloud, { size: 13 }),
               " ",
               enviandoArquivosCliente ? "Enviando..." : "Adicionar arquivos do cliente",
+            ),
+            React.createElement(
+              "label",
+              { htmlFor: "lote-texto-cliente-detalhe", style: { display: "block", marginTop: 12 } },
+              "Ou escreva aqui as informações do cliente",
+            ),
+            React.createElement("textarea", {
+              id: "lote-texto-cliente-detalhe",
+              "data-testid": "lote-texto-cliente-detalhe",
+              rows: 4,
+              maxLength: TEXTO_CLIENTE_MAX_CHARS,
+              value: textoClienteDetalhe,
+              onChange: (e) => setTextoClienteDetalhe(e.target.value),
+              placeholder: "Ex.: Dados do responsável pelo cadastro: nome completo, telefone, e-mail...",
+            }),
+            React.createElement(
+              "button",
+              {
+                type: "button",
+                className: "mini-download-btn",
+                "data-testid": "lote-texto-cliente-adicionar",
+                style: { marginTop: 6 },
+                disabled: !textoClienteDetalhe.trim(),
+                onClick: handleAdicionarTextoCliente,
+              },
+              React.createElement(Plus, { size: 13 }),
+              " Adicionar informações",
             ),
             React.createElement("input", {
               ref: arquivosClienteDetalheRef,
@@ -28817,7 +28927,7 @@ function EnvioLoteView({ currentUser, onNotify, onView, companies, registroAlvo,
       "info",
     );
   }
-  async function handleCreate({ cliente, tipoSolicitacao, clienteOrigemId, baseIds, itens, textoSolicitacaoOriginal, arquivoSolicitacaoOriginalNome, arquivosClienteFiles }) {
+  async function handleCreate({ cliente, tipoSolicitacao, clienteOrigemId, baseIds, itens, textoSolicitacaoOriginal, arquivoSolicitacaoOriginalNome, arquivosClienteFiles, arquivosClienteTexto }) {
     const id = generateLoteId();
     let arquivosCliente = [];
     if (arquivosClienteFiles && arquivosClienteFiles.length > 0) {
@@ -28826,6 +28936,9 @@ function EnvioLoteView({ currentUser, onNotify, onView, companies, registroAlvo,
       if (envio.falhas.length > 0) {
         onNotify?.(`${envio.falhas.length} arquivo(s) do cliente não puderam ser salvos no repositório agora (${envio.falhas.join(", ")}). Reenvie-os na solicitação antes de gerar o ZIP.`, "error");
       }
+    }
+    if (arquivosClienteTexto && arquivosClienteTexto.length > 0) {
+      arquivosCliente = [...arquivosCliente, ...criarItensTextoClienteLote(arquivosClienteTexto, arquivosCliente, currentUser?.nome)];
     }
     const agora = new Date().toISOString();
     const documentacoesSolicitadas = itens.map((it) => {
