@@ -1702,7 +1702,7 @@ const STATUS_META = {
  *  0004 no Envio em Lote): "leve como documento de abrangência empresarial,
  *  então qualquer filial pode solicitar". Pertencem à Contabilidade > Dados
  *  Bancários. */
-const TIPOS_SEMPRE_EMPRESARIAIS = ["Comprovante de Pagamento", "Carta de Titularidade Bancária"];
+const TIPOS_SEMPRE_EMPRESARIAIS = ["Comprovante de Pagamento", "Carta de Titularidade Bancária", "Comprovante Bancário"];
 /** normalizarDocEmpresarial: documento de categoria empresarial (Contratos
  *  Sociais, Contabilidade, Seguros, Planos/Procedimentos/Manuais) ou de um
  *  tipo sempre empresarial passa a valer como abrangência "empresa" mesmo que
@@ -4518,6 +4518,13 @@ async function createDocumentPackageMultiBase(numerados, opts = {}) {
  * invertida que aparece em documentos reais cadastrados. */
 const RE_TEXTO_SANITARIO = /licen[c]a sanitari[ao]|vigilancia sanitaria|alvara sanitari[ao]|\bsanitari[ao]s?\b/;
 const RE_TEXTO_BOMBEIROS = /\bavcb\b|\bavbc\b|\bclcb\b|bombeiros?|atestado de vistoria/;
+/* RE_COMPROVANTE_BANCARIO (pedido da Iasmin, 2026-11-24): "Comprovante Bancário" ("comprovante
+   bancário", "comprovante de dados bancários", "comprovante de conta bancária", "comprovante de
+   dados do banco") é um tipo PRÓPRIO, diferente da Carta de Titularidade Bancária. Texto já
+   normalizado (sem acento, minúsculo). A Carta ignora estas frases (ver abaixo), para um pedido
+   nunca trazer o documento do outro. */
+const RE_COMPROVANTE_BANCARIO =
+  /comprovantes? (?:(?:de|do|da|dos|das) )?(?:dados? |conta |contas |informacoes? )?(?:(?:de|do|da) )?banc\w*/;
 /* ---- Intenção + busca de documentos (preservado) ---- */ const DOC_TYPE_KEYWORDS =
   [
     {
@@ -5036,8 +5043,19 @@ const RE_TEXTO_BOMBEIROS = /\bavcb\b|\bavbc\b|\bclcb\b|bombeiros?|atestado de vi
       // tipo de um documento que cite "dados bancários" no corpo.
       key: "contabilidade",
       label: "Carta de Titularidade Bancária",
-      match:
-        /titularidade|carta (de |do |da )?(banco|banc|conta)|(dados?|informa[c]oes|informa[c]ao) (do |de |da |para )?(banc|banco|conta|pagamento|deposito)|dados da conta|declaracao banc|ficha banc|domicilio banc|conta corrente|comprovante de (conta|dados) banc/,
+      // Frases de "comprovante bancário" são removidas antes do teste: "comprovante de dados
+      // bancários" cita "dados bancários", mas NÃO é a carta (2026-11-24).
+      match: {
+        test: (t) =>
+          /titularidade|carta (de |do |da )?(banco|banc|conta)|(dados?|informa[c]oes|informa[c]ao) (do |de |da |para )?(banc|banco|conta|pagamento|deposito)|dados da conta|declaracao banc|ficha banc|domicilio banc|conta corrente/.test(
+            String(t).replace(new RegExp(RE_COMPROVANTE_BANCARIO.source, "g"), " "),
+          ),
+      },
+    },
+    {
+      key: "contabilidade",
+      label: "Comprovante Bancário",
+      match: RE_COMPROVANTE_BANCARIO,
     },
     {
       key: "contabilidade",
@@ -11126,6 +11144,7 @@ const TIPOS_SEM_RENOVACAO = new Set([
   "Dados do Banco",
   "Dados da Conta",
   "Comprovante de Pagamento",
+  "Comprovante Bancário",
 ]);
 /** documentoAdmiteAtualizacao: renovação simples de um documento (mesmo documento, nova
  *  validade). Fora: contratos sociais/alterações contratuais (fato novo na história da
@@ -21882,6 +21901,7 @@ const TIPO_LABEL_TO_DOC_FAMILY = {
     "Dados do Banco",
     "Dados da Conta",
     "Comprovante de Pagamento",
+    "Comprovante Bancário",
     "Apólice RCTR-C",
     "Apólice RC-DC",
     "Apólice RC-V",
