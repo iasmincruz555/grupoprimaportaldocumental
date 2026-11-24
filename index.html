@@ -9042,7 +9042,10 @@ function DashboardBasesPanel({ companies, onOpenCompany, onOpenDocuments, onGoCo
           // vigente). Sem documentos: "—", nunca um percentual inventado.
           const sm = brBaseSummary(c);
           const pct = sm.total > 0 ? Math.round(((sm.total - sm.vencidos) / sm.total) * 100) : null;
-          const tom = sm.vencidos > 0 ? "vencido" : sm.proximos > 0 ? "proximo" : "ok";
+          // Cor pelo percentual de regularidade (pedido da Iasmin, 2026-11-24): verde ≥ 60%,
+          // amarelo de 20% a 59%, vermelho < 20% (usa o valor arredondado exibido, então 60% é verde).
+          // Base sem documentos: tom neutro, sem inventar situação.
+          const tom = pct === null ? "neutro" : pct >= 60 ? "ok" : pct >= 20 ? "proximo" : "vencido";
           const plural = (n, um, varios) => n + " " + (n === 1 ? um : varios);
           return h(
             "div",
@@ -9090,7 +9093,7 @@ function DashboardBasesPanel({ companies, onOpenCompany, onOpenDocuments, onGoCo
             ),
             h(
               "div",
-              { className: "dbc-progress", title: "Regularidade: documentos atuais não vencidos ÷ total de documentos atuais" },
+              { className: "dbc-progress", title: "Regularidade: documentos atuais não vencidos ÷ total de documentos atuais. Verde ≥ 60%, amarelo 20% a 59%, vermelho < 20%" },
               h("div", { className: "dbc-track" }, h("div", { className: "dbc-fill", style: { width: (pct === null ? 0 : pct) + "%" } })),
               h("span", { className: "dbc-pct" }, pct === null ? "—" : pct + "%"),
             ),
@@ -37351,6 +37354,7 @@ function GrupoprimaPortal() {
         .dbc-card { --dbc-cor: #5CDD8B; position: relative; display: flex; flex-direction: column; justify-content: space-between; gap: 9px; text-align: left; background: var(--card-bg); border: 1px solid var(--cinza-frio); border-left: 4px solid var(--dbc-cor); border-radius: 12px; padding: 13px 15px 13px 14px; cursor: pointer; min-width: 0; transition: border-color 0.15s, background 0.15s; }
         .dbc-card:hover, .dbc-card.dbc-active { border-color: var(--cinza-frio); border-left-color: var(--dbc-cor); background: var(--card-bg); box-shadow: 0 0 0 1px var(--carvao); }
         .dbc-tom-proximo { --dbc-cor: #E3A83B; }
+        .dbc-tom-neutro { --dbc-cor: var(--cinza-frio); }
         .dbc-tom-vencido { --dbc-cor: #D64545; }
         .portal-root[data-theme="dark"] .dbc-tom-vencido { --dbc-cor: #E5605F; }
         .dbc-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
