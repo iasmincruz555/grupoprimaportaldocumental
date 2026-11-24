@@ -35542,7 +35542,7 @@ function GrupoprimaPortal() {
   const [companyDocTarget, setCompanyDocTarget] = useState(null);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   // Barra lateral recolhida (só no desktop): alternada exclusivamente ao arrastar a borda da barra.
-  const SIDEBAR_LARGURA_CHEIA = 220;
+  const SIDEBAR_LARGURA_CHEIA = 240;
   const SIDEBAR_LARGURA_RECOLHIDA = 72;
   const [sidebarRecolhida, setSidebarRecolhida] = useState(loadPortalSidebarRecolhida);
   const [sidebarArrasto, setSidebarArrasto] = useState(null); // largura (px) durante o arrasto; null = sem arrasto
@@ -36051,7 +36051,7 @@ function GrupoprimaPortal() {
         .portal-root input[type="checkbox"], .portal-root input[type="radio"] { accent-color: var(--texto); }
 
         .sidebar {
-          width: 220px; flex-shrink: 0; background: var(--azul); color: #F3F3F6;
+          width: 240px; flex-shrink: 0; background: var(--azul); color: #F3F3F6;
           padding: 22px 16px; display: flex; flex-direction: column; gap: 4px;
         }
         .sidebar-logo-btn {
@@ -36076,10 +36076,13 @@ function GrupoprimaPortal() {
           padding: 0 4px;
         }
         .nav-item {
-          display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 8px;
-          background: transparent; border: none; cursor: pointer; color: rgba(243,243,246,0.72);
-          font-size: 13.5px; font-weight: 500; text-align: left; transition: background 0.15s, color 0.15s;
+          display: flex; align-items: center; gap: 14px; padding: 10px 12px; border-radius: 8px;
+          background: transparent; border: none; cursor: pointer; color: rgba(243,243,246,0.82);
+          font-size: 15px; line-height: 1.25; font-weight: 500; text-align: left; transition: background 0.15s, color 0.15s;
         }
+        /* Ícones maiores (proporção do menu do Pipedrive): 22px no menu, 20px nos botões do rodapé. */
+        .sidebar .nav-item svg { width: 22px; height: 22px; flex-shrink: 0; stroke-width: 1.9; }
+        .sidebar .profile-nav-btn svg, .sidebar .theme-toggle-btn svg { width: 20px; height: 20px; flex-shrink: 0; }
         .nav-item:hover { background: rgba(255,255,255,0.06); color: #fff; }
         .nav-item.active { background: rgba(107,254,156,0.14); color: var(--verde); font-weight: 700; }
         .sidebar-bottom { margin-top: auto; display: flex; flex-direction: column; gap: 10px; padding-top: 14px; border-top: 1px solid rgba(255,255,255,0.1); }
@@ -36112,7 +36115,8 @@ function GrupoprimaPortal() {
           .sidebar.recolhida { width: 72px; padding-left: 10px; padding-right: 10px; }
           .sidebar.recolhida .sidebar-logo { display: none; }
           .sidebar.recolhida .sidebar-logo-icone { display: block; width: 36px; height: 36px; margin: 0 auto; }
-          .sidebar.recolhida .nav-item { justify-content: center; padding: 10px 0; }
+          .sidebar.recolhida .nav-item { justify-content: center; padding: 11px 0; }
+          .sidebar.recolhida .nav-item svg { width: 24px; height: 24px; }
           .sidebar.recolhida .nav-item span,
           .sidebar.recolhida .profile-nav-btn span,
           .sidebar.recolhida .theme-toggle-btn span { display: none; }
