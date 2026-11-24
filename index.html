@@ -9035,13 +9035,21 @@ function DashboardBasesPanel({ companies, onOpenCompany, onOpenDocuments, onGoCo
       ),
       h(
         "div",
-        { className: "company-mini-grid" },
-        companies.map((c) =>
-          h(
+        { className: "dbc-grid" },
+        companies.map((c) => {
+          // Regularidade da Base = documentos atuais NÃO vencidos ÷ total de documentos atuais
+          // (mesma contagem e mesmo status de brBaseSummary/computeDocStatus; "a vencer" ainda é
+          // vigente). Sem documentos: "—", nunca um percentual inventado.
+          const sm = brBaseSummary(c);
+          const pct = sm.total > 0 ? Math.round(((sm.total - sm.vencidos) / sm.total) * 100) : null;
+          const tom = sm.vencidos > 0 ? "vencido" : sm.proximos > 0 ? "proximo" : "ok";
+          const plural = (n, um, varios) => n + " " + (n === 1 ? um : varios);
+          return h(
             "div",
             {
               key: c.id,
-              className: "company-mini" + (focusId === c.id ? " company-mini-active" : ""),
+              className: "dbc-card dbc-tom-" + tom + (focusId === c.id ? " dbc-active" : ""),
+              "data-testid": "base-card-" + c.id,
               role: "button",
               tabIndex: 0,
               onClick: () => onOpenCompany(c.id),
@@ -9051,20 +9059,26 @@ function DashboardBasesPanel({ companies, onOpenCompany, onOpenDocuments, onGoCo
             },
             h(
               "div",
-              { className: "company-mini-top" },
-              h("span", { className: "company-mini-tag" }, brBaseTag(c), h("span", { className: "company-mini-name" }, " | ", c.nomeFantasia || c.razaoSocial)),
-              c.flagged > 0 && h(AlertTriangle, { size: 14, color: "#C98A00" }),
+              { className: "dbc-top" },
+              h("div", { className: "dbc-title" }, h("span", { className: "dbc-tag" }, brBaseTag(c)), h("span", { className: "dbc-name" }, " | ", c.nomeFantasia || c.razaoSocial)),
+              h(ChevronRight, { size: 18, className: "dbc-arrow" }),
             ),
-            h("div", { className: "company-mini-city" }, h(MapPin, { size: 13 }), " ", c.municipio, "/", c.uf),
-            c.cnpj && h("div", { className: "company-mini-cnpj" }, "CNPJ ", c.cnpj),
+            h("div", { className: "dbc-city" }, h(MapPin, { size: 13 }), h("span", null, c.municipio, "/", c.uf), c.cnpj && h("span", { className: "dbc-cnpj" }, "CNPJ ", c.cnpj)),
             h(
               "div",
-              { className: "company-mini-foot-row" },
-              h(BaseDocBadges, { company: c, compact: true }),
+              { className: "dbc-counts-row" },
+              h(
+                "div",
+                { className: "dbc-counts", "data-testid": "base-badges" },
+                h("span", null, plural(sm.total, "documento", "documentos")),
+                sm.vencidos > 0 && h("span", { className: "dbc-c-vencido" }, plural(sm.vencidos, "vencido", "vencidos")),
+                sm.proximos > 0 && h("span", { className: "dbc-c-proximo" }, sm.proximos + " a vencer"),
+                sm.conferencia > 0 && h("span", { className: "dbc-c-proximo" }, sm.conferencia + " p/ conferir"),
+              ),
               h(
                 "button",
                 {
-                  className: "company-mini-docs-btn",
+                  className: "company-mini-docs-btn dbc-docs-btn",
                   onClick: (e) => {
                     e.stopPropagation();
                     onOpenDocuments(c.id);
@@ -9074,8 +9088,14 @@ function DashboardBasesPanel({ companies, onOpenCompany, onOpenDocuments, onGoCo
                 " Documentos",
               ),
             ),
-          ),
-        ),
+            h(
+              "div",
+              { className: "dbc-progress", title: "Regularidade: documentos atuais não vencidos ÷ total de documentos atuais" },
+              h("div", { className: "dbc-track" }, h("div", { className: "dbc-fill", style: { width: (pct === null ? 0 : pct) + "%" } })),
+              h("span", { className: "dbc-pct" }, pct === null ? "—" : pct + "%"),
+            ),
+          );
+        }),
       ),
     ),
   );
@@ -37324,6 +37344,39 @@ function GrupoprimaPortal() {
         .dash-bases-row { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 20px; align-items: stretch; }
         .dash-bases-docs { margin: 0; display: flex; flex-direction: column; min-width: 0; }
         .company-mini-active { border-color: var(--texto); box-shadow: 0 0 0 1px var(--texto); }
+
+        /* ---- Dashboard: cartões de "Documentação por bases" (2026-11-24). Layout único; claro/escuro
+           só trocam as variáveis de tema (--card-bg, --texto, --carvao, --cinza-frio). ---- */
+        .dbc-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; grid-auto-rows: 1fr; flex: 1; }
+        .dbc-card { --dbc-cor: #5CDD8B; position: relative; display: flex; flex-direction: column; justify-content: space-between; gap: 9px; text-align: left; background: var(--card-bg); border: 1px solid var(--cinza-frio); border-left: 4px solid var(--dbc-cor); border-radius: 12px; padding: 13px 15px 13px 14px; cursor: pointer; min-width: 0; transition: border-color 0.15s, background 0.15s; }
+        .dbc-card:hover, .dbc-card.dbc-active { border-color: var(--cinza-frio); border-left-color: var(--dbc-cor); background: var(--card-bg); box-shadow: 0 0 0 1px var(--carvao); }
+        .dbc-tom-proximo { --dbc-cor: #E3A83B; }
+        .dbc-tom-vencido { --dbc-cor: #D64545; }
+        .portal-root[data-theme="dark"] .dbc-tom-vencido { --dbc-cor: #E5605F; }
+        .dbc-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+        .dbc-title { font-size: 13px; line-height: 1.3; min-width: 0; }
+        .dbc-tag { font-weight: 800; color: var(--texto); font-size: 14px; }
+        .dbc-name { font-weight: 500; color: var(--carvao); font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.02em; }
+        .dbc-arrow { color: var(--carvao); flex-shrink: 0; margin-top: 1px; }
+        .dbc-city { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 6px; font-size: 12px; color: var(--texto); }
+        .dbc-city svg { color: var(--carvao); flex-shrink: 0; }
+        .dbc-cnpj { color: var(--carvao); font-size: 11px; margin-left: 4px; }
+        .dbc-counts-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+        .dbc-counts { display: flex; flex-wrap: wrap; align-items: center; font-size: 12px; color: var(--texto); min-width: 0; }
+        .dbc-counts > span + span::before { content: "•"; margin: 0 6px; color: var(--carvao); }
+        .dbc-counts .dbc-c-vencido { color: var(--pill-vencido-fg); font-weight: 600; }
+        .dbc-counts .dbc-c-proximo { color: var(--pill-proximo-fg); font-weight: 600; }
+        .dbc-card .dbc-docs-btn { flex-shrink: 0; }
+        .dbc-progress { display: flex; align-items: center; gap: 12px; }
+        .dbc-track { flex: 1; height: 7px; border-radius: 999px; background: var(--cinza-frio); overflow: hidden; }
+        .dbc-fill { height: 100%; border-radius: 999px; background: var(--dbc-cor); transition: width 0.3s; }
+        .dbc-pct { min-width: 40px; text-align: right; font-size: 12.5px; font-weight: 800; color: var(--texto); }
+        @media (min-width: 1024px) and (max-width: 1180px) {
+          .dbc-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        }
+        @media (max-width: 720px) {
+          .dbc-grid { grid-template-columns: minmax(0, 1fr); }
+        }
         @media (min-width: 1181px) {
           .dash-bases-docs .company-mini-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); grid-auto-rows: 1fr; flex: 1; }
           .dash-bases-docs .company-mini { display: flex; flex-direction: column; justify-content: space-between; }
