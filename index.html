@@ -1767,7 +1767,7 @@ function useDerived(extraDocuments) {
   // mesmo com o portal aberto desde o dia anterior.
   const diaAtual = new Date().toDateString();
   return useMemo(() => {
-    const extras = (extraDocuments || []).map(normalizarDocEmpresarial).map(corrigirTipoContabilPeloNome).map(statusPelaValidadeDeHoje);
+    const extras = marcarVersoesSubstituidas(extraDocuments || []).map(normalizarDocEmpresarial).map(corrigirTipoContabilPeloNome).map(statusPelaValidadeDeHoje);
     const companies = companiesRaw.map((c) => {
       const confirmados = extras.filter((d) =>
         docAppliesToEstablishment(d, c.id),
@@ -2207,6 +2207,11 @@ const GOOGLE_OAUTH_CONFIGURADO =
   docs,
 ) {
   return [...docs].sort((a, b) => {
+    // Controle explícito de versão vigente (atualização de documento): uma versão já
+    // substituída nunca fica à frente da que a substituiu, qualquer que seja a emissão.
+    const subA = a.substituidoPorId ? 1 : 0;
+    const subB = b.substituidoPorId ? 1 : 0;
+    if (subA !== subB) return subA - subB;
     const isContratoSocial =
       a.categoria === "contratos_sociais" && b.categoria === "contratos_sociais";
     if (!isContratoSocial) {
@@ -2953,6 +2958,7 @@ function documentosEmbutidosParaPortal(documentosExistentes) {
       financeiroAdmin: true,
       auditoria: true,
       acompanhamentoDocumental: true,
+      atualizarDocumentos: true,
       gerenciarUsuarios: true,
       alterarPermissoes: true,
       configAdministrativa: true,
@@ -2978,6 +2984,7 @@ function documentosEmbutidosParaPortal(documentosExistentes) {
       financeiroAdmin: false,
       auditoria: false,
       acompanhamentoDocumental: false,
+      atualizarDocumentos: false,
       gerenciarUsuarios: false,
       alterarPermissoes: false,
       configAdministrativa: false,
@@ -3003,6 +3010,7 @@ function documentosEmbutidosParaPortal(documentosExistentes) {
       financeiroAdmin: false,
       auditoria: false,
       acompanhamentoDocumental: false,
+      atualizarDocumentos: false,
       gerenciarUsuarios: false,
       alterarPermissoes: false,
       configAdministrativa: false,
@@ -3525,6 +3533,7 @@ function registroVisivelAoUsuario(responsavel, u) {
   return usuarioEhAdminPortal(u) || registroPertenceAoUsuario(responsavel, u);
 }
 const AUDIT_ACTION_LABELS = {
+  atualizou_documento: "Atualizou documento (nova versão)",
   login: "Login",
   logout: "Logout",
   visualizou_documento: "Visualizou documento",
@@ -3743,14 +3752,25 @@ function pollIntervalFor(nome) {
             pararIntervalo();
           }
         }
+        // Atualização imediata pedida pelo próprio portal (ex.: depois de "Atualizar documento",
+        // que grava pelo backend) — sem esperar o próximo ciclo de consulta.
+        function onRefreshPedido(ev) {
+          if (!ev || !ev.detail || ev.detail.collection === nome) poll();
+        }
         poll();
         if (abaVisivel()) iniciarIntervalo();
         if (typeof document !== "undefined" && document.addEventListener) {
           document.addEventListener("visibilitychange", onVisibilityChange);
         }
+        if (typeof window !== "undefined" && window.addEventListener) {
+          window.addEventListener("portal-db-refresh", onRefreshPedido);
+        }
         return () => {
           cancelled = true;
           pararIntervalo();
+          if (typeof window !== "undefined" && window.removeEventListener) {
+            window.removeEventListener("portal-db-refresh", onRefreshPedido);
+          }
           if (typeof document !== "undefined" && document.removeEventListener) {
             document.removeEventListener("visibilitychange", onVisibilityChange);
           }
@@ -3990,6 +4010,18 @@ async function editarDocumentoConfirmado(doc, changes, { onNotify } = {}) {
     driveModifiedTime: doc.driveModifiedTime,
   });
   record.confirmadoEm = doc.confirmadoEm || record.confirmadoEm;
+  // Versões ligadas por "Atualizar documento": editar metadados nunca desfaz o vínculo
+  // entre a versão nova e a anterior, nem a marcação de versão substituída, nem muda a família.
+  if (doc.substituiDocumentoId || doc.substituidoPorId || doc.atualizadoEm) {
+    ["substituiDocumentoId", "substituidoPorId", "substituidoEm", "substituidoPor", "atualizadoPor", "atualizadoEm", "observacaoAtualizacao", "origem"].forEach((k) => {
+      if (doc[k] !== undefined) record[k] = doc[k];
+    });
+    if (doc.flag === "versao_anterior" || doc.substituidoPorId) record.flag = "versao_anterior";
+    if (categoria === doc.categoria && record.tipo === doc.tipo && doc.docFamily) {
+      record.docFamily = doc.docFamily;
+      if (doc.familyLabel) record.familyLabel = doc.familyLabel;
+    }
+  }
   try {
     await db.collection("documentos_confirmados").doc(doc.id).set(record);
   } catch (e) {
@@ -10128,6 +10160,7 @@ function CompaniesView({
                           onNotify: onNotify,
                           onView: onView,
                           isAdmin: isAdmin,
+                          podeAtualizar: true,
                         }),
                       );
                 },
@@ -11051,6 +11084,545 @@ function DocumentEditModal({ doc, companies, onClose, onNotify, onSaved }) {
   );
 }
 /* =========================================================================
+   ATUALIZAR DOCUMENTO (renovação) — 2026-11-24, exclusivo do Administrador.
+   O arquivo novo vira um REGISTRO NOVO em `documentos_confirmados`, ligado ao
+   documento anterior (`substituiDocumentoId`) e à mesma família/escopo; o
+   anterior fica marcado como versão substituída (`flag: "versao_anterior"`,
+   `substituidoPorId`) e continua disponível no Histórico de versões. Tudo é
+   feito pelo endpoint `POST /api/documents/atualizar` do backend (que repete
+   a checagem de Administrador), para não deixar duas versões vigentes.
+   ========================================================================= */
+const TIPOS_SEM_RENOVACAO = new Set([
+  ...TIPOS_CONTABEIS_PERIODICOS,
+  "Carta de Titularidade Bancária",
+  "Carta Bancária",
+  "Carta de Titularidade",
+  "Titularidade Bancária",
+  "Dados Bancários",
+  "Informações Bancárias",
+  "Dados do Banco",
+  "Dados da Conta",
+  "Comprovante de Pagamento",
+]);
+/** documentoAdmiteAtualizacao: renovação simples de um documento (mesmo documento, nova
+ *  validade). Fora: contratos sociais/alterações contratuais (fato novo na história da
+ *  empresa) e registros contábeis/bancários, que são um documento por período/evento. */
+function documentoAdmiteAtualizacao(doc) {
+  if (!doc || !doc.id) return false;
+  if (doc.categoria === "contratos_sociais" || doc.categoria === "contabilidade") return false;
+  if (doc.tipo && TIPOS_SEM_RENOVACAO.has(doc.tipo)) return false;
+  return true;
+}
+/** docFoiSubstituido: a versão já foi trocada por outra (não é mais a vigente). */
+function docFoiSubstituido(doc) {
+  return !!(doc && (doc.substituidoPorId || doc.flag === "versao_anterior"));
+}
+/** marcarVersoesSubstituidas: controle EXPLÍCITO de versão vigente — um documento
+ *  citado em `substituiDocumentoId` por outro registro existente é versão substituída,
+ *  mesmo que a marcação gravada nele tenha falhado (falha parcial); e a marcação
+ *  `substituidoPorId` só vale enquanto o sucessor ainda existir (se a nova versão for
+ *  excluída, a anterior volta a ser a vigente). Nunca usa só a data de emissão. */
+function marcarVersoesSubstituidas(docs) {
+  if (!Array.isArray(docs) || docs.length === 0) return docs;
+  const ids = new Set(docs.map((d) => d && d.id).filter(Boolean));
+  const sucessorDe = new Map();
+  docs.forEach((d) => {
+    if (d && d.substituiDocumentoId && d.id) sucessorDe.set(d.substituiDocumentoId, d.id);
+  });
+  let mudou = false;
+  const saida = docs.map((d) => {
+    if (!d) return d;
+    const porVinculo = sucessorDe.get(d.id);
+    if (porVinculo) {
+      if (d.substituidoPorId === porVinculo && d.flag === "versao_anterior") return d;
+      mudou = true;
+      return { ...d, flag: "versao_anterior", substituidoPorId: porVinculo };
+    }
+    if (d.substituidoPorId && !ids.has(d.substituidoPorId)) {
+      mudou = true;
+      return { ...d, substituidoPorId: null, flag: d.flag === "versao_anterior" ? null : d.flag };
+    }
+    return d;
+  });
+  return mudou ? saida : docs;
+}
+const ATUALIZACAO_MAX_BYTES = 20 * 1024 * 1024;
+const ATUALIZACAO_EXTENSOES = [".pdf", ".png", ".jpg", ".jpeg", ".webp", ".gif", ".doc", ".docx", ".xls", ".xlsx"];
+function dataBRValida(txt) {
+  const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(String(txt || "").trim());
+  if (!m) return false;
+  const d = new Date(Number(m[3]), Number(m[2]) - 1, Number(m[1]));
+  return d.getFullYear() === Number(m[3]) && d.getMonth() === Number(m[2]) - 1 && d.getDate() === Number(m[1]);
+}
+function dataBRParaTime(txt) {
+  const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(String(txt || "").trim());
+  return m ? new Date(Number(m[3]), Number(m[2]) - 1, Number(m[1])).getTime() : null;
+}
+function mascararDataBR(v) {
+  const n = String(v || "").replace(/\D/g, "").slice(0, 8);
+  if (n.length <= 2) return n;
+  if (n.length <= 4) return `${n.slice(0, 2)}/${n.slice(2)}`;
+  return `${n.slice(0, 2)}/${n.slice(2, 4)}/${n.slice(4)}`;
+}
+const ATUALIZACAO_ERROS_AMIGAVEIS = {
+  arquivo_vazio: "O arquivo está vazio. Escolha outro arquivo.",
+  arquivo_grande: "O arquivo passa de 20 MB.",
+  formato_nao_suportado: "Formato não suportado. Envie PDF, imagem, Word ou Excel.",
+  arquivo_ilegivel: "O arquivo parece corrompido ou ilegível.",
+  ja_substituido: "Este documento já foi substituído por outra versão. Feche esta janela e atualize a página.",
+  atualizacao_em_andamento: "Outro administrador está atualizando este documento agora. Tente novamente em instantes.",
+  reserva_perdida: "A reserva deste documento expirou. Nada foi alterado — tente novamente.",
+};
+/** atualizarDocumentoConfirmado: envia o arquivo novo e os dados confirmados ao backend,
+ *  que grava tudo de uma vez. A versão anterior só deixa de ser vigente quando o servidor
+ *  confirma que o arquivo foi armazenado e os registros foram gravados. */
+async function atualizarDocumentoConfirmado(
+  { doc, file, emissao, validade, semVencimento, observacao, numero, orgao, conteudoHash, auditoria },
+  { onNotify } = {},
+) {
+  if (!can(loadPortalSession(), "atualizarDocumentos")) {
+    onNotify?.("Somente administradores podem atualizar documentos.", "error");
+    return { ok: false, codigo: "sem_permissao", erro: "Somente administradores podem atualizar documentos." };
+  }
+  if (!DRIVE_PROXY_URL) {
+    return { ok: false, codigo: "sem_backend", erro: "Armazenamento indisponível neste ambiente." };
+  }
+  if (docFoiSubstituido(doc)) {
+    return { ok: false, codigo: "ja_substituido", erro: ATUALIZACAO_ERROS_AMIGAVEIS.ja_substituido };
+  }
+  try {
+    const formData = new FormData();
+    formData.append("arquivo", file, file.name);
+    formData.append(
+      "dados",
+      JSON.stringify({
+        docId: doc.id,
+        // Só usado pelo servidor quando o documento de origem ainda não existe em
+        // `documentos_confirmados` (veio da leitura automática do Drive).
+        registroOriginal: doc,
+        nomeArquivo: file.name,
+        emissao: emissao || null,
+        validade: semVencimento ? null : validade || null,
+        semVencimento: !!semVencimento,
+        observacao: observacao || null,
+        numero: numero || null,
+        orgao: orgao || null,
+        conteudoHash: conteudoHash || null,
+        auditoria: auditoria || {},
+      }),
+    );
+    const resp = await fetch(`${DRIVE_PROXY_URL}/api/documents/atualizar`, {
+      method: "POST",
+      headers: DRIVE_PROXY_KEY ? { "X-Portal-Key": DRIVE_PROXY_KEY } : {},
+      body: formData,
+    });
+    let corpo = null;
+    try {
+      corpo = await resp.json();
+    } catch (e) {
+      corpo = null;
+    }
+    if (!resp.ok || !corpo || !corpo.ok) {
+      const codigo = (corpo && corpo.codigo) || (resp.status === 403 ? "sem_permissao" : "erro");
+      const erro =
+        ATUALIZACAO_ERROS_AMIGAVEIS[codigo] ||
+        (corpo && corpo.erro) ||
+        (resp.status === 403
+          ? "Somente administradores podem atualizar documentos."
+          : "Não foi possível concluir a atualização. A versão anterior continua vigente.");
+      return { ok: false, codigo, erro };
+    }
+    try {
+      window.dispatchEvent(new CustomEvent("portal-db-refresh", { detail: { collection: "documentos_confirmados" } }));
+      window.dispatchEvent(new CustomEvent("portal-db-refresh", { detail: { collection: "audit_log" } }));
+    } catch (e) {
+      /* o polling traz a mudança em poucos segundos de qualquer forma */
+    }
+    return { ok: true, registro: corpo.registro, idNovo: corpo.idNovo, naPastaOriginal: corpo.naPastaOriginal !== false };
+  } catch (e) {
+    return {
+      ok: false,
+      codigo: "sem_conexao",
+      erro: "Sem conexão com o servidor. A versão anterior continua vigente — tente novamente.",
+    };
+  }
+}
+function AtualizarDocumentoModal({ doc, company, companies, onClose, onNotify, onDone }) {
+  const h = React.createElement;
+  const [file, setFile] = useState(null);
+  const [lendo, setLendo] = useState(false);
+  const [extraido, setExtraido] = useState(null); // { lido, divergencias[] }
+  const [emissao, setEmissao] = useState("");
+  const [validade, setValidade] = useState("");
+  const [semVencimento, setSemVencimento] = useState(false);
+  const [observacao, setObservacao] = useState("");
+  const [numero, setNumero] = useState("");
+  const [orgao, setOrgao] = useState("");
+  const [hash, setHash] = useState(null);
+  const [erroArquivo, setErroArquivo] = useState("");
+  const [confirmaDivergencia, setConfirmaDivergencia] = useState(false);
+  const [confirmaValidadeMenor, setConfirmaValidadeMenor] = useState(false);
+  const [confirmaMesmoArquivo, setConfirmaMesmoArquivo] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [erroEnvio, setErroEnvio] = useState("");
+  const [arrastando, setArrastando] = useState(false);
+  const inputRef = useRef(null);
+  const exigeEmissao = !!doc.emissao;
+  const statusAtual = STATUS_META[doc.status]?.label || doc.status;
+  const abrangenciaLabel = ABRANGENCIAS.find((a) => a.key === doc.abrangencia)?.label || doc.abrangencia || "—";
+  const baseLabel =
+    doc.abrangencia === "empresa" || doc.abrangencia === "corporativa"
+      ? "Empresa — Grupoprima Logística"
+      : company
+        ? company.tipo === "Matriz"
+          ? `Matriz — ${company.municipio}/${company.uf}`
+          : `Filial ${company.id} — ${company.municipio}/${company.uf}`
+        : "—";
+  const categoriaLabel = CATEGORIES.find((c) => c.key === doc.categoria)?.label || doc.categoria || "—";
+  const subcategoriaLabel =
+    doc.categoria === "seguros" && doc.subcategoria
+      ? SEGUROS_SUBCATEGORIAS.find((s) => s.key === doc.subcategoria)?.label || doc.subcategoria
+      : null;
+  async function escolherArquivo(f) {
+    setErroArquivo("");
+    setErroEnvio("");
+    setExtraido(null);
+    setConfirmaDivergencia(false);
+    setConfirmaMesmoArquivo(false);
+    if (!f) return;
+    const nome = String(f.name || "").toLowerCase();
+    if (!ATUALIZACAO_EXTENSOES.some((ext) => nome.endsWith(ext))) {
+      setFile(null);
+      setErroArquivo("Formato não suportado. Envie PDF, imagem (PNG/JPG/WEBP/GIF), Word ou Excel.");
+      return;
+    }
+    if (f.size === 0) {
+      setFile(null);
+      setErroArquivo("O arquivo está vazio. Escolha outro arquivo.");
+      return;
+    }
+    if (f.size > ATUALIZACAO_MAX_BYTES) {
+      setFile(null);
+      setErroArquivo("O arquivo passa de 20 MB. Reduza o tamanho e tente de novo.");
+      return;
+    }
+    setFile(f);
+    setLendo(true);
+    try {
+      const bytes = await f.arrayBuffer();
+      setHash(await sha256Hex(bytes));
+      const analise = await classificarArquivoUpload(f, companies || []);
+      const d = analise.decisao || {};
+      const divergencias = [];
+      const tipoNovo = d.tipoSugerido;
+      const tipoGenerico = (t) => !t || /nao identificado/.test(normalize(t));
+      if (!tipoGenerico(tipoNovo) && !tipoGenerico(doc.tipo) && normalize(tipoNovo) !== normalize(doc.tipo)) {
+        divergencias.push(`O arquivo parece ser do tipo "${tipoNovo}", mas o documento atual é "${doc.tipo}".`);
+      }
+      if (
+        doc.abrangencia === "estabelecimento_especifico" &&
+        doc.companyId &&
+        d.empresaSugerida &&
+        d.empresaSugerida.id &&
+        d.empresaSugerida.id !== doc.companyId
+      ) {
+        divergencias.push(
+          `O arquivo cita outra base (${d.empresaSugerida.tipo === "Matriz" ? "Matriz" : `Filial ${d.empresaSugerida.id}`}), e o documento atual é da base ${company?.tipo === "Matriz" ? "Matriz" : `Filial ${doc.companyId}`}.`,
+        );
+      }
+      setExtraido({ lido: !!(analise.contentEv && analise.contentEv.lido), divergencias });
+      setEmissao(d.dataEmissao || "");
+      setValidade(d.dataValidade || "");
+      setNumero(d.numero || "");
+      setOrgao(d.orgao || "");
+    } catch (e) {
+      setExtraido({ lido: false, divergencias: [] });
+    } finally {
+      setLendo(false);
+    }
+  }
+  const validadeOk = semVencimento ? true : dataBRValida(validade);
+  const validadeAnteriorEmissao =
+    !!emissao && !!validade && !semVencimento && dataBRValida(emissao) && validadeOk && dataBRParaTime(validade) < dataBRParaTime(emissao);
+  const validadeMenorQueAtual =
+    !semVencimento && validadeOk && !!doc.validade && dataBRValida(doc.validade) && dataBRParaTime(validade) < dataBRParaTime(doc.validade);
+  const mesmoArquivo = !!(hash && doc.conteudoHash && doc.conteudoHash === hash);
+  const divergencias = extraido ? extraido.divergencias : [];
+  const bloqueios = [];
+  if (!file) bloqueios.push("Selecione o arquivo da nova versão.");
+  if (lendo) bloqueios.push("Aguarde a leitura do arquivo.");
+  if (exigeEmissao && !emissao) bloqueios.push("Informe a data de emissão.");
+  if (emissao && !dataBRValida(emissao)) bloqueios.push("Data de emissão inválida (use DD/MM/AAAA).");
+  if (!semVencimento && !validade) bloqueios.push('Informe a nova validade ou marque "Documento sem vencimento".');
+  if (!semVencimento && validade && !dataBRValida(validade)) bloqueios.push("Data de validade inválida (use DD/MM/AAAA).");
+  if (validadeAnteriorEmissao) bloqueios.push("A validade não pode ser anterior à emissão.");
+  if (divergencias.length > 0 && !confirmaDivergencia) bloqueios.push("Confirme que este arquivo é a renovação deste documento.");
+  if (validadeMenorQueAtual && !confirmaValidadeMenor) bloqueios.push("A nova validade é anterior à atual — confirme para continuar.");
+  if (mesmoArquivo && !confirmaMesmoArquivo) bloqueios.push("Este arquivo é idêntico ao da versão atual — confirme para continuar.");
+  const podeConfirmar = bloqueios.length === 0 && !saving;
+  async function handleConfirmar() {
+    if (!podeConfirmar) return;
+    setSaving(true);
+    setErroEnvio("");
+    try {
+      const r = await atualizarDocumentoConfirmado(
+        {
+          doc,
+          file,
+          emissao: emissao || null,
+          validade,
+          semVencimento,
+          observacao: observacao.trim(),
+          numero: numero.trim(),
+          orgao: orgao.trim(),
+          conteudoHash: hash,
+          auditoria: { empresa: baseLabel, categoria: categoriaLabel, abrangencia: abrangenciaLabel },
+        },
+        { onNotify },
+      );
+      if (!r.ok) {
+        setErroEnvio(r.erro || "Não foi possível concluir a atualização.");
+        return;
+      }
+      onNotify?.(
+        `"${docTituloExibido(doc)}" atualizado: ${semVencimento ? "sem vencimento" : `nova validade ${validade}`}. A versão anterior foi mantida no histórico.` +
+          (r.naPastaOriginal ? "" : " O arquivo foi salvo na pasta padrão do portal (sem permissão na pasta do original)."),
+        "info",
+      );
+      onDone?.(r.registro);
+      onClose();
+    } finally {
+      setSaving(false);
+    }
+  }
+  const linha = (k, v) => h("div", { className: "atu-info-linha", key: k }, h("span", null, k), h("strong", null, v || "—"));
+  return h(
+    "div",
+    { className: "docs-modal-overlay", onClick: saving ? undefined : onClose, "data-testid": "atualizar-modal" },
+    h(
+      "div",
+      { className: "docs-modal classify-modal atu-modal", onClick: (e) => e.stopPropagation() },
+      h(
+        "div",
+        { className: "docs-modal-head" },
+        h(
+          "div",
+          null,
+          h("div", { className: "docs-modal-title" }, "Atualizar documento"),
+          h("div", { className: "docs-modal-sub" }, docTituloExibido(doc)),
+        ),
+        h("button", { className: "icon-btn-dark", onClick: onClose, disabled: saving, "aria-label": "Fechar" }, h(X, { size: 18 })),
+      ),
+      h(
+        "div",
+        { className: "docs-modal-body atu-body" },
+        h("div", { className: "atu-secao-titulo" }, "Documento atual"),
+        h(
+          "div",
+          { className: "atu-info" },
+          linha("Nome", docTituloExibido(doc)),
+          linha("Base / abrangência", `${baseLabel} (${abrangenciaLabel})`),
+          linha("Categoria", subcategoriaLabel ? `${categoriaLabel} · ${subcategoriaLabel}` : categoriaLabel),
+          linha("Emissão atual", doc.emissao || "Não informada"),
+          linha("Vencimento atual", doc.validade || "Sem vencimento"),
+          linha("Situação atual", statusAtual),
+        ),
+        h("div", { className: "atu-secao-titulo" }, "Nova versão"),
+        h(
+          "div",
+          {
+            className: "atu-drop" + (arrastando ? " atu-drop-ativo" : ""),
+            onDragOver: (e) => {
+              e.preventDefault();
+              setArrastando(true);
+            },
+            onDragLeave: () => setArrastando(false),
+            onDrop: (e) => {
+              e.preventDefault();
+              setArrastando(false);
+              const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+              if (f) escolherArquivo(f);
+            },
+            onClick: () => inputRef.current && inputRef.current.click(),
+            role: "button",
+            tabIndex: 0,
+            onKeyDown: (e) => {
+              if (e.key === "Enter" || e.key === " ") inputRef.current && inputRef.current.click();
+            },
+          },
+          h(UploadCloud, { size: 18 }),
+          file
+            ? h("span", null, h("strong", null, file.name), ` · ${Math.max(1, Math.round(file.size / 1024))} KB`)
+            : h("span", null, "Arraste o arquivo aqui ou clique para selecionar"),
+          h("input", {
+            ref: inputRef,
+            type: "file",
+            "data-testid": "atualizar-arquivo",
+            accept: ATUALIZACAO_EXTENSOES.join(","),
+            style: { display: "none" },
+            onClick: (e) => e.stopPropagation(),
+            onChange: (e) => {
+              const f = e.target.files && e.target.files[0];
+              if (f) escolherArquivo(f);
+              e.target.value = "";
+            },
+          }),
+        ),
+        erroArquivo && h("p", { className: "classify-warning", role: "alert" }, h(AlertTriangle, { size: 13 }), " ", erroArquivo),
+        lendo && h("p", { className: "atu-nota" }, h(Loader2, { size: 13, className: "spin" }), " Lendo o arquivo..."),
+        extraido &&
+          !lendo &&
+          h(
+            "p",
+            { className: "atu-nota" },
+            extraido.lido
+              ? "Informações extraídas automaticamente do arquivo. Confira e corrija se necessário."
+              : "Não foi possível ler as datas automaticamente — preencha abaixo.",
+          ),
+        divergencias.length > 0 &&
+          h(
+            "div",
+            { className: "classify-warning atu-alerta", role: "alert", "data-testid": "atualizar-divergencia" },
+            h("div", null, h(AlertTriangle, { size: 13 }), " Divergência entre o arquivo e o documento original:"),
+            h("ul", null, divergencias.map((t, i) => h("li", { key: i }, t))),
+            h(
+              "label",
+              { className: "atu-check" },
+              h("input", { type: "checkbox", checked: confirmaDivergencia, onChange: (e) => setConfirmaDivergencia(e.target.checked) }),
+              " Analisei e confirmo que este arquivo é a renovação deste documento",
+            ),
+          ),
+        h(
+          "div",
+          { className: "classify-suggestion-grid atu-grade" },
+          h(
+            "label",
+            null,
+            h("span", null, `Data de emissão${exigeEmissao ? " *" : ""}`),
+            h("input", {
+              type: "text",
+              inputMode: "numeric",
+              placeholder: "DD/MM/AAAA",
+              value: emissao,
+              "data-testid": "atualizar-emissao",
+              onChange: (e) => setEmissao(mascararDataBR(e.target.value)),
+            }),
+          ),
+          h(
+            "label",
+            null,
+            h("span", null, "Nova data de vencimento"),
+            h("input", {
+              type: "text",
+              inputMode: "numeric",
+              placeholder: "DD/MM/AAAA",
+              value: semVencimento ? "" : validade,
+              disabled: semVencimento,
+              "data-testid": "atualizar-validade",
+              onChange: (e) => setValidade(mascararDataBR(e.target.value)),
+            }),
+          ),
+          h(
+            "label",
+            { className: "atu-check atu-check-inline" },
+            h("input", {
+              type: "checkbox",
+              checked: semVencimento,
+              "data-testid": "atualizar-sem-vencimento",
+              onChange: (e) => setSemVencimento(e.target.checked),
+            }),
+            " Documento sem vencimento",
+          ),
+        ),
+        validadeMenorQueAtual &&
+          h(
+            "div",
+            { className: "classify-warning atu-alerta", role: "alert", "data-testid": "atualizar-validade-menor" },
+            h("div", null, h(AlertTriangle, { size: 13 }), ` A nova validade (${validade}) é anterior à validade atual (${doc.validade}).`),
+            h(
+              "label",
+              { className: "atu-check" },
+              h("input", { type: "checkbox", checked: confirmaValidadeMenor, onChange: (e) => setConfirmaValidadeMenor(e.target.checked) }),
+              " Confirmo a nova validade mesmo assim",
+            ),
+          ),
+        mesmoArquivo &&
+          h(
+            "div",
+            { className: "classify-warning atu-alerta", role: "alert" },
+            h("div", null, h(AlertTriangle, { size: 13 }), " Este arquivo é idêntico ao da versão atual."),
+            h(
+              "label",
+              { className: "atu-check" },
+              h("input", { type: "checkbox", checked: confirmaMesmoArquivo, onChange: (e) => setConfirmaMesmoArquivo(e.target.checked) }),
+              " Quero atualizar mesmo assim",
+            ),
+          ),
+        validadeAnteriorEmissao &&
+          h("p", { className: "classify-warning", role: "alert" }, h(AlertTriangle, { size: 13 }), " A validade não pode ser anterior à emissão."),
+        h(
+          "label",
+          { className: "atu-obs" },
+          h("span", null, "Observação (opcional)"),
+          h("textarea", {
+            rows: 2,
+            maxLength: 1000,
+            value: observacao,
+            "data-testid": "atualizar-obs",
+            onChange: (e) => setObservacao(e.target.value),
+            placeholder: "Ex.: renovação anual, nova apólice emitida pela seguradora...",
+          }),
+        ),
+        file &&
+          !lendo &&
+          h(
+            "div",
+            { className: "atu-resumo", "data-testid": "atualizar-resumo" },
+            h("div", { className: "atu-secao-titulo" }, "Resumo da atualização"),
+            h(
+              "table",
+              { className: "compare-table" },
+              h("thead", null, h("tr", null, h("th", null, ""), h("th", null, "Versão atual"), h("th", null, "Nova versão"))),
+              h(
+                "tbody",
+                null,
+                h("tr", null, h("td", null, "Emissão"), h("td", null, doc.emissao || "—"), h("td", null, emissao || "—")),
+                h(
+                  "tr",
+                  null,
+                  h("td", null, "Validade"),
+                  h("td", null, doc.validade || "Sem vencimento"),
+                  h("td", null, semVencimento ? "Sem vencimento" : validade || "—"),
+                ),
+                h("tr", null, h("td", null, "Arquivo"), h("td", null, doc.arquivo?.nomeOriginal || "—"), h("td", null, file.name)),
+              ),
+            ),
+            h("p", { className: "atu-nota" }, "A versão atual continuará disponível no Histórico de versões."),
+          ),
+        erroEnvio &&
+          h("p", { className: "classify-warning", role: "alert", "data-testid": "atualizar-erro" }, h(AlertTriangle, { size: 13 }), " ", erroEnvio),
+      ),
+      h(
+        "div",
+        { className: "doc-card-actions", style: { padding: "0 20px 18px" } },
+        h(
+          "button",
+          {
+            className: "doc-view-btn",
+            disabled: !podeConfirmar,
+            onClick: handleConfirmar,
+            "data-testid": "atualizar-confirmar",
+            title: bloqueios[0] || "Confirmar atualização",
+          },
+          saving ? h(Loader2, { size: 13, className: "spin" }) : h(CheckCircle2, { size: 13 }),
+          " Confirmar atualização",
+        ),
+        h("button", { className: "filters-clear-btn filters-clear-inline", onClick: onClose, disabled: saving }, "Cancelar"),
+      ),
+    ),
+  );
+}
+/* =========================================================================
    CENTRAL DOCUMENTAL DA EMPRESA
    ========================================================================= */ function DocRowActions({
   company,
@@ -11059,10 +11631,15 @@ function DocumentEditModal({ doc, companies, onClose, onNotify, onSaved }) {
   onNotify,
   onView,
   isAdmin,
+  podeAtualizar = false,
+  onAtualizado,
 }) {
   const [busy, setBusy] = useState(null); // 'download' | 'view' | 'delete' | null
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [editing, setEditing] = useState(false);
+  const [atualizando, setAtualizando] = useState(false);
+  const mostrarAtualizar =
+    isAdmin && podeAtualizar && documentoAdmiteAtualizacao(doc) && !docFoiSubstituido(doc);
   async function handleDownload() {
     setBusy("download");
     await downloadDocument(company, doc, { onNotify });
@@ -11131,6 +11708,20 @@ function DocumentEditModal({ doc, companies, onClose, onNotify, onSaved }) {
           /*#__PURE__*/ React.createElement(Pencil, { size: 13 }),
           " Editar",
         ),
+      mostrarAtualizar &&
+        !confirmingDelete &&
+        /*#__PURE__*/ React.createElement(
+          "button",
+          {
+            className: "mini-download-btn",
+            onClick: () => setAtualizando(true),
+            disabled: busy !== null,
+            title: "Enviar uma nova versão deste documento (Administrador)",
+            "data-testid": "btn-atualizar-documento",
+          },
+          /*#__PURE__*/ React.createElement(RefreshCw, { size: 13 }),
+          " Atualizar",
+        ),
       isAdmin &&
         !confirmingDelete &&
         /*#__PURE__*/ React.createElement(
@@ -11184,6 +11775,16 @@ function DocumentEditModal({ doc, companies, onClose, onNotify, onSaved }) {
           ),
         ),
       ),
+    mostrarAtualizar &&
+      atualizando &&
+      /*#__PURE__*/ React.createElement(AtualizarDocumentoModal, {
+        doc: doc,
+        company: company,
+        companies: companies || (company ? [company] : []),
+        onClose: () => setAtualizando(false),
+        onNotify: onNotify,
+        onDone: onAtualizado,
+      }),
     isAdmin &&
       editing &&
       /*#__PURE__*/ React.createElement(DocumentEditModal, {
@@ -11337,6 +11938,8 @@ function DocFamilyHistory({
   const [compareOpen, setCompareOpen] = useState(false);
   const [showAll, setShowAll] = useState(false);
   const canCompare = family.versions.length >= 2;
+  // Família que passou por "Atualizar documento": cada versão mostra quem/quando atualizou.
+  const temCadeiaDeAtualizacao = family.versions.some((x) => x.substituiDocumentoId || x.substituidoPorId);
   const olderLimit = olderLimitFor(family.key);
   const visibleVersions = showAll
     ? family.versions
@@ -11418,7 +12021,7 @@ function DocFamilyHistory({
                     "timeline-badge" +
                     (i === 0 ? " timeline-badge-current" : ""),
                 },
-                i === 0 ? "ATUAL" : "ARQUIVADA",
+                i === 0 ? "ATUAL" : v.substituidoPorId ? "SUBSTITUÍDA" : "ARQUIVADA",
               ),
               /*#__PURE__*/ React.createElement(
                 "span",
@@ -11433,7 +12036,29 @@ function DocFamilyHistory({
               { className: "doc-row-sub timeline-sub" },
               formatDocDescricao(v),
             ),
+            temCadeiaDeAtualizacao &&
+              /*#__PURE__*/ React.createElement(
+                "div",
+                { className: "timeline-atualizacao", "data-testid": "historico-versao-detalhe" },
+                /*#__PURE__*/ React.createElement(
+                  "span",
+                  null,
+                  v.atualizadoEm
+                    ? `Atualizado em ${formatAuditWhen(new Date(v.atualizadoEm))} por ${v.atualizadoPor || "—"}`
+                    : "Versão original",
+                ),
+                /*#__PURE__*/ React.createElement(
+                  "span",
+                  null,
+                  `Emissão: ${v.emissao || "—"} · Vencimento: ${v.validade || "sem vencimento"} · Situação: ${
+                    i === 0 ? STATUS_META[v.status]?.label || v.status : v.substituidoPorId ? "Substituída" : "Arquivada"
+                  }`,
+                ),
+                v.observacaoAtualizacao &&
+                  /*#__PURE__*/ React.createElement("span", null, `Observação: ${v.observacaoAtualizacao}`),
+              ),
             v.flag &&
+              !(v.flag === "versao_anterior" && v.substituidoPorId) &&
               /*#__PURE__*/ React.createElement(
                 "div",
                 {
@@ -11452,6 +12077,7 @@ function DocFamilyHistory({
               onNotify: onNotify,
               onView: onView,
               isAdmin: isAdmin,
+              podeAtualizar: i === 0,
             }),
           ),
         ),
@@ -11916,6 +12542,7 @@ function CompanyDetailView({
                           onNotify: onNotify,
                           onView: onView,
                           isAdmin: isAdmin,
+                          podeAtualizar: true,
                         }),
                       ),
                 ),
@@ -22022,6 +22649,13 @@ function SyncView({ companies, onNotify }) {
           // um id próprio — assim ela continua aparecendo no histórico de
           // versões da mesma família (`docFamily`) em vez de ser perdida.
           // Nunca toca no arquivo físico no Drive, só no índice do portal.
+          // Arquivo que veio de "Atualizar documento": o registro novo mantém o vínculo com a
+          // versão anterior e a mesma família (nunca é reclassificado como documento solto).
+          if (atualizacaoDe && (atualizacaoDe.substituiDocumentoId || atualizacaoDe.atualizadoEm)) {
+            ["substituiDocumentoId", "atualizadoPor", "atualizadoEm", "observacaoAtualizacao", "docFamily", "familyLabel"].forEach((k) => {
+              if (atualizacaoDe[k] !== undefined) record[k] = atualizacaoDe[k];
+            });
+          }
           if (atualizacaoDe) {
             const idArquivada = `${atualizacaoDe.id}-arquivada-${Date.now()}`;
             await db
@@ -28593,6 +29227,8 @@ function auditEntryDetails(entry) {
   if (entry.versaoModelo) parts.push(`modelo v${entry.versaoModelo}`);
   if (entry.campos) parts.push(`campos: ${entry.campos}`);
   if (entry.de && entry.para) parts.push(`${entry.de} → ${entry.para}`);
+  if (entry.action === "atualizou_documento") parts.push(`validade ${entry.validadeAnterior || "sem vencimento"} → ${entry.validadeNova || "sem vencimento"}`);
+  if (entry.action === "atualizou_documento" && entry.observacao) parts.push(`obs.: ${entry.observacao}`);
   if (entry.motivo === "inatividade")
     parts.push("sessão encerrada por inatividade");
   return parts.join(" · ") || "—";
@@ -35620,7 +36256,7 @@ function AcompanhamentoDocumentalView({ companies, currentUser, onNotify, onView
           h(
             "div",
             { className: "ad-detalhe-acoes" },
-            h(DocRowActions, { company, companies, doc: d, onNotify, onView, isAdmin }),
+            h(DocRowActions, { company, companies, doc: d, onNotify, onView, isAdmin, podeAtualizar: true, onAtualizado: () => setSelecionadoId(null) }),
             onOpenInBase &&
               h(
                 "button",
@@ -37134,6 +37770,26 @@ function GrupoprimaPortal() {
         .compare-row-diff td:nth-child(3) { color: #0b4a2c; font-weight: 700; }
         .compare-content-note { margin-top: 10px; }
         .compare-content-msg { font-size: 11.5px; color: var(--carvao); line-height: 1.5; }
+
+        /* ---- Atualizar documento (renovação) ---- */
+        .atu-modal { width: min(640px, 94vw); max-height: 92vh; display: flex; flex-direction: column; }
+        .atu-body { overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }
+        .atu-secao-titulo { font-size: 10.5px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; color: var(--carvao); margin-top: 4px; }
+        .atu-info { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 16px; background: var(--branco-frio); border: 1px solid var(--cinza-frio); border-radius: 10px; padding: 12px 14px; }
+        .atu-info-linha { display: flex; flex-direction: column; gap: 1px; font-size: 11px; color: var(--carvao); min-width: 0; }
+        .atu-info-linha strong { font-size: 12.5px; color: var(--texto); font-weight: 700; word-break: break-word; }
+        .atu-drop { display: flex; align-items: center; justify-content: center; gap: 8px; border: 1.5px dashed var(--cinza-frio); border-radius: 10px; padding: 18px 12px; font-size: 12.5px; color: var(--carvao); cursor: pointer; background: var(--card-bg); text-align: center; }
+        .atu-drop:hover, .atu-drop-ativo { border-color: var(--texto); background: var(--branco-frio); }
+        .atu-nota { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--carvao); margin: 0; }
+        .atu-grade { grid-template-columns: 1fr 1fr; align-items: end; }
+        .atu-check { display: flex; align-items: center; gap: 7px; font-size: 12px; font-weight: 600; text-transform: none; letter-spacing: normal; color: var(--texto); cursor: pointer; }
+        .atu-check-inline { grid-column: 1 / -1; flex-direction: row !important; }
+        .atu-alerta ul { margin: 6px 0 8px 18px; padding: 0; }
+        .atu-obs { display: flex; flex-direction: column; gap: 5px; font-size: 10.5px; font-weight: 700; letter-spacing: 0.02em; text-transform: uppercase; color: var(--carvao); }
+        .atu-obs textarea { border: 1px solid var(--cinza-frio); border-radius: 7px; padding: 8px 10px; font-size: 12.5px; font-family: inherit; text-transform: none; font-weight: 500; color: var(--texto); background: var(--branco-frio); resize: vertical; }
+        .atu-resumo { background: var(--branco-frio); border-radius: 10px; padding: 12px; }
+        .timeline-atualizacao { display: flex; flex-direction: column; gap: 2px; font-size: 11.5px; color: var(--carvao); margin: 4px 0 6px; }
+        @media (max-width: 560px) { .atu-info, .atu-grade { grid-template-columns: 1fr; } }
 
         /* ---- Assistente: listas analíticas ---- */
         .analytic-rows { display: flex; flex-direction: column; gap: 6px; }
