@@ -2952,6 +2952,7 @@ function documentosEmbutidosParaPortal(documentosExistentes) {
       financeiroOperar: true,
       financeiroAdmin: true,
       auditoria: true,
+      acompanhamentoDocumental: true,
       gerenciarUsuarios: true,
       alterarPermissoes: true,
       configAdministrativa: true,
@@ -2976,6 +2977,7 @@ function documentosEmbutidosParaPortal(documentosExistentes) {
       financeiroOperar: true,
       financeiroAdmin: false,
       auditoria: false,
+      acompanhamentoDocumental: false,
       gerenciarUsuarios: false,
       alterarPermissoes: false,
       configAdministrativa: false,
@@ -3000,6 +3002,7 @@ function documentosEmbutidosParaPortal(documentosExistentes) {
       financeiroOperar: false,
       financeiroAdmin: false,
       auditoria: false,
+      acompanhamentoDocumental: false,
       gerenciarUsuarios: false,
       alterarPermissoes: false,
       configAdministrativa: false,
@@ -35341,6 +35344,365 @@ function LogisticaView({ companies, onNotify }) {
   );
 }
 /* LG_BLOCK_END */
+/* =========================================================================
+   ACOMPANHAMENTO DOCUMENTAL — painel Kanban de validade dos documentos.
+   Cada documento ATUAL (só a versão mais recente de cada família; documento
+   corporativo conta uma vez só, nunca uma por base) aparece em UMA única
+   coluna. Regra de prioridade: vencido > necessita de conferência (data não
+   confirmada ou alerta de conferência) > vence em até 7 dias > próximo do
+   vencimento (8 a 30 dias) > atualizado (válido ou sem vencimento).
+   Somente leitura sobre os dados existentes: nada é gravado aqui; ver/baixar/
+   editar/excluir reaproveitam DocRowActions (mesmas permissões das outras telas).
+   ========================================================================= */
+const KanbanSquareIcon = (p) =>
+  /*#__PURE__*/ React.createElement(
+    Icon,
+    p,
+    /*#__PURE__*/ React.createElement("rect", { x: "3", y: "3", width: "18", height: "18", rx: "2" }),
+    /*#__PURE__*/ React.createElement("path", { d: "M8 7v7" }),
+    /*#__PURE__*/ React.createElement("path", { d: "M12 7v4" }),
+    /*#__PURE__*/ React.createElement("path", { d: "M16 7v9" }),
+  );
+const AD_COLUNAS = [
+  { key: "atualizados", titulo: "Documentos atualizados", tom: "verde", icone: CheckCircle2 },
+  { key: "proximos", titulo: "Próximos do vencimento", tom: "amarelo", icone: Clock },
+  { key: "sete_dias", titulo: "Vencimento em até 7 dias", tom: "laranja", icone: Calendar },
+  { key: "vencidos", titulo: "Documentos vencidos", tom: "vermelho", icone: AlertOctagon },
+  { key: "conferencia", titulo: "Necessita de conferência", tom: "cinza", icone: HelpCircle },
+];
+const AD_PAGINA = 8;
+const AD_CORPORATIVO = "__corporativo__";
+function adEhCorporativo(d) {
+  return d.abrangencia === "empresa" || d.abrangencia === "corporativa";
+}
+/** adDocumentosAtuais: lista única de documentos atuais, cada um com a base a que pertence. */
+function adDocumentosAtuais(companies) {
+  const grupos = new Map();
+  const matriz = (companies || []).find((c) => c.tipo === "Matriz") || (companies || [])[0] || null;
+  (companies || []).forEach((c) => {
+    (c.documentos || []).forEach((d) => {
+      const escopo = adEhCorporativo(d) ? AD_CORPORATIVO : d.companyId || c.id;
+      const key = `${escopo}::${d.docFamily || d.id}`;
+      if (!grupos.has(key)) grupos.set(key, { escopo, versoes: [], company: adEhCorporativo(d) ? matriz : c });
+      const g = grupos.get(key);
+      if (!g.versoes.some((v) => v.id === d.id)) g.versoes.push(d);
+    });
+  });
+  return Array.from(grupos.values()).map((g) => ({
+    doc: sortDocumentsByVersion(g.versoes)[0],
+    escopo: g.escopo,
+    company: g.company,
+  }));
+}
+function adColunaDe(d) {
+  if (d.status === "vencido") return "vencidos";
+  if (d.status === "nao_identificado" || (d.flag && d.flag.severity === "warning")) return "conferencia";
+  if (d.status === "proximo") {
+    const dias = daysUntil(d.validade);
+    return dias !== null && dias <= 7 ? "sete_dias" : "proximos";
+  }
+  return "atualizados";
+}
+function adTextoPrazo(d, coluna) {
+  const dias = daysUntil(d.validade);
+  const plural = (n) => (Math.abs(n) === 1 ? "dia" : "dias");
+  if (coluna === "vencidos") return dias !== null ? `Vencido há ${Math.abs(dias)} ${plural(dias)}` : "Vencido";
+  if (coluna === "sete_dias" || coluna === "proximos") {
+    if (dias === 0) return "Vence hoje";
+    return dias !== null ? `Vence em ${dias} ${plural(dias)}` : "Próximo do vencimento";
+  }
+  if (coluna === "conferencia") return "Aguardando conferência";
+  return d.validade ? "Em dia" : "Não expira";
+}
+function adBaseLabel(item) {
+  if (item.escopo === AD_CORPORATIVO) return "Empresa — Grupoprima Logística";
+  const c = item.company;
+  if (!c) return "Base não identificada";
+  return `${companyLabelFor(c)} · ${c.municipio}/${c.uf}`;
+}
+function adCategoriaLabel(d) {
+  const cat = CATEGORIES.find((c) => c.key === d.categoria);
+  return cat ? cat.label : "Outros";
+}
+const AD_CSS = `
+  .ad-view { display: flex; flex-direction: column; min-height: 0; }
+  .ad-toolbar { display: flex; flex-wrap: wrap; align-items: stretch; gap: 10px; margin: 4px 0 16px; }
+  .ad-total { display: flex; align-items: center; gap: 12px; background: var(--card-bg); border: 1px solid var(--cinza-frio); border-radius: 12px; padding: 8px 16px; margin-right: auto; }
+  .ad-total svg { color: var(--carvao); flex-shrink: 0; }
+  .ad-total-label { font-size: 11.5px; color: var(--carvao); line-height: 1.2; }
+  .ad-total-num { font-family: 'Archivo', sans-serif; font-weight: 900; font-size: 24px; color: var(--texto); line-height: 1.1; }
+  .ad-select-wrap { display: flex; align-items: center; gap: 8px; background: var(--card-bg); border: 1px solid var(--cinza-frio); border-radius: 12px; padding: 0 12px; color: var(--carvao); }
+  .ad-select { appearance: none; -webkit-appearance: none; background: transparent; border: none; color: var(--texto); font: inherit; font-size: 13.5px; font-weight: 600; padding: 12px 22px 12px 0; min-width: 150px; max-width: 240px; cursor: pointer;
+    background-image: linear-gradient(45deg, transparent 50%, currentColor 50%), linear-gradient(135deg, currentColor 50%, transparent 50%);
+    background-position: calc(100% - 9px) 52%, calc(100% - 5px) 52%; background-size: 4px 4px, 4px 4px; background-repeat: no-repeat; }
+  .ad-select option { color: #003753; background: #fff; }
+  .ad-limpar { background: transparent; border: 1px solid var(--cinza-frio); border-radius: 12px; padding: 0 14px; color: var(--texto); font-size: 13px; font-weight: 700; cursor: pointer; }
+  .ad-limpar:hover { background: rgba(127,127,127,0.1); }
+  .ad-board { display: flex; gap: 14px; align-items: flex-start; overflow-x: auto; padding: 2px 2px 14px; scroll-snap-type: x proximity; }
+  .ad-col { flex: 1 0 240px; min-width: 240px; display: flex; flex-direction: column; background: var(--ad-fundo); border: 1px solid var(--cinza-frio); border-radius: 14px; scroll-snap-align: start; max-height: calc(100vh - 250px); max-height: calc(100dvh - 250px); min-height: 240px; }
+  .ad-col-head { display: flex; align-items: center; gap: 12px; margin: 8px 8px 0; padding: 12px 14px; border-radius: 10px; background: var(--ad-cabeca); border-bottom: 2px solid var(--ad-tom); flex-shrink: 0; }
+  .ad-col-ico { width: 34px; height: 34px; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: var(--ad-tom); background: var(--card-bg); flex-shrink: 0; }
+  .ad-col-titulo { font-family: 'Archivo', sans-serif; font-weight: 900; font-size: 14px; color: var(--texto); line-height: 1.25; }
+  .ad-col-sub { font-size: 12px; color: var(--carvao); margin-top: 2px; }
+  .ad-col-body { flex: 1 1 auto; overflow-y: auto; padding: 10px 8px 6px; display: flex; flex-direction: column; gap: 8px; min-height: 0; }
+  .ad-vazio { text-align: center; color: var(--carvao); font-size: 12.5px; padding: 28px 10px; }
+  .ad-card { text-align: left; width: 100%; background: var(--card-bg); border: 1px solid var(--cinza-frio); border-left: 3px solid var(--ad-tom); border-radius: 10px; padding: 11px 12px; cursor: pointer; color: var(--texto); font: inherit; display: flex; flex-direction: column; gap: 6px; transition: box-shadow 0.15s, transform 0.15s; flex-shrink: 0; }
+  .ad-card:hover { box-shadow: 0 6px 18px rgba(0,30,50,0.14); transform: translateY(-1px); }
+  .ad-card-topo { display: flex; align-items: flex-start; gap: 9px; }
+  .ad-card-ico { color: var(--ad-tom); flex-shrink: 0; margin-top: 1px; }
+  .ad-card-titulo { font-weight: 700; font-size: 13.5px; line-height: 1.3; color: var(--texto); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; word-break: break-word; }
+  .ad-card-meta { font-size: 11.5px; color: var(--carvao); line-height: 1.35; padding-left: 26px; }
+  .ad-card-rodape { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding-left: 26px; flex-wrap: wrap; }
+  .ad-chip { display: inline-flex; align-items: center; font-size: 11px; font-weight: 700; padding: 3px 9px; border-radius: 999px; color: var(--ad-tom); background: var(--ad-chip); white-space: nowrap; }
+  .ad-data { display: inline-flex; align-items: center; gap: 4px; font-size: 11.5px; color: var(--carvao); white-space: nowrap; }
+  .ad-mais { background: transparent; border: none; color: var(--foco, #2E7DA6); font-weight: 700; font-size: 12.5px; padding: 10px; cursor: pointer; flex-shrink: 0; }
+  .ad-mais:hover { text-decoration: underline; }
+  .ad-tom-verde { --ad-tom: #1B8A4B; --ad-fundo: rgba(46,163,99,0.05); --ad-cabeca: rgba(46,163,99,0.14); --ad-chip: rgba(46,163,99,0.14); }
+  .ad-tom-amarelo { --ad-tom: #B07A00; --ad-fundo: rgba(201,138,0,0.05); --ad-cabeca: rgba(201,138,0,0.15); --ad-chip: rgba(201,138,0,0.16); }
+  .ad-tom-laranja { --ad-tom: #D9640F; --ad-fundo: rgba(240,136,62,0.05); --ad-cabeca: rgba(240,136,62,0.16); --ad-chip: rgba(240,136,62,0.18); }
+  .ad-tom-vermelho { --ad-tom: #C73A3A; --ad-fundo: rgba(214,69,69,0.05); --ad-cabeca: rgba(214,69,69,0.14); --ad-chip: rgba(214,69,69,0.14); }
+  .ad-tom-cinza { --ad-tom: #5C6B78; --ad-fundo: rgba(120,135,148,0.07); --ad-cabeca: rgba(120,135,148,0.18); --ad-chip: rgba(120,135,148,0.18); }
+  .portal-root[data-theme="dark"] .ad-tom-verde { --ad-tom: #7FE6A0; }
+  .portal-root[data-theme="dark"] .ad-tom-amarelo { --ad-tom: #E3A83B; }
+  .portal-root[data-theme="dark"] .ad-tom-laranja { --ad-tom: #FFA463; }
+  .portal-root[data-theme="dark"] .ad-tom-vermelho { --ad-tom: #FF8383; }
+  .portal-root[data-theme="dark"] .ad-tom-cinza { --ad-tom: #AAB7C2; }
+  .ad-detalhe-grade { display: grid; grid-template-columns: 130px 1fr; gap: 8px 14px; font-size: 13px; margin: 0 0 14px; }
+  .ad-detalhe-grade dt { color: var(--carvao); font-weight: 600; }
+  .ad-detalhe-grade dd { margin: 0; color: var(--texto); word-break: break-word; }
+  .ad-detalhe-acoes { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; border-top: 1px solid var(--cinza-frio); padding-top: 12px; }
+  @media (max-width: 700px) { .ad-col { flex-basis: 84vw; } .ad-total { width: 100%; } .ad-select-wrap { flex: 1 1 100%; } .ad-select { max-width: none; width: 100%; } }
+`;
+function AcompanhamentoDocumentalView({ companies, currentUser, onNotify, onView, onOpenInBase }) {
+  const [filtroBase, setFiltroBase] = useState("");
+  const [filtroCategoria, setFiltroCategoria] = useState("");
+  const [visiveis, setVisiveis] = useState({}); // coluna -> quantos cartões aparecem
+  const [selecionadoId, setSelecionadoId] = useState(null);
+  const todos = useMemo(() => {
+    return adDocumentosAtuais(companies).map((it) => ({ ...it, coluna: adColunaDe(it.doc) }));
+  }, [companies]);
+  const categoriasPresentes = useMemo(() => {
+    const keys = new Set(todos.map((it) => it.doc.categoria));
+    return CATEGORIES.filter((c) => keys.has(c.key));
+  }, [todos]);
+  const filtrados = todos.filter((it) => {
+    if (filtroBase === AD_CORPORATIVO && it.escopo !== AD_CORPORATIVO) return false;
+    if (filtroBase && filtroBase !== AD_CORPORATIVO && it.escopo !== filtroBase) return false;
+    if (filtroCategoria && it.doc.categoria !== filtroCategoria) return false;
+    return true;
+  });
+  const total = filtrados.length;
+  const porColuna = {};
+  AD_COLUNAS.forEach((c) => (porColuna[c.key] = []));
+  filtrados.forEach((it) => porColuna[it.coluna].push(it));
+  AD_COLUNAS.forEach((c) => {
+    porColuna[c.key].sort((a, b) => {
+      const da = daysUntil(a.doc.validade);
+      const db = daysUntil(b.doc.validade);
+      if (da === null && db === null) return docTituloExibido(a.doc).localeCompare(docTituloExibido(b.doc), "pt-BR");
+      if (da === null) return 1;
+      if (db === null) return -1;
+      return da - db;
+    });
+  });
+  const h = React.createElement;
+  const selecionado = selecionadoId ? todos.find((it) => it.doc.id === selecionadoId) : null;
+  const filtrando = !!(filtroBase || filtroCategoria);
+  const isAdmin = can(currentUser, "editarDocumentos");
+
+  function renderCartao(it, coluna) {
+    const d = it.doc;
+    const abrir = () => setSelecionadoId(d.id);
+    return h(
+      "button",
+      { key: d.id, type: "button", className: "ad-card", onClick: abrir, "data-testid": "ad-card" },
+      h(
+        "div",
+        { className: "ad-card-topo" },
+        h(FileText, { size: 17, className: "ad-card-ico" }),
+        h("div", { className: "ad-card-titulo", title: docTituloExibido(d) }, docTituloExibido(d)),
+      ),
+      h("div", { className: "ad-card-meta" }, `Base: ${adBaseLabel(it)}`, h("br"), `Categoria: ${adCategoriaLabel(d)}`),
+      h(
+        "div",
+        { className: "ad-card-rodape" },
+        h("span", { className: "ad-chip" }, adTextoPrazo(d, coluna)),
+        h(
+          "span",
+          { className: "ad-data" },
+          h(Calendar, { size: 12 }),
+          d.validade ? d.validade : "Não expira",
+        ),
+      ),
+    );
+  }
+
+  function renderColuna(col) {
+    const itens = porColuna[col.key];
+    const mostrar = visiveis[col.key] || AD_PAGINA;
+    const pct = total > 0 ? Math.round((itens.length / total) * 100) : 0;
+    const Ico = col.icone;
+    return h(
+      "section",
+      { key: col.key, className: `ad-col ad-tom-${col.tom}`, "data-testid": `ad-col-${col.key}` },
+      h(
+        "div",
+        { className: "ad-col-head" },
+        h("span", { className: "ad-col-ico" }, h(Ico, { size: 19 })),
+        h(
+          "div",
+          null,
+          h("div", { className: "ad-col-titulo" }, col.titulo),
+          h("div", { className: "ad-col-sub" }, `${itens.length} documento${itens.length === 1 ? "" : "s"} · ${pct}%`),
+        ),
+      ),
+      h(
+        "div",
+        { className: "ad-col-body" },
+        itens.length === 0
+          ? h("div", { className: "ad-vazio" }, "Nenhum documento nesta situação.")
+          : itens.slice(0, mostrar).map((it) => renderCartao(it, col.key)),
+        itens.length > mostrar &&
+          h(
+            "button",
+            {
+              type: "button",
+              className: "ad-mais",
+              onClick: () => setVisiveis((v) => ({ ...v, [col.key]: mostrar + AD_PAGINA })),
+            },
+            `Ver mais (${itens.length - mostrar})`,
+          ),
+      ),
+    );
+  }
+
+  function renderDetalhe() {
+    if (!selecionado) return null;
+    const d = selecionado.doc;
+    const coluna = selecionado.coluna;
+    const company = selecionado.company;
+    const linhas = [
+      ["Base", adBaseLabel(selecionado)],
+      ["Categoria", adCategoriaLabel(d)],
+      d.tipo ? ["Tipo", d.tipo] : null,
+      ["Vencimento", d.validade || "Não expira"],
+      ["Situação", adTextoPrazo(d, coluna)],
+      d.emissao ? ["Emissão", d.emissao] : null,
+      d.versao ? ["Versão", d.versao] : null,
+      d.numero ? ["Número", d.numero] : null,
+      d.orgao ? ["Órgão emissor", d.orgao] : null,
+    ].filter(Boolean);
+    return h(
+      "div",
+      { className: "docs-modal-overlay", onClick: () => setSelecionadoId(null) },
+      h(
+        "div",
+        { className: `docs-modal homolog-form-modal ad-tom-${AD_COLUNAS.find((c) => c.key === coluna).tom}`, onClick: (e) => e.stopPropagation(), style: { maxWidth: 560 } },
+        h(
+          "div",
+          { className: "docs-modal-head" },
+          h(
+            "div",
+            null,
+            h("div", { className: "docs-modal-title" }, docTituloExibido(d)),
+            h("div", { className: "docs-modal-sub" }, `${adBaseLabel(selecionado)} · ${adCategoriaLabel(d)}`),
+          ),
+          h("button", { className: "icon-btn-dark", onClick: () => setSelecionadoId(null), "aria-label": "Fechar" }, h(X, { size: 18 })),
+        ),
+        h(
+          "div",
+          { className: "docs-modal-body" },
+          h(
+            "dl",
+            { className: "ad-detalhe-grade" },
+            linhas.map(([k, v]) => [h("dt", { key: `k-${k}` }, k), h("dd", { key: `v-${k}` }, v)]),
+          ),
+          h(
+            "div",
+            { className: "ad-detalhe-acoes" },
+            h(DocRowActions, { company, companies, doc: d, onNotify, onView, isAdmin }),
+            onOpenInBase &&
+              h(
+                "button",
+                {
+                  type: "button",
+                  className: "mini-download-btn",
+                  onClick: () => {
+                    setSelecionadoId(null);
+                    onOpenInBase(company, d);
+                  },
+                  title: "Abrir este documento na página da base",
+                },
+                "Abrir na base",
+              ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  return h(
+    "div",
+    { className: "view view-wide ad-view" },
+    h("style", null, AD_CSS),
+    h(
+      "header",
+      { className: "view-header view-header-compact" },
+      h(
+        "div",
+        null,
+        h("h1", null, "Acompanhamento Documental"),
+        h("p", { className: "lede" }, "Veja a situação de validade de cada documento e mantenha tudo em dia."),
+      ),
+    ),
+    h(
+      "div",
+      { className: "ad-toolbar" },
+      h(
+        "div",
+        { className: "ad-total", "data-testid": "ad-total" },
+        h(FileText, { size: 22 }),
+        h(
+          "div",
+          null,
+          h("div", { className: "ad-total-label" }, filtrando ? "Documentos acompanhados (filtrados)" : "Total de documentos acompanhados"),
+          h("div", { className: "ad-total-num" }, total),
+        ),
+      ),
+      h(
+        "label",
+        { className: "ad-select-wrap" },
+        h(Building2, { size: 16 }),
+        h(
+          "select",
+          { className: "ad-select", value: filtroBase, onChange: (e) => setFiltroBase(e.target.value), "aria-label": "Filtrar por base" },
+          h("option", { value: "" }, "Todas as bases"),
+          h("option", { value: AD_CORPORATIVO }, "Empresa (documentos corporativos)"),
+          (companies || []).map((c) => h("option", { key: c.id, value: c.id }, `${companyLabelFor(c)} · ${c.municipio}/${c.uf}`)),
+        ),
+      ),
+      h(
+        "label",
+        { className: "ad-select-wrap" },
+        h(FolderOpen, { size: 16 }),
+        h(
+          "select",
+          { className: "ad-select", value: filtroCategoria, onChange: (e) => setFiltroCategoria(e.target.value), "aria-label": "Filtrar por categoria" },
+          h("option", { value: "" }, "Todas as categorias"),
+          categoriasPresentes.map((c) => h("option", { key: c.key, value: c.key }, c.label)),
+        ),
+      ),
+      filtrando &&
+        h(
+          "button",
+          { type: "button", className: "ad-limpar", onClick: () => { setFiltroBase(""); setFiltroCategoria(""); setVisiveis({}); } },
+          "Limpar filtros",
+        ),
+    ),
+    h("div", { className: "ad-board" }, AD_COLUNAS.map(renderColuna)),
+    renderDetalhe(),
+  );
+}
 
 function GrupoprimaPortal() {
   // confirmedDocs: documentos classificados automaticamente na sincronização
@@ -37747,6 +38109,17 @@ function GrupoprimaPortal() {
         " ",
         /*#__PURE__*/ React.createElement("span", null, "Empresas"),
       ),
+      can(currentUser, "acompanhamentoDocumental") &&
+        /*#__PURE__*/ React.createElement(
+          "button",
+          {
+            className: "nav-item" + (view === "acompanhamento" ? " active" : ""),
+            onClick: () => goTo("acompanhamento"),
+          },
+          /*#__PURE__*/ React.createElement(KanbanSquareIcon, { size: 16 }),
+          " ",
+          /*#__PURE__*/ React.createElement("span", null, "Acompanhamento Documental"),
+        ),
       can(currentUser, "homologacoes") &&
         /*#__PURE__*/ React.createElement(
           "button",
@@ -37941,7 +38314,7 @@ function GrupoprimaPortal() {
           },
           /*#__PURE__*/ React.createElement(Menu, { size: 18 }),
         ),
-        view === "homologacao" || view === "financeiro" || view === "viagens" || view === "logistica"
+        view === "homologacao" || view === "financeiro" || view === "viagens" || view === "logistica" || view === "acompanhamento"
           ? /*#__PURE__*/ React.createElement("div", {
               className: "search-box-spacer",
               style: { flex: 1 },
@@ -38056,6 +38429,15 @@ function GrupoprimaPortal() {
             isAdmin: can(currentUser, "editarDocumentos"),
             docTarget: companyDocTarget,
             onDocTargetConsumed: () => setCompanyDocTarget(null),
+          }),
+        view === "acompanhamento" &&
+          can(currentUser, "acompanhamentoDocumental") &&
+          /*#__PURE__*/ React.createElement(AcompanhamentoDocumentalView, {
+            companies: data.companies,
+            currentUser: currentUser,
+            onNotify: notify,
+            onView: setViewer,
+            onOpenInBase: openDocumentFromChat,
           }),
         view === "homologacao" &&
           can(currentUser, "homologacoes") &&
