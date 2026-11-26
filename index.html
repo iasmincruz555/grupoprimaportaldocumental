@@ -3280,6 +3280,63 @@ async function salvarPreferenciasProprias(preferencias) {
 function ehArquivoPreenchimentoLegadoTexto(a) {
   return !!a && a.tipoItem === "texto" || /^informa[cç][õo]es do cliente\.txt$/i.test(String(a?.nome || "").trim());
 }
+/** prepararDocumentacoesLoteParaEmail: documentações Grupoprima do ZIP MAIS RECENTE do lote -> arquivos do
+ *  Drive (driveFileId) que o backend anexa no e-mail de conclusão. Garante antes que o lote esteja publicado
+ *  na pasta de resposta (mesma publicação que já existia ao concluir); o que não estiver lá é enviado agora.
+ *  Arquivos do cliente (pasta do cliente no ZIP) ficam de fora. Devolve { ok, docs, lotePublicado, evento, erro }. */
+async function prepararDocumentacoesLoteParaEmail(registro, lote, usuarioNome) {
+  try {
+    const zips = lote.versoesZip || [];
+    if (zips.length === 0) return { ok: true, docs: [], lotePublicado: null, evento: null };
+    if (!DRIVE_PROXY_URL || !window.JSZip) return { ok: false, erro: "Não foi possível preparar as documentações do lote agora." };
+    let lotePublicado = registro.lotePublicado || null;
+    let evento = null;
+    if (publicacaoLotePendente(registro, lote)) {
+      const pub = await publicarLoteNaPastaDrive(registro, lote);
+      if (!pub.lotePublicado) return { ok: false, erro: "Não foi possível copiar as documentações do lote para a pasta de resposta agora." };
+      lotePublicado = pub.lotePublicado;
+      if (pub.enviados > 0) evento = eventoPublicacaoLote(usuarioNome, pub);
+    }
+    const ultima = zips[zips.length - 1];
+    const { bytes } = await fetchDocumentFile({
+      id: `zip-${lote.id}-${ultima.versao}`,
+      tipo: ultima.zipFileName,
+      arquivo: { driveFileId: ultima.driveFileId || null, assetId: ultima.assetId || null, mimeType: "application/zip", nomeOriginal: ultima.zipFileName },
+    });
+    const zip = await window.JSZip.loadAsync(bytes);
+    const razao = Array.isArray(lotePublicado && lotePublicado.arquivos) ? lotePublicado.arquivos : [];
+    const pastaReq = pastaHomologacaoResposta(registro.cliente, registro.id, registro.consultor);
+    const entradas = [];
+    zip.forEach((caminho, entrada) => {
+      if (!entrada.dir) entradas.push([caminho, entrada]);
+    });
+    const docs = [];
+    const falhas = [];
+    for (const [caminho, entrada] of entradas) {
+      const partes = caminho.split("/").filter(Boolean);
+      const nome = partes[partes.length - 1];
+      if (!nome || partes[0] === ZIP_PASTA_CLIENTE) continue;
+      const dados = await entrada.async("uint8array");
+      const hash = await hashDeBytes(dados);
+      let ref = razao.find((a) => a.grupo === ZIP_PASTA_GRUPOPRIMA && a.hash === hash);
+      let driveFileId = ref && ref.driveFileId;
+      if (!driveFileId) {
+        // registro anterior ao razão de publicação: envia este documento para a pasta agora
+        const r = await tryPersistUploadedFile(new File([dados], nome, { type: mimePorExtensaoLote(nome) }), { pasta: `${pastaReq}/${ZIP_PASTA_GRUPOPRIMA}` });
+        driveFileId = r && r.ok ? r.driveFileId || null : null;
+      }
+      if (!driveFileId) {
+        falhas.push(nome);
+        continue;
+      }
+      docs.push({ nome, driveFileId, tamanho: dados.length, tipo: mimePorExtensaoLote(nome) });
+    }
+    if (falhas.length > 0) return { ok: false, erro: `Não foi possível preparar: ${falhas.join(", ")}.` };
+    return { ok: true, docs, lotePublicado, evento };
+  } catch (e) {
+    return { ok: false, erro: (e && e.message) || "Não foi possível preparar as documentações do lote." };
+  }
+}
 /** enviarConclusaoHomologacao: envia o e-mail de conclusão e ESPERA a confirmação do backend (diferente do
  *  notificarHomologacao, "fire-and-forget"). A homologação só vira "Concluída" depois de { ok: true }.
  *  Devolve { ok, message }. Nunca lança. */
@@ -3303,10 +3360,10 @@ async function enviarConclusaoHomologacao(item) {
         fluxo: item?.fluxo === "atualizacao" ? "atualizacao" : "homologacao",
         tipoAtualizacao: item?.tipoAtualizacao,
         textoResposta: String(item?.textoResposta || "").trim() || undefined,
-        // B. preenchidos pela Grupoprima (arquivos de resposta)
+        // B. arquivos de resposta (preenchidos pela Grupoprima)
         anexosResposta: (item?.anexosResposta || []).map((a) => ({ nome: a.nome, driveFileId: a.driveFileId || null, tamanho: a.tamanho, tipo: a.tipo })),
-        // A. originais enviados pelo cliente para preenchimento
-        anexosOriginais: (item?.anexosOriginais || []).map((a) => ({ nome: a.nome, driveFileId: a.driveFileId || null, tamanho: a.tamanho, tipo: a.tipo })),
+        // A. documentações processadas no Envio em Lote (arquivos para preencher do cliente NÃO vão no e-mail)
+        anexosLote: (item?.anexosLote || []).map((a) => ({ nome: a.nome, driveFileId: a.driveFileId || null, tamanho: a.tamanho, tipo: a.tipo })),
       }),
     });
     let json = null;
@@ -17856,21 +17913,42 @@ function HomologacaoEnvioDetalhe({ homolog: h, isAdmin, revelando, credRevelada,
         `${respSemRepo.length === 1 ? "O arquivo" : "Os arquivos"} ${respSemRepo.map((a) => `“${a.nome}”`).join(", ")} não ${respSemRepo.length === 1 ? "foi salvo" : "foram salvos"} no repositório. Remova e anexe novamente em “Arquivos de resposta”.`,
       );
     }
-    const originaisSemRepo = arquivosPre.filter((a) => !a.driveFileId);
-    if (originaisSemRepo.length > 0) {
-      return falha(
-        `${originaisSemRepo.length === 1 ? "O arquivo do cliente" : "Os arquivos do cliente"} ${originaisSemRepo.map((a) => `“${a.nome}”`).join(", ")} não ${originaisSemRepo.length === 1 ? "está disponível" : "estão disponíveis"} no repositório para seguir no e-mail.`,
-      );
-    }
     const agora = new Date().toISOString();
     const textoFinal = textoRespostaEdit.trim().slice(0, TEXTO_CLIENTE_MAX_CHARS);
-    // 4-5) prepara e envia o e-mail (o backend organiza ZIP x anexos individuais) e espera a confirmação
+    // 4) documentações processadas no Envio em Lote (vão como anexo; arquivos para preencher do cliente, não)
     setConcluindo(true);
+    let docsLote = [];
+    let lotePublicadoNovo = null;
+    let eventoPublicacao = null;
+    if (h.origem === "envio_lote" && h.loteId) {
+      let lote = null;
+      try {
+        const db = await getDb();
+        const snap = db ? await db.collection("batch_document_submissions").get() : null;
+        const d = snap ? snap.docs.find((x) => x.id === h.loteId) : null;
+        lote = d ? { id: d.id, ...d.data() } : null;
+      } catch (e) {
+        lote = null;
+      }
+      if (!lote) {
+        setConcluindo(false);
+        return falha("Não foi possível ler o Envio em Lote desta homologação para montar os anexos. Tente novamente.");
+      }
+      const prep = await prepararDocumentacoesLoteParaEmail(h, lote, currentUser?.nome);
+      if (!prep.ok) {
+        setConcluindo(false);
+        return falha(`A homologação não foi concluída. ${prep.erro || ""}`.trim());
+      }
+      docsLote = prep.docs;
+      lotePublicadoNovo = prep.lotePublicado;
+      eventoPublicacao = prep.evento;
+    }
+    // 5) envia o e-mail (o backend organiza ZIP x anexos individuais) e espera a confirmação
     const r = await enviarConclusaoHomologacao({
       ...h,
       dataConclusao: agora,
       textoResposta: textoFinal,
-      anexosOriginais: arquivosPre,
+      anexosLote: docsLote,
     });
     if (!r.ok) {
       setConcluindo(false);
@@ -17888,15 +17966,14 @@ function HomologacaoEnvioDetalhe({ homolog: h, isAdmin, revelando, credRevelada,
           usuario: currentUser?.nome || "Usuário do portal",
           evento: "email_resposta_enviado",
           para: h.consultor.email,
-          anexos: anexosResp.length + arquivosPre.length,
+          anexos: anexosResp.length + docsLote.length,
         },
+        ...(eventoPublicacao ? [eventoPublicacao] : []),
       ],
+      ...(lotePublicadoNovo && lotePublicadoNovo !== h.lotePublicado ? { lotePublicado: lotePublicadoNovo } : {}),
     };
     onUpdate(h.id, patch);
     logDocumentAction(auditA("alterou_status_homologacao"), { homologacao: h.cliente, de: h.status, para: "concluida" });
-    if (h.origem === "envio_lote" && h.loteId) {
-      publicarLoteConcluidoNaPasta({ ...h, ...patch }, currentUser?.nome, onPublicadoLote, onNotify);
-    }
     setConcluindo(false);
     onNotify?.(`Homologação de "${h.cliente}" concluída. E-mail de resposta enviado para ${h.consultor.email}.`, "info");
   }
