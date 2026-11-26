@@ -3275,6 +3275,57 @@ async function salvarPreferenciasProprias(preferencias) {
     return false;
   }
 }
+/** ehArquivoPreenchimentoLegadoTexto: versões antigas guardavam o texto do cliente como um "arquivo"
+ *  (Informações do cliente.txt) em Arquivos para preenchimento. Hoje o texto é só o campo "Texto de resposta". */
+function ehArquivoPreenchimentoLegadoTexto(a) {
+  return !!a && a.tipoItem === "texto" || /^informa[cç][õo]es do cliente\.txt$/i.test(String(a?.nome || "").trim());
+}
+/** enviarConclusaoHomologacao: envia o e-mail de conclusão e ESPERA a confirmação do backend (diferente do
+ *  notificarHomologacao, "fire-and-forget"). A homologação só vira "Concluída" depois de { ok: true }.
+ *  Devolve { ok, message }. Nunca lança. */
+async function enviarConclusaoHomologacao(item) {
+  const ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
+  const timer = ctrl ? setTimeout(() => ctrl.abort(), 120000) : null;
+  try {
+    const resp = await fetch(`${DRIVE_PROXY_URL}/api/homologacao/notify`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Portal-Key": DRIVE_PROXY_KEY },
+      signal: ctrl ? ctrl.signal : undefined,
+      body: JSON.stringify({
+        tipo: "concluida",
+        homologacaoId: item?.id,
+        cliente: item?.cliente,
+        consultor: item?.consultor,
+        status: "concluida",
+        dataSolicitacao: item?.dataSolicitacao,
+        dataConclusao: item?.dataConclusao,
+        bases: item?.bases,
+        fluxo: item?.fluxo === "atualizacao" ? "atualizacao" : "homologacao",
+        tipoAtualizacao: item?.tipoAtualizacao,
+        textoResposta: String(item?.textoResposta || "").trim() || undefined,
+        // B. preenchidos pela Grupoprima (arquivos de resposta)
+        anexosResposta: (item?.anexosResposta || []).map((a) => ({ nome: a.nome, driveFileId: a.driveFileId || null, tamanho: a.tamanho, tipo: a.tipo })),
+        // A. originais enviados pelo cliente para preenchimento
+        anexosOriginais: (item?.anexosOriginais || []).map((a) => ({ nome: a.nome, driveFileId: a.driveFileId || null, tamanho: a.tamanho, tipo: a.tipo })),
+      }),
+    });
+    let json = null;
+    try {
+      json = await resp.json();
+    } catch (e) {
+      json = null;
+    }
+    if (resp.ok && json && json.ok === true) return { ok: true };
+    return { ok: false, message: (json && (json.message || json.erro)) || `O servidor respondeu com erro (${resp.status}).` };
+  } catch (e) {
+    return {
+      ok: false,
+      message: e && e.name === "AbortError" ? "O envio demorou mais do que o esperado." : "Não foi possível falar com o servidor de e-mail agora.",
+    };
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 /** notificarHomologacao: dispara o e-mail de notificação de Homologação
  *  (POST /api/homologacao/notify, ver index.js) em "fire-and-forget" — o
  *  mesmo estilo de registrarAcessoUsuario acima: nunca aguardado de um jeito
@@ -17713,8 +17764,12 @@ function HomologacaoEnvioDetalhe({ homolog: h, isAdmin, revelando, credRevelada,
         const snap = await db.collection("batch_document_submissions").get();
         const d = snap.docs.find((x) => x.id === h.loteId);
         if (cancel || !d) return;
-        const patch = patchTextoRespostaDoLote(h, d.data());
-        if (patch) onUpdate(h.id, patch);
+        const patch = patchTextoRespostaDoLote(h, d.data()) || {};
+        // limpa o "Informações do cliente.txt" gravado por versões antigas como arquivo para preencher
+        if ((h.arquivosPreenchimento || []).some(ehArquivoPreenchimentoLegadoTexto)) {
+          patch.arquivosPreenchimento = mesclarArquivosPreenchimento(d.data().arquivosCliente, h.arquivosPreenchimento);
+        }
+        if (Object.keys(patch).length > 0) onUpdate(h.id, patch);
       } catch (e) {
         /* sem acesso ao lote agora: o campo segue como está */
       }
@@ -17760,8 +17815,10 @@ function HomologacaoEnvioDetalhe({ homolog: h, isAdmin, revelando, credRevelada,
     h.status,
   );
   const transicoes = HOMOLOGACAO_TRANSICOES[h.status] || [];
-  const arquivosPre = h.arquivosPreenchimento || [];
+  const arquivosPre = (h.arquivosPreenchimento || []).filter((a) => !ehArquivoPreenchimentoLegadoTexto(a));
   const arquivosAguardando = arquivosPre.filter((a) => a.status === "aguardando");
+  const [concluindo, setConcluindo] = useState(false);
+  const [erroConclusao, setErroConclusao] = useState("");
   function pushHistorico(evento, extra = {}) {
     const entry = {
       at: new Date().toISOString(),
@@ -17771,12 +17828,81 @@ function HomologacaoEnvioDetalhe({ homolog: h, isAdmin, revelando, credRevelada,
     };
     return [...(h.historico || []), entry];
   }
-  function handleStatusChange(novoStatus) {
-    if (novoStatus === "concluida" && arquivosAguardando.length > 0) {
-      onNotify?.(
+  // handleConcluir (2026-11-26): a homologação SÓ vira "Concluída" depois que o e-mail de resposta
+  // (texto no corpo + anexos) for enviado com sucesso. Qualquer erro: mantém o status e mostra o motivo.
+  async function handleConcluir() {
+    if (concluindo) return;
+    setErroConclusao("");
+    const falha = (msg) => {
+      setErroConclusao(msg);
+      onNotify?.(msg, "error");
+      logDocumentAction(auditA("falha_conclusao_homologacao"), { homologacao: h.cliente, motivo: String(msg).slice(0, 200) });
+    };
+    // 1) validações
+    if (enviandoAnexoResposta) return falha("Aguarde o envio dos arquivos de resposta terminar para concluir.");
+    if (!h.consultor?.email) {
+      return falha("Esta solicitação não tem o e-mail do solicitante registrado, então a resposta não pode ser enviada. Edite a solicitação e informe o consultor.");
+    }
+    if (arquivosAguardando.length > 0) {
+      return falha(
         `Ainda há ${arquivosAguardando.length} arquivo(s) do cliente aguardando preenchimento. Anexe o arquivo preenchido em “Arquivos de resposta” (ou marque como preenchido) antes de concluir.`,
-        "error",
       );
+    }
+    // 2-3) arquivos da resposta: todos precisam estar salvos no repositório para seguir no e-mail
+    const anexosResp = h.anexosResposta || [];
+    const respSemRepo = anexosResp.filter((a) => !a.driveFileId);
+    if (respSemRepo.length > 0) {
+      return falha(
+        `${respSemRepo.length === 1 ? "O arquivo" : "Os arquivos"} ${respSemRepo.map((a) => `“${a.nome}”`).join(", ")} não ${respSemRepo.length === 1 ? "foi salvo" : "foram salvos"} no repositório. Remova e anexe novamente em “Arquivos de resposta”.`,
+      );
+    }
+    const originaisSemRepo = arquivosPre.filter((a) => !a.driveFileId);
+    if (originaisSemRepo.length > 0) {
+      return falha(
+        `${originaisSemRepo.length === 1 ? "O arquivo do cliente" : "Os arquivos do cliente"} ${originaisSemRepo.map((a) => `“${a.nome}”`).join(", ")} não ${originaisSemRepo.length === 1 ? "está disponível" : "estão disponíveis"} no repositório para seguir no e-mail.`,
+      );
+    }
+    const agora = new Date().toISOString();
+    const textoFinal = textoRespostaEdit.trim().slice(0, TEXTO_CLIENTE_MAX_CHARS);
+    // 4-5) prepara e envia o e-mail (o backend organiza ZIP x anexos individuais) e espera a confirmação
+    setConcluindo(true);
+    const r = await enviarConclusaoHomologacao({
+      ...h,
+      dataConclusao: agora,
+      textoResposta: textoFinal,
+      anexosOriginais: arquivosPre,
+    });
+    if (!r.ok) {
+      setConcluindo(false);
+      return falha(`A homologação não foi concluída porque o e-mail de resposta não foi enviado. ${r.message || ""}`.trim());
+    }
+    // 6) e-mail confirmado: registra a conclusão
+    const patch = {
+      status: "concluida",
+      dataConclusao: agora,
+      ...(textoFinal !== String(h.textoResposta || "") ? { textoResposta: textoFinal } : {}),
+      historico: [
+        ...pushHistorico("status_alterado", { de: h.status, para: "concluida" }),
+        {
+          at: agora,
+          usuario: currentUser?.nome || "Usuário do portal",
+          evento: "email_resposta_enviado",
+          para: h.consultor.email,
+          anexos: anexosResp.length + arquivosPre.length,
+        },
+      ],
+    };
+    onUpdate(h.id, patch);
+    logDocumentAction(auditA("alterou_status_homologacao"), { homologacao: h.cliente, de: h.status, para: "concluida" });
+    if (h.origem === "envio_lote" && h.loteId) {
+      publicarLoteConcluidoNaPasta({ ...h, ...patch }, currentUser?.nome, onPublicadoLote, onNotify);
+    }
+    setConcluindo(false);
+    onNotify?.(`Homologação de "${h.cliente}" concluída. E-mail de resposta enviado para ${h.consultor.email}.`, "info");
+  }
+  function handleStatusChange(novoStatus) {
+    if (novoStatus === "concluida") {
+      handleConcluir();
       return;
     }
     const patch = {
@@ -17914,7 +18040,7 @@ function HomologacaoEnvioDetalhe({ homolog: h, isAdmin, revelando, credRevelada,
     const incoming = Array.from(fileList || []);
     if (incoming.length === 0) return;
     let atual = [...(h.anexosResposta || [])];
-    let preAtual = [...(h.arquivosPreenchimento || [])];
+    let preAtual = [...arquivosPre];
     const substituidos = [];
     const aceitos = [];
     let totalProjetado = atual.reduce((s, a) => s + (a.tamanho || 0), 0);
@@ -18115,14 +18241,13 @@ function HomologacaoEnvioDetalhe({ homolog: h, isAdmin, revelando, credRevelada,
                 // sem os anexos): evita marcar como concluída NO MEIO do
                 // upload, antes do arquivo ganhar o driveFileId que o e-mail
                 // precisa pra anexar de verdade.
-                disabled: enviandoAnexoResposta,
+                disabled: enviandoAnexoResposta || concluindo,
                 title: enviandoAnexoResposta
                   ? "Aguarde o envio dos arquivos de resposta terminar."
                   : undefined,
                 onClick: () => handleStatusChange(t),
               },
-              "Marcar como ",
-              HOMOLOGACAO_STATUS_META[t]?.label,
+              t === "concluida" && concluindo ? "Enviando e-mail de resposta…" : ["Marcar como ", HOMOLOGACAO_STATUS_META[t]?.label],
             ),
           ),
           // Reabrir: só quando cancelada (pedido da Iasmin, 2026-10-08).
@@ -18191,6 +18316,13 @@ function HomologacaoEnvioDetalhe({ homolog: h, isAdmin, revelando, credRevelada,
               "Cancelar",
             ),
           ),
+        ),
+      erroConclusao &&
+        /*#__PURE__*/ React.createElement(
+          "div",
+          { className: "homolog-conclusao-erro", role: "alert", "data-testid": "erro-conclusao" },
+          /*#__PURE__*/ React.createElement(XCircle, { size: 16 }),
+          /*#__PURE__*/ React.createElement("span", null, erroConclusao),
         ),
     ),
     /*#__PURE__*/ React.createElement(
@@ -18682,6 +18814,8 @@ function HomologacaoEnvioDetalhe({ homolog: h, isAdmin, revelando, credRevelada,
                       : `${ev.usuario} registrou esta homologação.`),
                   ev.evento === "status_alterado" &&
                     `${ev.usuario} alterou o status de "${HOMOLOGACAO_STATUS_META[ev.de]?.label || ev.de}" para "${HOMOLOGACAO_STATUS_META[ev.para]?.label || ev.para}"${ev.origem === "envio_lote" ? (ev.motivo === "arquivos_para_preencher" ? " (automático: há arquivo do cliente aguardando preenchimento)" : " (automático, acompanhando o envio em lote)") : ""}.`,
+                  ev.evento === "email_resposta_enviado" &&
+                    `${ev.usuario} enviou o e-mail de resposta para ${ev.para}${ev.anexos > 0 ? ` (${ev.anexos} arquivo(s))` : ""}.`,
                   ev.evento === "reaberta" &&
                     `${ev.usuario} reabriu a homologação (voltou para "${HOMOLOGACAO_STATUS_META[ev.para]?.label || ev.para}").`,
                   ev.evento === "lote_publicado_drive" &&
@@ -38345,6 +38479,8 @@ function GrupoprimaPortal() {
         }
         .homolog-form-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 8px; padding-top: 16px; border-top: 1px solid var(--cinza-frio); position: sticky; bottom: 0; background: var(--card-bg); }
         .homolog-status-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
+        .homolog-conclusao-erro { display: flex; align-items: flex-start; gap: 8px; margin-top: 12px; padding: 10px 12px; border-radius: 10px; border: 1px solid rgba(220, 38, 38, 0.45); background: rgba(220, 38, 38, 0.1); color: var(--texto); font-size: 13px; line-height: 1.45; }
+        .homolog-conclusao-erro svg { flex: 0 0 auto; margin-top: 2px; color: #ef4444; }
         .homolog-delete-btn { color: var(--vermelho, #b3261e); border-color: rgba(179,38,30,0.35); }
         .homolog-delete-btn:hover { border-color: var(--vermelho, #b3261e); }
         .homolog-delete-confirm { max-width: 420px; text-align: left; margin-top: 10px; }
