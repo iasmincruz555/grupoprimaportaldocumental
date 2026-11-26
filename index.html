@@ -8230,6 +8230,24 @@ function tiposDistintosParaChecklist(linha) {
  *  reconhecido — extraído aqui pra ser reaproveitado também por
  *  `detectarSegmentosNaoCobertos` abaixo (2026-09-30), sem duplicar a
  *  lógica. */
+/** semEscopoDeBases: tira de um trecho já normalizado as palavras que só dizem A QUAIS BASES o pedido vale
+ *  ("matriz e filiais", "todas as bases", "filial 0004", "de PE", "da matriz"...). Devolve { texto, mudou }:
+ *  `texto` sem essas palavras e sem conectivos; `mudou` indica se havia alguma menção de base. Serve para
+ *  reconhecer "CNPJ matriz e filiais" como o documento CNPJ (antes só "CNPJ" sozinho era reconhecido). */
+function semEscopoDeBases(nTexto) {
+  const t0 = String(nTexto || "");
+  const t1 = t0
+    .replace(/\b(todas?|todos?)\s+(as\s+|os\s+)?(filiais|filial|bases|base|estabelecimentos|unidades)\b/g, " ")
+    .replace(/\bfilia(?:l|is)\s*(?:n[ºo°]?\s*)?\d{1,4}\b/g, " ")
+    .replace(/\b(matriz|filiais|filial|bases|base|estabelecimentos?|unidades?|outras)\b/g, " ")
+    .replace(/\b(pe|pr|sp|es|mg|pb|ms|pernambuco|parana|sao paulo|espirito santo|minas gerais|paraiba|mato grosso do sul|tres lagoas|londrina|recife)\b/g, " ");
+  const mudou = t1.replace(/\s+/g, " ").trim() !== t0.replace(/\s+/g, " ").trim();
+  const texto = t1
+    .replace(/\b(da|de|do|das|dos|e|em|para|na|no|a|as|o|os|com)\b/g, " ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+  return { texto, mudou };
+}
 function categoriaSugeridaParaTrecho(texto) {
   const nTexto = normalize(texto);
   const catHit = CATEGORY_ALIASES.find((k) => k.match.test(nTexto));
@@ -8241,7 +8259,15 @@ function categoriaSugeridaParaTrecho(texto) {
   // um trecho que é só "CNPJ" só pode significar o documento CNPJ; nunca
   // vira substring dentro de texto maior, só igualdade exata do trecho.
   const catExata = CATEGORIES.find((c) => normalize(c.label) === nTexto);
-  return catExata ? catExata.key : null;
+  if (catExata) return catExata.key;
+  // "CNPJ matriz e filiais", "CNPJ da matriz", "CNPJ de PE": o que sobra depois de tirar a menção de base é
+  // exatamente o nome da categoria. A quais bases vale continua sendo decidido à parte (valePorTodasAsBases etc.).
+  const sem = semEscopoDeBases(nTexto);
+  if (sem.mudou && sem.texto) {
+    const catSemEscopo = CATEGORIES.find((c) => normalize(c.label) === sem.texto);
+    if (catSemEscopo) return catSemEscopo.key;
+  }
+  return null;
 }
 /** detectarSegmentosNaoCobertos: pedido explícito da Iasmin (2026-09-30,
  *  logo depois de reportar o bug real do "CND Municipal, CND estadual, CND
@@ -8337,7 +8363,8 @@ function partesSoDeCategoria(linha, jaCobertos) {
   for (const parte of quebrarPedidoEmPartes(linha)) {
     const n = normalize(parte);
     if (cobertos.has(n) || detectRequestedTypes(parte).length > 0) continue;
-    const cat = CATEGORIES.find((c) => normalize(c.label) === n);
+    const semEscopo = semEscopoDeBases(n);
+    const cat = CATEGORIES.find((c) => normalize(c.label) === n || (semEscopo.mudou && normalize(c.label) === semEscopo.texto));
     if (cat && !out.some((o) => o.key === cat.key)) out.push({ parte, key: cat.key });
   }
   return out;
@@ -27848,7 +27875,29 @@ function apolicesNaoIncluidas(company, idsIncluidos) {
       return { doc: d, motivo };
     });
 }
-function LoteItemEditModal({ it, companiesPorId, onClose, onSalvar }) {
+/** escopoDeBasesDoPedido: a QUAIS bases uma documentação vale, a partir do texto do pedido.
+ *  Regra do portal: vale a seleção de bases feita no início da solicitação (`baseIds`); a única exceção é o
+ *  texto dizer "matriz e filiais", "todas as bases" etc. — aí vale para todas as bases cadastradas. */
+function escopoDeBasesDoPedido(nome, baseIds, companies) {
+  return textoPedeTodasAsBases(nome) ? (companies || []).map((c) => c.id) : [...(baseIds || [])];
+}
+/** statusPorBaseParaEscopo: ajusta as bases de um item ao novo escopo. Acrescenta as que faltam ("solicitado"),
+ *  mantém as que já existem dentro do escopo e remove as de fora que ainda não tiveram andamento (solicitado /
+ *  não aplicável, sem arquivo anexado). Base de fora com andamento (recebido/conferido ou com anexo) é mantida. */
+function statusPorBaseParaEscopo(statusAtual, escopoIds, anexosDoItem) {
+  const dentro = new Set(escopoIds);
+  const out = {};
+  Object.keys(statusAtual || {}).forEach((b) => {
+    const st = statusAtual[b];
+    const temAnexo = (anexosDoItem || []).some((a) => a.baseId === b);
+    if (dentro.has(b) || !(st === "solicitado" || st === "nao_aplicavel") || temAnexo) out[b] = st;
+  });
+  escopoIds.forEach((b) => {
+    if (!(b in out)) out[b] = "solicitado";
+  });
+  return out;
+}
+function LoteItemEditModal({ it, companiesPorId, baseIds, companies, onClose, onSalvar }) {
   const [nome, setNome] = useState(it.nome || "");
   const nomeAlterado = nome.trim() !== (it.nome || "").trim();
   const tipoNovo = useMemo(() => {
@@ -27856,14 +27905,22 @@ function LoteItemEditModal({ it, companiesPorId, onClose, onSalvar }) {
     const t = tiposDistintosParaChecklist(nome.trim());
     return (t[0] && t[0].label) || null;
   }, [nome, nomeAlterado, it.tipoSugerido]);
+  // Texto alterado: o pedido volta a valer para as bases escolhidas no início da solicitação, ou para todas
+  // se o novo texto disser "matriz e filiais"/"todas as bases". Sem alteração, mantém as bases atuais do item.
+  const escopoNovo = useMemo(
+    () => (nomeAlterado ? escopoDeBasesDoPedido(nome.trim(), baseIds, companies) : null),
+    [nomeAlterado, nome, baseIds, companies],
+  );
+  const categoriaNova = nomeAlterado ? (tipoNovo ? null : categoriaSugeridaParaTrecho(nome.trim())) : it.categoriaSugerida || null;
   const candidatos = useMemo(() => {
     const porId = new Map();
-    Object.keys(it.statusPorBase || {}).forEach((baseId) => {
-      if (it.statusPorBase[baseId] === "nao_aplicavel") return;
+    const idsEscopo = escopoNovo || Object.keys(it.statusPorBase || {}).filter((b) => it.statusPorBase[b] !== "nao_aplicavel");
+    idsEscopo.forEach((baseId) => {
+      if ((it.statusPorBase || {})[baseId] === "nao_aplicavel") return;
       const company = companiesPorId.get(baseId);
       if (!company) return;
       const r = matchChecklistItemToCompany(
-        loteItemParaMatch({ ...it, nome: nome.trim() || it.nome, tipoSugerido: tipoNovo, categoriaSugerida: nomeAlterado ? null : it.categoriaSugerida }),
+        loteItemParaMatch({ ...it, nome: nome.trim() || it.nome, tipoSugerido: tipoNovo, categoriaSugerida: categoriaNova }),
         company,
       );
       const docs = r.status === "encontrado" ? [r.doc] : r.status === "grupo" || r.status === "ambiguo" ? r.candidatos : [];
@@ -27875,7 +27932,7 @@ function LoteItemEditModal({ it, companiesPorId, onClose, onSalvar }) {
       });
     });
     return [...porId.values()];
-  }, [it, nome, tipoNovo, nomeAlterado, companiesPorId]);
+  }, [it, nome, tipoNovo, nomeAlterado, companiesPorId, escopoNovo, categoriaNova]);
   const ehPedidoApolice = tipoNovo === "Apólice" || tipoNovo === "Apólice RCTR-C" || tipoNovo === "Apólice RC-DC" || tipoNovo === "Apólice RC-V" || it.categoriaSugerida === "seguros";
   const ignoradas = useMemo(() => {
     if (!ehPedidoApolice) return [];
@@ -27889,6 +27946,10 @@ function LoteItemEditModal({ it, companiesPorId, onClose, onSalvar }) {
   }, [ehPedidoApolice, candidatos, it, companiesPorId]);
   const [selecionados, setSelecionados] = useState(() => (Array.isArray(it.docsEscolhidos) && it.docsEscolhidos.length > 0 ? new Set(it.docsEscolhidos) : null));
   // null = automático (todos os encontrados marcados)
+  useEffect(() => {
+    // texto do pedido alterado: a escolha manual anterior de documentos deixa de valer (volta ao automático)
+    if (nomeAlterado) setSelecionados(null);
+  }, [nomeAlterado, nome]);
   const marcado = (id) => (selecionados === null ? true : selecionados.has(id));
   function alternar(id) {
     const base = selecionados === null ? new Set(candidatos.map((c) => c.doc.id)) : new Set(selecionados);
@@ -27906,8 +27967,9 @@ function LoteItemEditModal({ it, companiesPorId, onClose, onSalvar }) {
       {
         nome: nome.trim(),
         tipoSugerido: tipoNovo,
-        categoriaSugerida: nomeAlterado ? null : it.categoriaSugerida || null,
+        categoriaSugerida: categoriaNova,
         docsEscolhidos: todosMarcados || candidatos.length === 0 ? null : idsMarcados,
+        escopoBaseIds: escopoNovo,
       },
       reprocessar,
     );
@@ -27937,7 +27999,15 @@ function LoteItemEditModal({ it, companiesPorId, onClose, onSalvar }) {
           { className: "homolog-field" },
           React.createElement("span", null, "Descrição do pedido"),
           React.createElement("input", { type: "text", value: nome, onChange: (e) => setNome(e.target.value), "data-testid": "lote-item-edit-nome" }),
-          nomeAlterado && React.createElement("small", { className: "homolog-bases-hint" }, tipoNovo ? `Tipo reconhecido: ${tipoNovo}. A seleção de documentos é refeita.` : "Tipo de documento não reconhecido neste texto."),
+          nomeAlterado && React.createElement("small", { className: "homolog-bases-hint" }, tipoNovo ? `Tipo reconhecido: ${tipoNovo}. A seleção de documentos é refeita.` : categoriaNova ? "Categoria reconhecida. A seleção de documentos é refeita." : "Tipo de documento não reconhecido neste texto."),
+          nomeAlterado &&
+            React.createElement(
+              "small",
+              { className: "homolog-bases-hint", "data-testid": "lote-item-edit-escopo" },
+              textoPedeTodasAsBases(nome.trim())
+                ? "Bases: todas as bases cadastradas (o texto diz “matriz e filiais”/“todas as bases”)."
+                : `Bases: as selecionadas no início da solicitação (${(baseIds || []).map((b) => { const c = companiesPorId.get(b); return c ? companyLabelFor(c) : b; }).join(", ") || "nenhuma"}).`,
+            ),
         ),
         React.createElement(
           "div",
@@ -28054,6 +28124,13 @@ function EnvioLoteDetailView({ item, companies, onBack, onNotify, onView, onUpda
     const documentacoesSolicitadas = item.documentacoesSolicitadas.map((it) => {
       if (it.id !== itemId) return it;
       const novo = { ...it, nome: campos.nome, tipoSugerido: campos.tipoSugerido, categoriaSugerida: campos.categoriaSugerida };
+      if (Array.isArray(campos.escopoBaseIds)) {
+        novo.statusPorBase = statusPorBaseParaEscopo(
+          it.statusPorBase,
+          campos.escopoBaseIds,
+          (item.anexosRecebidos || []).filter((a) => a.itemAssociadoId === it.id),
+        );
+      }
       if (campos.docsEscolhidos && campos.docsEscolhidos.length > 0) novo.docsEscolhidos = campos.docsEscolhidos;
       else delete novo.docsEscolhidos;
       return novo;
@@ -28858,6 +28935,8 @@ function EnvioLoteDetailView({ item, companies, onBack, onNotify, onView, onUpda
           key: itemEditandoId,
           it: item.documentacoesSolicitadas.find((x) => x.id === itemEditandoId),
           companiesPorId,
+          baseIds: item.baseIds || [],
+          companies,
           onClose: () => setItemEditandoId(null),
           onSalvar: (campos, reprocessar) => handleSalvarItemEditado(itemEditandoId, campos, reprocessar),
         }),
