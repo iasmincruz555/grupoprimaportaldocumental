@@ -2645,16 +2645,6 @@ function documentosEmbutidosParaPortal(documentosExistentes) {
  *  documentação da capability "mcp"). */ async function fetchDocumentFile(
   doc,
 ) {
-  // Texto escrito (Envio em Lote > informações do cliente): vira um .txt na hora, sem Drive.
-  if (doc && typeof doc.__textoCliente === "string") {
-    const bytes = new TextEncoder().encode(doc.__textoCliente);
-    return {
-      blob: new Blob([bytes], { type: "text/plain;charset=utf-8" }),
-      filename: (doc.arquivo && doc.arquivo.nomeOriginal) || "Informações do cliente.txt",
-      mimeType: "text/plain",
-      bytes,
-    };
-  }
   if (doc.arquivo && doc.arquivo.embutidoId) {
     const b64 = DOCUMENTOS_EMBUTIDOS_PDF_B64[doc.arquivo.embutidoId];
     if (!b64) {
@@ -3325,6 +3315,8 @@ function notificarHomologacao(tipo, item) {
       // nenhum aviso. Agora é o backend quem decide o que consegue
       // realmente anexar, e lista no corpo do e-mail qualquer um que não
       // conseguiu — nunca mais some sem explicação nenhuma.
+      // textoResposta (2026-11-26): texto de resposta escrito na Homologação; só vai no e-mail de "concluida".
+      textoResposta: tipo === "concluida" ? String(item?.textoResposta || "").trim() || undefined : undefined,
       anexosResposta:
         tipo === "concluida"
           ? (item?.anexosResposta || []).map((a) => ({
@@ -15397,55 +15389,40 @@ function nomeUnicoNoZip(nome, usados) {
   usados.add(candidato.toLowerCase());
   return candidato;
 }
+/** Informações escritas do cliente (2026-11-26): texto livre digitado no Envio em Lote no lugar de (ou
+ *  junto com) arquivos. NÃO é arquivo: fica em `lote.informacoesCliente`, aparece no campo "Texto de
+ *  resposta" da Homologação (ao lado de "Arquivos de resposta") e vai no corpo do e-mail de conclusão.
+ *  Não entra no ZIP nem vira "arquivo para preenchimento". Itens `tipoItem: "texto"` de uma versão
+ *  anterior (que viravam .txt) são tratados como esse mesmo texto e ignorados como arquivo. */
+const TEXTO_CLIENTE_MAX_CHARS = 20000;
+function ehItemTextoCliente(a) {
+  return !!a && a.tipoItem === "texto" && typeof a.texto === "string";
+}
+function arquivosClienteReais(lista) {
+  return (lista || []).filter((a) => !ehItemTextoCliente(a));
+}
+function informacoesClienteDoLote(lote) {
+  if (!lote) return "";
+  if (typeof lote.informacoesCliente === "string") return lote.informacoesCliente;
+  return (lote.arquivosCliente || []).filter(ehItemTextoCliente).map((a) => a.texto).join("\n\n");
+}
+function assinaturaTexto(t) {
+  const s = String(t || "");
+  let soma = 0;
+  for (let i = 0; i < s.length; i++) soma = (soma + s.charCodeAt(i) * (i + 1)) % 1000003;
+  return `${s.length}:${soma}`;
+}
 /** docDoArquivoCliente: adapta um arquivo do cliente ao formato de documento
  *  que fetchDocumentFile/viewDocument já entendem (nada de lógica nova). */
 function docDoArquivoCliente(a) {
-  const ehTexto = ehItemTextoCliente(a);
   return {
     id: a.id,
     categoria: null,
     tipo: a.nome,
     titulo: a.nome,
-    arquivo: { driveFileId: a.driveFileId || null, assetId: a.assetId || null, mimeType: ehTexto ? "text/plain" : a.tipo || null, nomeOriginal: a.nome },
+    arquivo: { driveFileId: a.driveFileId || null, assetId: a.assetId || null, mimeType: a.tipo || null, nomeOriginal: a.nome },
     __arquivoClienteLote: true,
-    ...(ehTexto ? { __textoCliente: a.texto } : {}),
   };
-}
-/** Texto escrito pelo cliente/consultor (2026-11-24): "Informações do cliente" — vale como um item da
- *  mesma lista dos arquivos do cliente para preenchimento (vai no ZIP como .txt na pasta
- *  Arquivos_para_Preenchimento e, na Homologação, fica pendente até ser marcado como preenchido).
- *  Não tem arquivo no Drive: o conteúdo fica no próprio registro (`texto`). */
-const TEXTO_CLIENTE_MAX_CHARS = 20000;
-function ehItemTextoCliente(a) {
-  return !!a && a.tipoItem === "texto" && typeof a.texto === "string";
-}
-function nomeNovoItemTextoCliente(existentes) {
-  const n = (existentes || []).filter(ehItemTextoCliente).length + 1;
-  return n === 1 ? "Informações do cliente.txt" : `Informações do cliente (${n}).txt`;
-}
-function criarItensTextoClienteLote(textos, existentes, usuarioNome) {
-  const lista = [...(existentes || [])];
-  const novos = [];
-  (textos || []).forEach((t) => {
-    const texto = String(t || "").trim().slice(0, TEXTO_CLIENTE_MAX_CHARS);
-    if (!texto) return;
-    const entrada = {
-      id: `arq-cli-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
-      nome: nomeNovoItemTextoCliente(lista),
-      tamanho: new TextEncoder().encode(texto).length,
-      tipo: "text/plain",
-      tipoItem: "texto",
-      texto,
-      driveFileId: null,
-      assetId: null,
-      origem: "cliente",
-      enviadoPor: usuarioNome || "Usuário do portal",
-      enviadoEm: new Date().toISOString(),
-    };
-    lista.push(entrada);
-    novos.push(entrada);
-  });
-  return novos;
 }
 /** enviarArquivosClienteLote: sobe cada arquivo do cliente para a pasta da
  *  solicitação (mesma pasta/mecanismo dos anexos recebidos) e devolve os
@@ -15486,7 +15463,7 @@ function statusHomologacaoDoLote(statusLote, temArquivosParaPreencher) {
  *  Homologação, preservando o andamento (aguardando/preenchido) já registrado. */
 function mesclarArquivosPreenchimento(arquivosCliente, existentes) {
   const porId = new Map((existentes || []).map((a) => [a.id, a]));
-  return (arquivosCliente || []).map((a) => {
+  return arquivosClienteReais(arquivosCliente).map((a) => {
     const e = porId.get(a.id) || {};
     return {
       id: a.id,
@@ -15495,7 +15472,6 @@ function mesclarArquivosPreenchimento(arquivosCliente, existentes) {
       tipo: a.tipo || "application/octet-stream",
       driveFileId: a.driveFileId || null,
       assetId: a.assetId || null,
-      ...(ehItemTextoCliente(a) ? { tipoItem: "texto", texto: a.texto } : {}),
       status: e.status === "preenchido" ? "preenchido" : "aguardando",
       preenchidoEm: e.preenchidoEm || null,
       preenchidoPor: e.preenchidoPor || null,
@@ -15826,6 +15802,9 @@ async function sincronizarLoteBase(lote, companies, ctx) {
   const usuario = ctx.usuario || lote.usuarioSolicitante?.nome || "Usuário do portal";
   const resumo = resumoDoLote(lote);
   const arquivosPre = mesclarArquivosPreenchimento(lote.arquivosCliente, existente ? existente.arquivosPreenchimento : null);
+  // Texto escrito no Envio em Lote -> campo "Texto de resposta" da Homologação. Se a pessoa já editou o
+  // campo na Homologação (difere da última cópia vinda do lote), a edição é preservada.
+  const textoLote = informacoesClienteDoLote(lote).trim();
   const statusMapeado = statusHomologacaoDoLote(lote.status, arquivosPre.length > 0);
   const ehAtu = lote.tipoSolicitacao === "atualizacao";
   let registro;
@@ -15862,6 +15841,8 @@ async function sincronizarLoteBase(lote, companies, ctx) {
       loteStatus: lote.status,
       loteResumo: resumo,
       arquivosPreenchimento: arquivosPre,
+      textoResposta: textoLote,
+      textoRespostaLote: textoLote,
       historico: [
         { at: lote.criadoEm || agora, usuario: lote.usuarioSolicitante?.nome || usuario, evento: "criada", de: null, para: statusMapeado, origem: "envio_lote" },
       ],
@@ -15872,7 +15853,14 @@ async function sincronizarLoteBase(lote, companies, ctx) {
     const mudouStatusLote = existente.loteStatus !== lote.status;
     registro = { ...existente };
     const mudouArquivos = JSON.stringify(existente.arquivosPreenchimento || []) !== JSON.stringify(arquivosPre);
-    let mudou = mudouResumo || mudouStatusLote || mudouArquivos;
+    const textoAtual = typeof existente.textoResposta === "string" ? existente.textoResposta : "";
+    const textoNaoEditado = typeof existente.textoRespostaLote !== "string" ? textoAtual.trim() === "" : textoAtual === existente.textoRespostaLote;
+    const mudouTexto = (existente.textoRespostaLote || "") !== textoLote || (textoNaoEditado && textoAtual !== textoLote);
+    let mudou = mudouResumo || mudouStatusLote || mudouArquivos || mudouTexto;
+    if (mudouTexto) {
+      registro.textoRespostaLote = textoLote;
+      if (textoNaoEditado) registro.textoResposta = textoLote;
+    }
     const ultimoEvStatus = [...(existente.historico || [])].reverse().find((ev) => ev.evento === "status_alterado" || ev.evento === "criada");
     // Só reabre uma homologação já "concluída" por causa dos arquivos quando
     // a conclusão foi automática (envio em lote) — nunca uma conclusão manual.
@@ -15965,7 +15953,7 @@ function LoteHomologacaoCard({ item, companies, onUpdate, onAbrir, currentUser }
   const podeAbrir = can(currentUser, "homologacoes");
   const ehColeta = item.tipoSolicitacao === "coleta";
   const resumo = resumoDoLote(item);
-  const assinatura = [item.tipoSolicitacao || "", item.homologacaoDesvinculada ? 1 : 0, item.status, resumo.itensBase, resumo.resolvidos, resumo.anexos, (item.arquivosCliente || []).length, (item.versoesZip || []).length, tentativa].join("|");
+  const assinatura = [item.tipoSolicitacao || "", item.homologacaoDesvinculada ? 1 : 0, item.status, resumo.itensBase, resumo.resolvidos, resumo.anexos, arquivosClienteReais(item.arquivosCliente).length, assinaturaTexto(informacoesClienteDoLote(item)), (item.versoesZip || []).length, tentativa].join("|");
   useEffect(() => {
     let cancel = false;
     if (ehColeta) {
@@ -16306,15 +16294,6 @@ function isoDateToBR(iso) {
  *  finge um arquivo que não tem mais). */ async function fetchHomologAnexoFile(
   anexo,
 ) {
-  if (ehItemTextoCliente(anexo)) {
-    const bytes = new TextEncoder().encode(anexo.texto);
-    return {
-      blob: new Blob([bytes], { type: "text/plain;charset=utf-8" }),
-      filename: anexo.nome,
-      mimeType: "text/plain",
-      bytes,
-    };
-  }
   if (anexo.driveFileId || anexo.assetId) {
     try {
       return await fetchDocumentFile({
@@ -17704,6 +17683,13 @@ function HomologacaoEnvioDetalhe({ homolog: h, isAdmin, revelando, credRevelada,
   const [revelando, setRevelando] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
   const [linkEdit, setLinkEdit] = useState(h.linkHomologacao || "");
+  // Texto de resposta (2026-11-26): informações escritas (vindas do Envio em Lote ou digitadas aqui) que
+  // seguem no corpo do e-mail de conclusão, ao lado dos "Arquivos de resposta".
+  const textoRespostaSalvo = typeof h.textoResposta === "string" ? h.textoResposta : "";
+  const [textoRespostaEdit, setTextoRespostaEdit] = useState(textoRespostaSalvo);
+  useEffect(() => {
+    setTextoRespostaEdit(textoRespostaSalvo);
+  }, [textoRespostaSalvo]);
   const [editandoBases, setEditandoBases] = useState(false);
   const [basesEdit, setBasesEdit] = useState(h.bases || []);
   const [confirmandoExclusao, setConfirmandoExclusao] = useState(false);
@@ -17768,6 +17754,10 @@ function HomologacaoEnvioDetalhe({ homolog: h, isAdmin, revelando, credRevelada,
         de: h.status,
         para: novoStatus,
       }),
+      // texto digitado e ainda não salvo vale ao concluir (vai no e-mail)
+      ...(novoStatus === "concluida" && textoRespostaEdit.trim() !== textoRespostaSalvo.trim()
+        ? { textoResposta: textoRespostaEdit.trim() }
+        : {}),
     };
     onUpdate(h.id, patch);
     logDocumentAction(auditA("alterou_status_homologacao"), {
@@ -17959,6 +17949,12 @@ function HomologacaoEnvioDetalhe({ homolog: h, isAdmin, revelando, credRevelada,
         (substituidos.length ? ` Arquivo(s) do cliente marcado(s) como preenchido(s): ${substituidos.join(", ")}.` : ""),
       "info",
     );
+  }
+  function handleSalvarTextoResposta() {
+    const texto = textoRespostaEdit.trim().slice(0, TEXTO_CLIENTE_MAX_CHARS);
+    onUpdate(h.id, { textoResposta: texto });
+    logDocumentAction(auditA("atualizou_texto_resposta_homologacao"), { homologacao: h.cliente });
+    onNotify?.("Texto de resposta salvo.", "info");
   }
   function handleMarcarPreenchimento(a, preenchido) {
     onUpdate(h.id, {
@@ -18360,6 +18356,9 @@ function HomologacaoEnvioDetalhe({ homolog: h, isAdmin, revelando, credRevelada,
     // em anexo no e-mail enviado ao consultor (ver handleStatusChange
     // acima + notificarHomologacao + /api/homologacao/notify em index.js).
     /*#__PURE__*/ React.createElement(
+      "div",
+      { className: "homolog-resposta-grid" },
+    /*#__PURE__*/ React.createElement(
       "section",
       { className: "section-block homolog-detail-card" },
       /*#__PURE__*/ React.createElement("h3", null, "Arquivos de resposta"),
@@ -18466,6 +18465,45 @@ function HomologacaoEnvioDetalhe({ homolog: h, isAdmin, revelando, credRevelada,
           { className: "empty-note" },
           "Um ou mais arquivos não foram salvos de forma permanente agora (backend indisponível no momento do envio) — continuam disponíveis para Ver/Baixar só enquanto esta página não recarrega, e não serão incluídos no e-mail de conclusão. Reenvie o arquivo para tentar salvar de verdade.",
         ),
+    ),
+    /*#__PURE__*/ React.createElement(
+      "section",
+      { className: "section-block homolog-detail-card", "data-testid": "texto-resposta-card" },
+      /*#__PURE__*/ React.createElement("h3", null, "Texto de resposta"),
+      /*#__PURE__*/ React.createElement(
+        "p",
+        { className: "homolog-bases-hint" },
+        h.origem === "envio_lote"
+          ? "Informações escritas no Envio de Documentações em Lote. Você pode ajustar o texto aqui. Ao marcar como “Concluída”, ele vai no corpo do e-mail enviado ao consultor, junto com os arquivos de resposta."
+          : "Escreva aqui o que deve ser devolvido ao solicitante. Ao marcar como “Concluída”, o texto vai no corpo do e-mail enviado ao consultor, junto com os arquivos de resposta.",
+      ),
+      /*#__PURE__*/ React.createElement("textarea", {
+        className: "homolog-texto-resposta",
+        "data-testid": "texto-resposta",
+        rows: 8,
+        maxLength: TEXTO_CLIENTE_MAX_CHARS,
+        value: textoRespostaEdit,
+        onChange: (e) => setTextoRespostaEdit(e.target.value),
+        placeholder: "Ex.: Dados do responsável pelo cadastro: nome completo, telefone, e-mail...",
+      }),
+      /*#__PURE__*/ React.createElement(
+        "div",
+        { className: "homolog-texto-resposta-acoes" },
+        /*#__PURE__*/ React.createElement(
+          "button",
+          {
+            type: "button",
+            className: "mini-download-btn",
+            "data-testid": "texto-resposta-salvar",
+            disabled: textoRespostaEdit.trim() === textoRespostaSalvo.trim(),
+            onClick: handleSalvarTextoResposta,
+          },
+          "Salvar texto",
+        ),
+        textoRespostaEdit.trim() !== textoRespostaSalvo.trim() &&
+          /*#__PURE__*/ React.createElement("span", { className: "homolog-bases-hint" }, "Alterações não salvas"),
+      ),
+    ),
     ),
     /*#__PURE__*/ React.createElement(
       "section",
@@ -26721,7 +26759,7 @@ async function processarLote(solicitacao, { companies, usuarioProcessamento, dep
   // Arquivos enviados PELO CLIENTE (formulários/RFIs/planilhas a preencher):
   // nunca entram no cruzamento com o catálogo nem contam como documento da
   // Grupoprima — só são anexados ao ZIP, numa pasta própria, sem alteração.
-  const arquivosClienteAtivos = (solicitacao.arquivosCliente || []).filter(
+  const arquivosClienteAtivos = arquivosClienteReais(solicitacao.arquivosCliente).filter(
     (a) => !(excluirDocIds && excluirDocIds.has(a.id)),
   );
   const _tryPersistUploadedFile = (deps && deps.tryPersistUploadedFile) || tryPersistUploadedFile;
@@ -26797,7 +26835,7 @@ async function processarLote(solicitacao, { companies, usuarioProcessamento, dep
   marcarEtapa("recebimento", "ok");
 
   const anexosPendentes = [...(solicitacao.anexosRecebidos || []), ...arquivosClienteAtivos].filter(
-    (a) => !a.driveFileId && !a.assetId && !ehItemTextoCliente(a),
+    (a) => !a.driveFileId && !a.assetId,
   );
   if (anexosPendentes.length > 0) {
     return falhar(
@@ -27052,7 +27090,7 @@ function EnvioLoteFormModal({ companies, onClose, onCreate, clientesCadastrados 
     setProcessando(true);
     await onCreate({
       arquivosClienteFiles: arquivosCliente,
-      arquivosClienteTexto: textoCliente.trim() ? [textoCliente] : [],
+      informacoesCliente: textoCliente.trim(),
       cliente: clienteFinal,
       tipoSolicitacao,
       clienteOrigemId: origemSel ? origemSel.id : null,
@@ -27306,7 +27344,7 @@ function EnvioLoteFormModal({ companies, onClose, onCreate, clientesCadastrados 
                 React.createElement(
                   "p",
                   { className: "homolog-bases-hint" },
-                  "Formulários, RFIs, planilhas ou documentos para preencher/assinar — ou informações escritas. Vão no ZIP na pasta ",
+                  "Formulários, RFIs, planilhas ou documentos para preencher/assinar. Vão no ZIP na pasta ",
                   React.createElement("strong", null, ZIP_PASTA_CLIENTE),
                   ", separados dos documentos da Grupoprima e sem alterar o original.",
                 ),
@@ -27362,6 +27400,11 @@ function EnvioLoteFormModal({ companies, onClose, onCreate, clientesCadastrados 
                   "label",
                   { htmlFor: "lote-texto-cliente", style: { marginTop: 10 } },
                   "Ou escreva aqui as informações do cliente",
+                ),
+                React.createElement(
+                  "p",
+                  { className: "homolog-bases-hint" },
+                  "O texto não vai no ZIP: aparece no campo “Texto de resposta” da Homologação e segue por e-mail ao consultor quando a homologação for concluída.",
                 ),
                 React.createElement("textarea", {
                   id: "lote-texto-cliente",
@@ -27743,10 +27786,17 @@ function EnvioLoteDetailView({ item, companies, onBack, onNotify, onView, onUpda
   const [previaAberta, setPreviaAberta] = useState(false);
   const [previaDesmarcados, setPreviaDesmarcados] = useState(new Set());
   const [mostrarAddCliente, setMostrarAddCliente] = useState(false);
-  const [textoClienteDetalhe, setTextoClienteDetalhe] = useState("");
   const [enviandoArquivosCliente, setEnviandoArquivosCliente] = useState(false);
   const arquivosClienteDetalheRef = useRef(null);
-  const arquivosCliente = item.arquivosCliente || [];
+  // `arquivosClienteBrutos` preserva qualquer item antigo "tipoItem: texto" ao regravar a lista; a tela só
+  // lida com os arquivos de verdade (`arquivosCliente`).
+  const arquivosClienteBrutos = item.arquivosCliente || [];
+  const arquivosCliente = arquivosClienteReais(arquivosClienteBrutos);
+  const informacoesSalvas = informacoesClienteDoLote(item);
+  const [informacoesEdit, setInformacoesEdit] = useState(informacoesSalvas);
+  useEffect(() => {
+    setInformacoesEdit(informacoesSalvas);
+  }, [informacoesSalvas]);
   // isAdmin: exclusão da solicitação restrita a Administrador (pedido
   // explícito da Iasmin, 2026-09-28), mesmo gate já usado pra excluir um
   // documento do catálogo (DocRowActions) — nunca aberto pros perfis
@@ -27867,7 +27917,7 @@ function EnvioLoteDetailView({ item, companies, onBack, onNotify, onView, onUpda
     if (!files || files.length === 0) return;
     setEnviandoArquivosCliente(true);
     const envio = await enviarArquivosClienteLote(files, { cliente: item.cliente, loteId: item.id, usuarioNome: currentUser?.nome });
-    persistPatch({ arquivosCliente: [...arquivosCliente, ...envio.entradas] });
+    persistPatch({ arquivosCliente: [...arquivosClienteBrutos, ...envio.entradas] });
     setEnviandoArquivosCliente(false);
     logDocumentAction("adicionou_arquivo_cliente_lote", { cliente: item.cliente, quantidade: envio.entradas.length });
     onNotify?.(
@@ -27877,16 +27927,15 @@ function EnvioLoteDetailView({ item, companies, onBack, onNotify, onView, onUpda
       envio.falhas.length ? "error" : "info",
     );
   }
-  function handleAdicionarTextoCliente() {
-    const novos = criarItensTextoClienteLote([textoClienteDetalhe], arquivosCliente, currentUser?.nome);
-    if (novos.length === 0) return;
-    persistPatch({ arquivosCliente: [...arquivosCliente, ...novos] });
-    setTextoClienteDetalhe("");
-    logDocumentAction("adicionou_arquivo_cliente_lote", { cliente: item.cliente, quantidade: 1 });
-    onNotify?.("Informações do cliente adicionadas.", "info");
+  function handleSalvarInformacoesCliente() {
+    const texto = String(informacoesEdit || "").trim().slice(0, TEXTO_CLIENTE_MAX_CHARS);
+    // grava no campo próprio e remove qualquer item antigo "texto" da lista de arquivos
+    persistPatch({ informacoesCliente: texto, arquivosCliente: arquivosClienteReais(arquivosClienteBrutos) });
+    logDocumentAction("atualizou_solicitacao_lote", { cliente: item.cliente, campo: "informacoes_cliente" });
+    onNotify?.("Informações do cliente salvas.", "info");
   }
   function handleRemoverArquivoCliente(a) {
-    persistPatch({ arquivosCliente: arquivosCliente.filter((x) => x.id !== a.id) });
+    persistPatch({ arquivosCliente: arquivosClienteBrutos.filter((x) => x.id !== a.id) });
     logDocumentAction("removeu_arquivo_cliente_lote", { cliente: item.cliente, arquivo: a.nome });
   }
   function handleAdicionarItem() {
@@ -28488,7 +28537,7 @@ function EnvioLoteDetailView({ item, companies, onBack, onNotify, onView, onUpda
                   "div",
                   { className: "lote-previa-info" },
                   React.createElement("span", { className: "homolog-anexo-nome" }, a.nome),
-                  React.createElement("div", { className: "lote-previa-meta" }, ehItemTextoCliente(a) ? `informações escritas · ${formatBytes(a.tamanho)} · vai como .txt` : `arquivo do cliente · ${formatBytes(a.tamanho)} · nome original preservado`),
+                  React.createElement("div", { className: "lote-previa-meta" }, `arquivo do cliente · ${formatBytes(a.tamanho)} · nome original preservado`),
                 ),
                 React.createElement(
                   "button",
@@ -28593,7 +28642,7 @@ function EnvioLoteDetailView({ item, companies, onBack, onNotify, onView, onUpda
         ),
       ),
     ),
-    !mostrarAddCliente && arquivosCliente.length === 0
+    !mostrarAddCliente && arquivosCliente.length === 0 && !informacoesSalvas.trim()
       ? React.createElement(
           "div",
           { className: "lote-section" },
@@ -28611,7 +28660,7 @@ function EnvioLoteDetailView({ item, companies, onBack, onNotify, onView, onUpda
           React.createElement(
             "p",
             { className: "homolog-bases-hint" },
-            "Formulários, RFIs, planilhas, documentos ou informações escritas enviados pelo cliente. Ficam identificados à parte dos documentos da Grupoprima e vão no ZIP na pasta ",
+            "Formulários, RFIs, planilhas ou documentos enviados pelo cliente. Ficam identificados à parte dos documentos da Grupoprima e vão no ZIP na pasta ",
             React.createElement("strong", null, ZIP_PASTA_CLIENTE),
             ", com o nome e o conteúdo originais.",
           ),
@@ -28622,7 +28671,7 @@ function EnvioLoteDetailView({ item, companies, onBack, onNotify, onView, onUpda
               React.createElement(FileText, { size: 14 }),
               React.createElement("span", { className: "homolog-anexo-nome" }, a.nome),
               React.createElement("span", { className: "homolog-anexo-tamanho" }, formatBytes(a.tamanho)),
-              !a.driveFileId && !a.assetId && !ehItemTextoCliente(a) &&
+              !a.driveFileId && !a.assetId &&
                 React.createElement("span", { className: "lote-previa-vencido" }, "não salvo no repositório — remova e reenvie"),
               React.createElement(
                 "button",
@@ -28663,13 +28712,18 @@ function EnvioLoteDetailView({ item, companies, onBack, onNotify, onView, onUpda
               { htmlFor: "lote-texto-cliente-detalhe", style: { display: "block", marginTop: 12 } },
               "Ou escreva aqui as informações do cliente",
             ),
+            React.createElement(
+              "p",
+              { className: "homolog-bases-hint" },
+              "Não vai no ZIP: aparece no campo “Texto de resposta” da Homologação e segue por e-mail ao consultor quando a homologação for concluída.",
+            ),
             React.createElement("textarea", {
               id: "lote-texto-cliente-detalhe",
               "data-testid": "lote-texto-cliente-detalhe",
               rows: 4,
               maxLength: TEXTO_CLIENTE_MAX_CHARS,
-              value: textoClienteDetalhe,
-              onChange: (e) => setTextoClienteDetalhe(e.target.value),
+              value: informacoesEdit,
+              onChange: (e) => setInformacoesEdit(e.target.value),
               placeholder: "Ex.: Dados do responsável pelo cadastro: nome completo, telefone, e-mail...",
             }),
             React.createElement(
@@ -28677,13 +28731,12 @@ function EnvioLoteDetailView({ item, companies, onBack, onNotify, onView, onUpda
               {
                 type: "button",
                 className: "mini-download-btn",
-                "data-testid": "lote-texto-cliente-adicionar",
+                "data-testid": "lote-texto-cliente-salvar",
                 style: { marginTop: 6 },
-                disabled: !textoClienteDetalhe.trim(),
-                onClick: handleAdicionarTextoCliente,
+                disabled: informacoesEdit.trim() === informacoesSalvas.trim(),
+                onClick: handleSalvarInformacoesCliente,
               },
-              React.createElement(Plus, { size: 13 }),
-              " Adicionar informações",
+              " Salvar informações",
             ),
             React.createElement("input", {
               ref: arquivosClienteDetalheRef,
@@ -28872,7 +28925,7 @@ function EnvioLoteView({ currentUser, onNotify, onView, companies, registroAlvo,
   function agendarSync(item, onDone) {
     if (!item || !loteGeraHomologacao(item.tipoSolicitacao) || item.homologacaoDesvinculada) return;
     const r = resumoDoLote(item);
-    const sig = [item.tipoSolicitacao, item.status, r.itensBase, r.resolvidos, r.anexos, (item.arquivosCliente || []).length, (item.versoesZip || []).length].join("|");
+    const sig = [item.tipoSolicitacao, item.status, r.itensBase, r.resolvidos, r.anexos, arquivosClienteReais(item.arquivosCliente).length, assinaturaTexto(informacoesClienteDoLote(item)), (item.versoesZip || []).length].join("|");
     if (!onDone && sincAssinaturaRef.current[item.id] === sig) return;
     sincAssinaturaRef.current[item.id] = sig;
     sincronizarLoteComHomologacao(item, companies, { usuario: currentUser?.nome }).then((res) => {
@@ -28927,7 +28980,7 @@ function EnvioLoteView({ currentUser, onNotify, onView, companies, registroAlvo,
       "info",
     );
   }
-  async function handleCreate({ cliente, tipoSolicitacao, clienteOrigemId, baseIds, itens, textoSolicitacaoOriginal, arquivoSolicitacaoOriginalNome, arquivosClienteFiles, arquivosClienteTexto }) {
+  async function handleCreate({ cliente, tipoSolicitacao, clienteOrigemId, baseIds, itens, textoSolicitacaoOriginal, arquivoSolicitacaoOriginalNome, arquivosClienteFiles, informacoesCliente }) {
     const id = generateLoteId();
     let arquivosCliente = [];
     if (arquivosClienteFiles && arquivosClienteFiles.length > 0) {
@@ -28936,9 +28989,6 @@ function EnvioLoteView({ currentUser, onNotify, onView, companies, registroAlvo,
       if (envio.falhas.length > 0) {
         onNotify?.(`${envio.falhas.length} arquivo(s) do cliente não puderam ser salvos no repositório agora (${envio.falhas.join(", ")}). Reenvie-os na solicitação antes de gerar o ZIP.`, "error");
       }
-    }
-    if (arquivosClienteTexto && arquivosClienteTexto.length > 0) {
-      arquivosCliente = [...arquivosCliente, ...criarItensTextoClienteLote(arquivosClienteTexto, arquivosCliente, currentUser?.nome)];
     }
     const agora = new Date().toISOString();
     const documentacoesSolicitadas = itens.map((it) => {
@@ -28986,6 +29036,7 @@ function EnvioLoteView({ currentUser, onNotify, onView, companies, registroAlvo,
       clienteOrigemId: clienteOrigemId || null,
       ...(loteGeraHomologacao(tipoSolicitacao) ? { homologacaoId: homologacaoIdDoLote(id) } : {}),
       arquivosCliente,
+      informacoesCliente: String(informacoesCliente || "").slice(0, TEXTO_CLIENTE_MAX_CHARS),
     };
     if (arquivosCliente.length > 0) {
       logDocumentAction("adicionou_arquivo_cliente_lote", { cliente, quantidade: arquivosCliente.length });
@@ -37480,6 +37531,17 @@ function GrupoprimaPortal() {
         .dash-bases-row { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 20px; align-items: stretch; }
         .dash-bases-docs { margin: 0; display: flex; flex-direction: column; min-width: 0; }
         .company-mini-active { border-color: var(--texto); box-shadow: 0 0 0 1px var(--texto); }
+        .homolog-resposta-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; align-items: stretch; }
+        .homolog-resposta-grid > .section-block { margin-bottom: 0; min-width: 0; }
+        .homolog-texto-resposta, #lote-texto-cliente-detalhe {
+          width: 100%; box-sizing: border-box; resize: vertical; min-height: 140px; border: 1.5px solid var(--cinza-frio); border-radius: 9px;
+          padding: 11px 13px; font-size: 13.5px; outline: none; color: var(--texto); background: var(--card-bg); font-family: inherit;
+          transition: border-color 0.15s;
+        }
+        .homolog-texto-resposta:focus, #lote-texto-cliente-detalhe:focus { border-color: var(--texto); }
+        #lote-texto-cliente-detalhe { min-height: 90px; }
+        .homolog-texto-resposta-acoes { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+        @media (max-width: 1100px) { .homolog-resposta-grid { grid-template-columns: minmax(0, 1fr); } }
 
         /* ---- Dashboard: cartões de "Documentação por bases" (2026-11-24). Layout único; claro/escuro
            só trocam as variáveis de tema (--card-bg, --texto, --carvao, --cinza-frio). ---- */
