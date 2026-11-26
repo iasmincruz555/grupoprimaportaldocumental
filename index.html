@@ -15406,6 +15406,20 @@ function informacoesClienteDoLote(lote) {
   if (typeof lote.informacoesCliente === "string") return lote.informacoesCliente;
   return (lote.arquivosCliente || []).filter(ehItemTextoCliente).map((a) => a.texto).join("\n\n");
 }
+/** patchTextoRespostaDoLote: leva o texto escrito no Envio em Lote (`lote.informacoesCliente`) para o campo
+ *  "Texto de resposta" da Homologação. Se a pessoa já editou o campo na Homologação (difere da última cópia
+ *  vinda do lote), a edição é preservada; senão o campo acompanha o lote. Devolve só os campos que mudam
+ *  (ou null quando não há nada a atualizar). */
+function patchTextoRespostaDoLote(h, lote) {
+  const textoLote = informacoesClienteDoLote(lote).trim();
+  const atual = typeof h.textoResposta === "string" ? h.textoResposta : "";
+  const ultimoDoLote = typeof h.textoRespostaLote === "string" ? h.textoRespostaLote : null;
+  const naoEditado = ultimoDoLote === null ? atual.trim() === "" : atual === ultimoDoLote;
+  const patch = {};
+  if ((ultimoDoLote === null ? "" : ultimoDoLote) !== textoLote) patch.textoRespostaLote = textoLote;
+  if (naoEditado && atual !== textoLote) patch.textoResposta = textoLote;
+  return Object.keys(patch).length > 0 ? patch : null;
+}
 function assinaturaTexto(t) {
   const s = String(t || "");
   let soma = 0;
@@ -15853,14 +15867,10 @@ async function sincronizarLoteBase(lote, companies, ctx) {
     const mudouStatusLote = existente.loteStatus !== lote.status;
     registro = { ...existente };
     const mudouArquivos = JSON.stringify(existente.arquivosPreenchimento || []) !== JSON.stringify(arquivosPre);
-    const textoAtual = typeof existente.textoResposta === "string" ? existente.textoResposta : "";
-    const textoNaoEditado = typeof existente.textoRespostaLote !== "string" ? textoAtual.trim() === "" : textoAtual === existente.textoRespostaLote;
-    const mudouTexto = (existente.textoRespostaLote || "") !== textoLote || (textoNaoEditado && textoAtual !== textoLote);
+    const patchTexto = patchTextoRespostaDoLote(existente, lote);
+    const mudouTexto = !!patchTexto;
     let mudou = mudouResumo || mudouStatusLote || mudouArquivos || mudouTexto;
-    if (mudouTexto) {
-      registro.textoRespostaLote = textoLote;
-      if (textoNaoEditado) registro.textoResposta = textoLote;
-    }
+    if (patchTexto) Object.assign(registro, patchTexto);
     const ultimoEvStatus = [...(existente.historico || [])].reverse().find((ev) => ev.evento === "status_alterado" || ev.evento === "criada");
     // Só reabre uma homologação já "concluída" por causa dos arquivos quando
     // a conclusão foi automática (envio em lote) — nunca uma conclusão manual.
@@ -17690,6 +17700,29 @@ function HomologacaoEnvioDetalhe({ homolog: h, isAdmin, revelando, credRevelada,
   useEffect(() => {
     setTextoRespostaEdit(textoRespostaSalvo);
   }, [textoRespostaSalvo]);
+  const textoRespostaAlterado = textoRespostaEdit.trim() !== textoRespostaSalvo.trim();
+  // Ao abrir uma Homologação vinda do Envio em Lote, traz o texto escrito lá (se o campo ainda não foi
+  // editado aqui) — cobre registros criados antes do campo existir, sem depender de abrir o lote.
+  useEffect(() => {
+    if (h.origem !== "envio_lote" || !h.loteId) return undefined;
+    let cancel = false;
+    (async () => {
+      try {
+        const db = await getDb();
+        if (!db) return;
+        const snap = await db.collection("batch_document_submissions").get();
+        const d = snap.docs.find((x) => x.id === h.loteId);
+        if (cancel || !d) return;
+        const patch = patchTextoRespostaDoLote(h, d.data());
+        if (patch) onUpdate(h.id, patch);
+      } catch (e) {
+        /* sem acesso ao lote agora: o campo segue como está */
+      }
+    })();
+    return () => {
+      cancel = true;
+    };
+  }, [h.id, h.loteId]);
   const [editandoBases, setEditandoBases] = useState(false);
   const [basesEdit, setBasesEdit] = useState(h.bases || []);
   const [confirmandoExclusao, setConfirmandoExclusao] = useState(false);
@@ -17755,7 +17788,7 @@ function HomologacaoEnvioDetalhe({ homolog: h, isAdmin, revelando, credRevelada,
         para: novoStatus,
       }),
       // texto digitado e ainda não salvo vale ao concluir (vai no e-mail)
-      ...(novoStatus === "concluida" && textoRespostaEdit.trim() !== textoRespostaSalvo.trim()
+      ...(novoStatus === "concluida" && textoRespostaAlterado
         ? { textoResposta: textoRespostaEdit.trim() }
         : {}),
     };
@@ -18473,9 +18506,7 @@ function HomologacaoEnvioDetalhe({ homolog: h, isAdmin, revelando, credRevelada,
       /*#__PURE__*/ React.createElement(
         "p",
         { className: "homolog-bases-hint" },
-        h.origem === "envio_lote"
-          ? "Informações escritas no Envio de Documentações em Lote. Você pode ajustar o texto aqui. Ao marcar como “Concluída”, ele vai no corpo do e-mail enviado ao consultor, junto com os arquivos de resposta."
-          : "Escreva aqui o que deve ser devolvido ao solicitante. Ao marcar como “Concluída”, o texto vai no corpo do e-mail enviado ao consultor, junto com os arquivos de resposta.",
+        "Texto escrito no Envio de Documentações em Lote para este cliente. Edite como um texto normal. Ao marcar como “Concluída”, ele vai no corpo do e-mail enviado ao consultor, junto com os arquivos de resposta.",
       ),
       /*#__PURE__*/ React.createElement("textarea", {
         className: "homolog-texto-resposta",
@@ -18484,7 +18515,7 @@ function HomologacaoEnvioDetalhe({ homolog: h, isAdmin, revelando, credRevelada,
         maxLength: TEXTO_CLIENTE_MAX_CHARS,
         value: textoRespostaEdit,
         onChange: (e) => setTextoRespostaEdit(e.target.value),
-        placeholder: "Ex.: Dados do responsável pelo cadastro: nome completo, telefone, e-mail...",
+        placeholder: "Nenhum texto escrito ainda. Digite aqui o texto de resposta ao solicitante.",
       }),
       /*#__PURE__*/ React.createElement(
         "div",
@@ -18495,12 +18526,12 @@ function HomologacaoEnvioDetalhe({ homolog: h, isAdmin, revelando, credRevelada,
             type: "button",
             className: "mini-download-btn",
             "data-testid": "texto-resposta-salvar",
-            disabled: textoRespostaEdit.trim() === textoRespostaSalvo.trim(),
+            disabled: !textoRespostaAlterado,
             onClick: handleSalvarTextoResposta,
           },
           "Salvar texto",
         ),
-        textoRespostaEdit.trim() !== textoRespostaSalvo.trim() &&
+        textoRespostaAlterado &&
           /*#__PURE__*/ React.createElement("span", { className: "homolog-bases-hint" }, "Alterações não salvas"),
       ),
     ),
